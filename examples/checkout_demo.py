@@ -37,6 +37,9 @@ class PaymentProvider:
     ) -> Charge:
         if idempotency_key is not None and idempotency_key in self._by_key:
             charge = self._by_key[idempotency_key]
+            self.events.append(
+                {"type": "idempotency_key_reused", "order_id": order_id}
+            )
         else:
             charge = Charge(order_id, amount_cents, idempotency_key)
             self.charges.append(charge)
@@ -119,7 +122,7 @@ def run_case(scenario: dict[str, Any], implementation: str) -> dict[str, Any]:
 
 
 def print_report(report: dict[str, Any]) -> None:
-    print(f"{report['implementation'].title()} checkout — {report['scenario']}")
+    print(f"{report['implementation'].title()} checkout - {report['scenario']}")
     print(f"  order: {report['order_id']}")
     print(f"  payment attempts: {report['attempts']}")
     print(f"  successful charges: {len(report['charges'])}")

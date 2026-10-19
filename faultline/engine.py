@@ -7,7 +7,7 @@ import time
 from http.client import HTTPConnection
 from typing import Any
 
-from . import store
+from . import adapters, store
 from .adapters import provider
 
 
@@ -74,7 +74,7 @@ def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> N
         store.record_event(run_id, "CHECKOUT_HTTP_REQUEST", {"method": "POST", "path": "/v1/checkout", "body": json.loads(body)})
         if signal.is_set():
             raise RunCancelled()
-        connection = HTTPConnection("127.0.0.1", 8766, timeout=timeout_seconds + 2)
+        connection = HTTPConnection("127.0.0.1", adapters.CHECKOUT_PORT, timeout=timeout_seconds + 2)
         with _active_lock:
             _active_connections[run_id] = connection
         if signal.is_set():

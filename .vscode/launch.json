@@ -20,6 +20,23 @@
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "justMyCode": false
+    },
+    {
+      "name": "Faultline: Debug CLI scenario",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "faultline.cli",
+      "args": ["run", "--scenario", "payment-response-lost", "--implementation", "fixed"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Faultline: Debug dashboard JavaScript",
+      "type": "pwa-chrome",
+      "request": "launch",
+      "url": "http://127.0.0.1:8000/",
+      "webRoot": "${workspaceFolder}/faultline/web"
     }
   ]
 }

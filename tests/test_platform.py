@@ -12,6 +12,7 @@ from http.server import ThreadingHTTPServer
 
 from faultline import engine, store
 from faultline.adapters import provider, start_local_services
+from faultline import adapters
 from faultline.server import ControlPlaneHandler
 
 
@@ -23,10 +24,11 @@ class FaultlinePlatformTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.temp_dir = tempfile.TemporaryDirectory(dir=ROOT)
         cls.old_data_dir, cls.old_db_path = store.DATA_DIR, store.DB_PATH
+        cls.old_checkout_port, cls.old_payment_port = adapters.CHECKOUT_PORT, adapters.PAYMENT_PORT
         store.DATA_DIR = Path(cls.temp_dir.name)
         store.DB_PATH = store.DATA_DIR / "test.sqlite3"
         store.initialize()
-        cls.local_services = start_local_services()
+        cls.local_services = start_local_services(checkout_port=0, payment_port=0)
         cls.api = ThreadingHTTPServer(("127.0.0.1", 0), ControlPlaneHandler)
         cls.api_thread = threading.Thread(target=cls.api.serve_forever, daemon=True)
         cls.api_thread.start()
@@ -43,6 +45,7 @@ class FaultlinePlatformTests(unittest.TestCase):
         provider.idempotency.clear()
         provider.faulted_runs.clear()
         store.DATA_DIR, store.DB_PATH = cls.old_data_dir, cls.old_db_path
+        adapters.CHECKOUT_PORT, adapters.PAYMENT_PORT = cls.old_checkout_port, cls.old_payment_port
         cls.temp_dir.cleanup()
 
     def request(self, method: str, path: str, payload: dict | None = None) -> tuple[int, dict]:
@@ -56,16 +59,16 @@ class FaultlinePlatformTests(unittest.TestCase):
         connection.close()
         return response.status, result
 
-    def launch_and_wait(self, implementation: str) -> dict:
+    def launch_and_wait(self, implementation: str, scenario_id: str = "payment-response-lost") -> dict:
         status, payload = self.request(
             "POST", "/api/runs",
-            {"scenario_id": "payment-response-lost", "implementation": implementation},
+            {"scenario_id": scenario_id, "implementation": implementation},
         )
         self.assertEqual(status, 202)
         for _ in range(60):
             status, result = self.request("GET", f"/api/runs/{payload['run_id']}")
             self.assertEqual(status, 200)
-            if result["run"]["status"] in {"completed", "failed"}:
+            if result["run"]["status"] in {"completed", "failed", "cancelled", "timed_out"}:
                 return result["run"]
             time.sleep(0.05)
         self.fail("run did not finish within the expected local execution window")
@@ -112,7 +115,8 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertTrue(all(item["status"] == "passed" for item in run["assertions"]))
 
     def test_scenario_versions_are_immutable_and_reproduction_bundle_is_available(self) -> None:
-        initial = self.request("GET", "/api/scenarios")[1]["scenarios"][0]
+        scenarios = self.request("GET", "/api/scenarios")[1]["scenarios"]
+        initial = next(item for item in scenarios if item["id"] == "payment-response-lost")
         edited = dict(initial["definition"], amount_cents=3100)
         status, result = self.request("POST", f"/api/scenarios/{initial['id']}/versions", {"definition": edited})
         self.assertEqual((status, result["version"]), (201, 2))
@@ -120,10 +124,15 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertEqual([item["version"] for item in versions], [2, 1])
         self.assertEqual(versions[1]["definition"]["amount_cents"], initial["definition"]["amount_cents"])
         run = self.launch_and_wait("fixed")
+        self.assertEqual(run["scenario_version"], 2)
+        self.assertEqual(run["scenario"]["amount_cents"], 3100)
         status, bundle = self.request("GET", f"/api/runs/{run['id']}/reproduce")
         self.assertEqual(status, 200)
         self.assertEqual(bundle["format"], "faultline-repro-v1")
-        self.assertIn("PAYMENT_HTTP_REQUEST", [event["type"] for event in bundle["run"]["events"]])
+        event_types = [event["type"] for event in bundle["run"]["events"]]
+        self.assertIn("CHECKOUT_HTTP_REQUEST", event_types)
+        self.assertIn("PAYMENT_HTTP_REQUEST", event_types)
+        self.assertIn("PAYMENT_HTTP_RESPONSE", event_types)
 
     def test_invalid_scenario_is_rejected_with_validation_feedback(self) -> None:
         status, result = self.request("POST", "/api/scenarios/validate", {"definition": {"name": "broken"}})
@@ -143,6 +152,9 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertEqual(created["scenario_id"], "custom-payment-check")
         versions = self.request("GET", "/api/scenarios/custom-payment-check/versions")[1]["versions"]
         self.assertEqual(versions[0]["version"], 1)
+        run = self.launch_and_wait("fixed", "custom-payment-check")
+        self.assertEqual(run["scenario"]["order_id"], "order-custom")
+        self.assertEqual(run["scenario_version"], 1)
 
     def test_queued_run_can_be_cancelled_and_reaches_terminal_state(self) -> None:
         with patch("faultline.server.submit"):

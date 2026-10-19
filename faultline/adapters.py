@@ -18,6 +18,8 @@ from . import store
 
 
 logger = logging.getLogger("faultline.adapter.http")
+CHECKOUT_PORT = 8766
+PAYMENT_PORT = 8767
 
 
 class TestPaymentProvider:
@@ -150,7 +152,7 @@ class CheckoutHandler(BaseHTTPRequestHandler):
                 })
                 store.record_event(run_id, "PAYMENT_HTTP_REQUEST", {"method": "POST", "path": "/v1/charges", "attempt": attempt + 1,
                                                                         "body": json.loads(request_body)})
-                connection = HTTPConnection("127.0.0.1", 8767, timeout=min(3, remaining))
+                connection = HTTPConnection("127.0.0.1", PAYMENT_PORT, timeout=min(3, remaining))
                 try:
                     headers = {"Content-Type": "application/json"}
                     if payload["fault"]:
@@ -186,10 +188,15 @@ class CheckoutHandler(BaseHTTPRequestHandler):
         return
 
 
-def start_local_services() -> list[ThreadingHTTPServer]:
+def start_local_services(*, checkout_port: int = 8766, payment_port: int = 8767) -> list[ThreadingHTTPServer]:
+    global CHECKOUT_PORT, PAYMENT_PORT
     servers: list[ThreadingHTTPServer] = []
-    for port, handler in ((8767, ProviderHandler), (8766, CheckoutHandler)):
+    for port, handler in ((payment_port, ProviderHandler), (checkout_port, CheckoutHandler)):
         server = ThreadingHTTPServer(("127.0.0.1", port), handler)
-        threading.Thread(target=server.serve_forever, daemon=True, name=f"faultline-local-{port}").start()
         servers.append(server)
+    PAYMENT_PORT = servers[0].server_address[1]
+    CHECKOUT_PORT = servers[1].server_address[1]
+    for server in servers:
+        threading.Thread(target=server.serve_forever, daemon=True,
+                         name=f"faultline-local-{server.server_address[1]}").start()
     return servers

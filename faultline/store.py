@@ -175,13 +175,31 @@ def create_run(run_id: str, scenario_id: str, scenario_version: int, implementat
         )
 
 
-def update_run(run_id: str, *, status: str, verdict: str, summary: dict[str, Any] | None = None,
-               error: str | None = None, finished: bool = False) -> None:
+def transition_run(run_id: str, status: str, *, verdict: str = "pending", error: str | None = None,
+                   summary: dict[str, Any] | None = None, finished: bool = False) -> bool:
+    allowed = {
+        "queued": {"running", "cancel_requested", "cancelled", "failed", "timed_out"},
+        "running": {"cancel_requested", "cancelled", "completed", "failed", "timed_out"},
+        "cancel_requested": {"cancelled", "timed_out", "failed"},
+    }
     with database() as db:
-        db.execute(
-            "UPDATE runs SET status=?, verdict=?, summary_json=?, error=?, finished_at=? WHERE id=?",
-            (status, verdict, json.dumps(summary or {}), error, now() if finished else None, run_id),
-        )
+        row = db.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
+        if row is None or status not in allowed.get(row["status"], set()):
+            return False
+        db.execute("UPDATE runs SET status=?, verdict=?, summary_json=COALESCE(?, summary_json), error=?, finished_at=? WHERE id=?",
+                   (status, verdict, json.dumps(summary) if summary is not None else None, error,
+                    now() if finished else None, run_id))
+        return True
+
+
+def run_status(run_id: str) -> str | None:
+    with database() as db:
+        row = db.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
+        return row["status"] if row else None
+
+
+def request_cancel(run_id: str) -> bool:
+    return transition_run(run_id, "cancel_requested")
 
 
 def record_event(run_id: str, event_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:

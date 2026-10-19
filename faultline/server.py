@@ -13,6 +13,7 @@ from uuid import uuid4
 from . import store
 from .adapters import start_local_services
 from .engine import submit
+from . import engine
 
 
 WEB_ROOT = Path(__file__).resolve().parent / "web"
@@ -20,7 +21,7 @@ logger = logging.getLogger("faultline.control")
 
 
 def validate_scenario(definition: dict[str, Any]) -> None:
-    if definition.get("scenario_version") != 1:
+    if type(definition.get("scenario_version")) is not int or definition["scenario_version"] != 1:
         raise ValueError("unsupported scenario_version")
     if definition.get("fault") != "payment_response_lost_after_commit":
         raise ValueError("unsupported fault type")
@@ -34,6 +35,9 @@ def validate_scenario(definition: dict[str, Any]) -> None:
         raise ValueError("amount_cents must be a positive integer")
     if type(definition.get("retries")) is not int or not 0 <= definition["retries"] <= 3:
         raise ValueError("retries must be between zero and three")
+    timeout = definition.get("timeout_seconds", 15)
+    if type(timeout) is not int or not 2 <= timeout <= 60:
+        raise ValueError("timeout_seconds must be between two and sixty")
 
 
 class ControlPlaneHandler(BaseHTTPRequestHandler):
@@ -89,7 +93,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path not in {"/api/runs", "/api/scenarios", "/api/scenarios/validate"} and not re.fullmatch(r"/api/scenarios/[^/]+/versions", path):
+        if path not in {"/api/runs", "/api/scenarios", "/api/scenarios/validate"} and not re.fullmatch(r"/api/scenarios/[^/]+/versions", path) and not re.fullmatch(r"/api/runs/[^/]+/cancel", path):
             self.respond(404, {"error": "not found"})
             return
         try:
@@ -99,6 +103,15 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 return
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload, dict): raise ValueError("request body must be a JSON object")
+            cancel_match = re.fullmatch(r"/api/runs/([^/]+)/cancel", path)
+            if cancel_match:
+                run_id = cancel_match.group(1)
+                if engine.cancel(run_id):
+                    self.respond(202, {"run_id": run_id, "status": "cancel_requested"})
+                else:
+                    run = store.get_run(run_id)
+                    self.respond(409, {"error": "run is not cancellable", "status": run["status"] if run else "not_found"})
+                return
             if path == "/api/scenarios/validate":
                 definition = payload.get("definition", payload)
                 validate_scenario(definition)

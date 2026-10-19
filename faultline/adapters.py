@@ -8,6 +8,7 @@ import json
 import logging
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.client import HTTPConnection, HTTPException
 from typing import Any
@@ -128,10 +129,17 @@ class CheckoutHandler(BaseHTTPRequestHandler):
             fixed = payload["implementation"] == "fixed"
             amount_cents = payload["amount_cents"]
             retries = payload["retries"]
+            deadline = time.monotonic() + payload.get("timeout_seconds", 15)
             store.record_event(run_id, "CHECKOUT_STARTED", {"order_id": order_id, "implementation": payload["implementation"]})
             charge = None
             attempts = 0
             for attempt in range(retries + 1):
+                if store.run_status(run_id) == "cancel_requested":
+                    store.record_event(run_id, "CHECKOUT_CANCEL_OBSERVED", {"attempt": attempt + 1})
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("scenario execution deadline exceeded")
                 attempts += 1
                 store.record_event(run_id, "PAYMENT_ATTEMPT_STARTED", {"attempt": attempt + 1})
                 request_body = json.dumps({
@@ -142,7 +150,7 @@ class CheckoutHandler(BaseHTTPRequestHandler):
                 })
                 store.record_event(run_id, "PAYMENT_HTTP_REQUEST", {"method": "POST", "path": "/v1/charges", "attempt": attempt + 1,
                                                                         "body": json.loads(request_body)})
-                connection = HTTPConnection("127.0.0.1", 8767, timeout=3)
+                connection = HTTPConnection("127.0.0.1", 8767, timeout=min(3, remaining))
                 try:
                     headers = {"Content-Type": "application/json"}
                     if payload["fault"]:
@@ -158,12 +166,16 @@ class CheckoutHandler(BaseHTTPRequestHandler):
                 except (OSError, HTTPException, TimeoutError) as exc:
                     store.record_event(run_id, "CHECKOUT_PAYMENT_OUTCOME_UNKNOWN", {"attempt": attempt + 1, "reason": type(exc).__name__})
                     if attempt < retries:
+                        if deadline - time.monotonic() <= 0:
+                            raise TimeoutError("scenario execution deadline exceeded")
                         store.record_event(run_id, "CHECKOUT_RETRY_SCHEDULED", {"attempt": attempt + 1})
                 finally:
                     connection.close()
             status = "paid" if charge else "payment_unknown"
             store.record_event(run_id, "CHECKOUT_REACHED_TERMINAL_STATE", {"order_id": order_id, "status": status, "attempts": attempts})
             json_reply(self, 200, {"order_id": order_id, "status": status, "attempts": attempts, "charge": charge})
+        except TimeoutError as exc:
+            json_reply(self, 408, {"error": str(exc)})
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
             json_reply(self, 400, {"error": str(exc)})
         except Exception as exc:

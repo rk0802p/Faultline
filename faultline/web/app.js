@@ -64,20 +64,28 @@ function renderRun(run) {
     <span class="charge-chip"><i></i><strong>${escapeHtml(charge.id)}</strong><span>${escapeHtml((charge.amount_cents / 100).toLocaleString(undefined, { style: "currency", currency: "USD" }))}</span><small>${escapeHtml(charge.status)}</small></span>`).join("")
     : '<span class="ledger-empty">No committed charge recorded yet.</span>';
 
+  const evidenceEvents = (item) => item.evidence.map((evidence) => {
+    const event = run.events.find((candidate) => candidate.type === evidence ||
+      (evidence.startsWith("charge:") && candidate.type === "PROVIDER_CHARGE_COMMITTED" && candidate.payload.charge_id === evidence.slice(7)));
+    return event ? `<a class="evidence-link" href="#event-${event.sequence}">View event ${event.sequence}</a>` : "";
+  }).filter(Boolean).join(" ");
   $("#assertion-list").innerHTML = run.assertions.length ? run.assertions.map((item) => `
     <div class="assertion-row"><span class="assertion-state ${escapeHtml(item.status)}">${item.status === "passed" ? "✓" : "×"}</span>
-      <div class="assertion-copy"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.observed)}</small></div></div>`).join("")
+      <div class="assertion-copy"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.observed)}</small><span>${evidenceEvents(item)}</span></div></div>`).join("")
     : '<div class="assertion-row"><span class="assertion-state">·</span><div class="assertion-copy"><strong>Waiting for evaluation</strong><small>Assertions appear when the run finishes.</small></div></div>';
 
   $("#event-list").innerHTML = run.events.map((event) => {
     const tone = event.type.includes("DROPPED") || event.type.includes("UNKNOWN") ? "fault" :
       (event.type.includes("COMPLETED") || event.type.includes("COMMITTED") ? "good" : "");
     const detail = Object.entries(event.payload || {}).map(([key, value]) => `${key}: ${value}`).join(" · ");
-    return `<li class="event-item ${tone}"><strong>${String(event.sequence).padStart(2, "0")} · ${escapeHtml(event.type.replaceAll("_", " "))}</strong><small>${escapeHtml(detail || formatTime(event.recorded_at))}</small></li>`;
+    return `<li class="event-item ${tone}" id="event-${event.sequence}"><strong>${String(event.sequence).padStart(2, "0")} · ${escapeHtml(event.type.replaceAll("_", " "))}</strong><small>${escapeHtml(detail || formatTime(event.recorded_at))}</small></li>`;
   }).join("") || '<li class="event-item"><strong>Waiting for events</strong><small>The runner is preparing the local test environment.</small></li>';
   $("#copy-run-id").dataset.runId = run.id;
   $("#download-repro").href = `/api/runs/${encodeURIComponent(run.id)}/reproduce`;
-  if (run.status === "queued" || run.status === "running") schedulePoll(run.id);
+  const active = ["queued", "running", "cancel_requested"].includes(run.status);
+  $("#cancel-run").hidden = !["queued", "running"].includes(run.status);
+  $("#cancel-run").dataset.runId = run.id;
+  if (active) schedulePoll(run.id);
 }
 
 async function openRun(runId) {
@@ -93,8 +101,12 @@ async function openRun(runId) {
 function schedulePoll(runId) {
   if (state.pollTimer) window.clearTimeout(state.pollTimer);
   state.pollTimer = window.setTimeout(async () => {
-    await refreshRuns();
-    if (state.selectedRunId === runId) await openRun(runId);
+    try {
+      await refreshRuns();
+      if (state.selectedRunId === runId) await openRun(runId);
+    } catch {
+      if (state.selectedRunId === runId) state.pollTimer = window.setTimeout(() => schedulePoll(runId), 1800);
+    }
   }, 650);
 }
 
@@ -138,14 +150,31 @@ async function initialize() {
 function setScenarioEditor() {
   const selected = state.scenarios.find((item) => item.id === $("#scenario-select").value);
   const definition = selected?.definition || { scenario_version: 1, name: "new-payment-scenario", description: "", order_id: "order-new", amount_cents: 2500, fault: "payment_response_lost_after_commit", retries: 1, assertion: "no_duplicate_charge" };
-  $("#scenario-json").value = JSON.stringify(definition, null, 2);
+  state.editorDefinition = definition;
+  document.querySelectorAll("[data-field]").forEach((input) => {
+    const field = input.dataset.field;
+    input.value = definition[field] ?? (field === "timeout_seconds" ? 15 : "");
+  });
+  updateScenarioPreview();
   $("#save-scenario").textContent = selected ? "Save new version" : "Create scenario";
+}
+
+function updateScenarioPreview() {
+  if (!state.editorDefinition) return;
+  const definition = { ...state.editorDefinition };
+  document.querySelectorAll("[data-field]").forEach((input) => {
+    const field = input.dataset.field;
+    definition[field] = input.type === "number" ? Number(input.value) : input.value;
+  });
+  state.editorDefinition = definition;
+  $("#scenario-json").value = JSON.stringify(definition, null, 2);
 }
 
 async function submitScenario(save) {
   const feedback = $("#scenario-feedback");
   try {
-    const definition = JSON.parse($("#scenario-json").value);
+    updateScenarioPreview();
+    const definition = state.editorDefinition;
     if (!save) {
       const result = await request("/api/scenarios/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ definition }) });
       feedback.textContent = result.valid ? "Definition is valid." : "Definition is invalid.";
@@ -173,5 +202,14 @@ $("#copy-run-id").addEventListener("click", async (event) => {
 $("#scenario-select").addEventListener("change", setScenarioEditor);
 $("#validate-scenario").addEventListener("click", () => submitScenario(false));
 $("#save-scenario").addEventListener("click", () => submitScenario(true));
+document.querySelectorAll("[data-field]").forEach((input) => input.addEventListener("input", updateScenarioPreview));
+$("#cancel-run").addEventListener("click", async (event) => {
+  const runId = event.currentTarget.dataset.runId;
+  try {
+    await request(`/api/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    toast("Cancellation requested");
+    await openRun(runId);
+  } catch (error) { toast(error.message); }
+});
 
 initialize();

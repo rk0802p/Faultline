@@ -52,17 +52,19 @@ Delivered:
 
 ## Phase 2 — Usable authoring and debugging
 
-**Status: In progress.** The first authoring and reproduction slice is available; lifecycle controls and visual workflow authoring remain.
+**Status: Complete for the current payment response-lost workflow.**
 
 - [x] Create scenarios, edit definitions into immutable versions, and receive pre-save validation feedback.
 - [x] Pin each run to the scenario version used and retain a SHA-256 definition checksum.
 - [x] Record sanitized checkout/payment HTTP request and response bodies in the event timeline.
 - [x] Download a JSON reproduction bundle with the scenario, run evidence, and replay command.
 - [x] Execute runs through the same API using `python -m faultline.cli run --scenario payment-response-lost --implementation fixed`.
-- [ ] Add an explicit run state machine, cancellation, and bounded execution timeouts.
-- [ ] Add assertion-to-event navigation and visual workflow authoring after the scenario model stabilizes.
+- [x] Enforce run transitions through queued, running, cancellation requested, and terminal states; support cancellation and scenario timeouts.
+- [x] Keep run status updates reconnectable by polling and retry transient API connection failures.
+- [x] Link each invariant's evidence directly to its corresponding event in the timeline.
+- [x] Provide a visual scenario designer for the current supported workflow, with an inspectable JSON definition.
 
-**Exit:** a developer can author, validate, execute, inspect, cancel, and reproduce scenarios through both the product and CLI.
+**Exit:** a developer can author, validate, execute, inspect, cancel, and reproduce scenarios through both the product and CLI. Met for the current supported workflow.
 
 ## Phase 3 — Integration depth
 
@@ -82,7 +84,7 @@ Delivered:
 
 ## Full MVP scope from the brief
 
-The completed Phase 1 slice is the foundation; it is not the full MVP. Remaining MVP work includes three supported scenarios, Docker Compose deployment, at least four meaningful invariants across those scenarios, scenario replay, CLI execution, and full automated end-to-end coverage. Production chaos injection, arbitrary executable scenario code, Kubernetes orchestration, and dozens of adapters remain out of scope.
+The completed Phase 2 slice is the authoring and debugging foundation; it is not the full MVP. Remaining MVP work includes broadening beyond the payment response-lost workflow, Docker Compose deployment, reusable replay across supported scenario types, and full automated end-to-end coverage. Production chaos injection, arbitrary executable scenario code, Kubernetes orchestration, and dozens of adapters remain out of scope.
 
 ## GitHub checkpoints
 

@@ -29,9 +29,11 @@ def main() -> int:
         deadline = time.monotonic() + args.timeout
         while time.monotonic() < deadline:
             result = api_json(base + "/api/runs/" + submitted["run_id"])["run"]
-            if result["status"] in {"completed", "failed"}:
+            if result["status"] in {"completed", "failed", "cancelled", "timed_out"}:
                 print(json.dumps(result, indent=2))
                 if result["status"] == "failed": return 2
+                if result["status"] == "timed_out": return 3
+                if result["status"] == "cancelled": return 4
                 return 0 if result["verdict"] == "passed" else 1
             time.sleep(0.25)
         print(f"Timed out waiting for run {submitted['run_id']}", file=sys.stderr)

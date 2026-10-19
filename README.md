@@ -17,6 +17,8 @@ Open [http://127.0.0.1:8000](http://127.0.0.1:8000). The application starts the 
 
 Use **Run vulnerable** to see the duplicate-charge defect, or **Run fixed** to verify that the same retry uses an idempotency key. Each run executes asynchronously, saves its events and assertion results in SQLite, and appears in the run history. Data is stored in `data/faultline.sqlite3`.
 
+Use the visual scenario designer to create or version a scenario. Runs can be cancelled from the run inspector; each scenario has a bounded `timeout_seconds` setting from 2 to 60 seconds (15 by default). Assertion evidence links jump to the matching event in the timeline.
+
 For detailed server, adapter, and assertion logs, start with `python -m faultline --debug`.
 
 ## What the first product slice does
@@ -30,6 +32,7 @@ For detailed server, adapter, and assertion logs, start with `python -m faultlin
 - Restricts target services to loopback; the scenario cannot supply arbitrary destinations.
 - Allows scenario creation/versioning in the dashboard, with each run retaining its scenario version.
 - Exposes request/response evidence, reproduction JSON downloads, and a CLI client that submits runs through the API.
+- Provides a visual workflow designer, assertion-to-event links, bounded scenario timeouts, and cancellable run lifecycles.
 
 The fault is local and deterministic. It makes no calls to external services and is not production chaos tooling.
 
@@ -39,6 +42,8 @@ The fault is local and deterministic. It makes no calls to external services and
 python -m unittest discover -s tests -v
 python -m faultline.cli run --scenario payment-response-lost --implementation fixed
 ```
+
+The CLI exits `0` for a passing run, `1` for an invariant failure, `2` for an execution failure, `3` for a timeout, and `4` for cancellation.
 
 Run `python -m compileall -q faultline tests` and `node --check faultline/web/app.js` for Python and browser-script syntax checks. VS Code launch and task definitions are in `.vscode/`.
 

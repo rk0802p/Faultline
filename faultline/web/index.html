@@ -45,7 +45,29 @@
       </section>
 
       <div class="section-heading" id="scenarios"><div><div class="eyebrow">START HERE</div><h2>Failure scenarios</h2></div><span class="section-subtitle">Controlled experiments against your local checkout</span></div>
-      <section class="detail-card" style="margin-bottom:22px;padding:20px"><div class="detail-title"><div><strong>Scenario authoring</strong><small>Edit the JSON definition, validate it, then save an immutable version</small></div></div><select id="scenario-select" aria-label="Scenario to edit" style="margin:12px 0;padding:8px"></select><textarea id="scenario-json" spellcheck="false" style="display:block;width:100%;min-height:180px;background:#101a2d;color:#e7edf8;border:1px solid #33415c;border-radius:8px;padding:12px;font:13px/1.5 monospace"></textarea><div style="display:flex;gap:10px;margin-top:10px"><button class="button button-secondary" id="validate-scenario">Validate</button><button class="button button-primary" id="save-scenario">Save new version</button><span id="scenario-feedback" role="status" style="align-self:center"></span></div></section>
+      <section class="detail-card scenario-editor">
+        <div class="detail-title"><div><strong>Visual scenario designer</strong><small>Configure the workflow, inspect its steps, then validate and save a version</small></div></div>
+        <select id="scenario-select" aria-label="Scenario to edit"></select>
+        <div class="designer-grid">
+          <div class="designer-fields">
+            <label>Scenario name<input data-field="name" maxlength="80"></label>
+            <label>Description<input data-field="description" maxlength="240"></label>
+            <label>Order ID<input data-field="order_id" maxlength="80"></label>
+            <label>Charge amount (cents)<input data-field="amount_cents" type="number" min="1" step="1"></label>
+            <label>Retry attempts<input data-field="retries" type="number" min="0" max="3" step="1"></label>
+            <label>Run timeout (seconds)<input data-field="timeout_seconds" type="number" min="2" max="60" step="1"></label>
+          </div>
+          <ol class="workflow-canvas" aria-label="Scenario workflow">
+            <li><span>1</span><div><strong>Checkout starts payment</strong><small>Uses the order and amount above</small></div></li>
+            <li><span>2</span><div><strong>Provider commits charge</strong><small>Local test provider records the side effect</small></div></li>
+            <li class="workflow-fault"><span>3</span><div><strong>Drop provider response</strong><small>Simulates an unknown payment outcome</small></div></li>
+            <li><span>4</span><div><strong>Checkout retries</strong><small>Runs the configured retry count</small></div></li>
+            <li><span>5</span><div><strong>Evaluate invariants</strong><small>Checks duplicate charges and terminal state</small></div></li>
+          </ol>
+        </div>
+        <details class="scenario-json-details"><summary>Scenario definition JSON</summary><textarea id="scenario-json" readonly spellcheck="false"></textarea></details>
+        <div class="designer-actions"><button class="button button-secondary" id="validate-scenario">Validate</button><button class="button button-primary" id="save-scenario">Save new version</button><span id="scenario-feedback" role="status"></span></div>
+      </section>
       <section class="scenario-grid">
         <article class="scenario-card">
           <div class="scenario-card-top"><span class="scenario-symbol">↗</span><span class="scenario-tag">PAYMENTS</span><button class="kebab" aria-label="Scenario options">···</button></div>
@@ -58,7 +80,7 @@
       </section>
 
       <section class="run-panel" id="active-run" hidden>
-        <div class="run-panel-header"><div><div class="eyebrow">RUN INSPECTOR</div><h2 id="run-title">Run details</h2></div><div class="run-status-pill" id="run-status">QUEUED</div></div>
+        <div class="run-panel-header"><div><div class="eyebrow">RUN INSPECTOR</div><h2 id="run-title">Run details</h2></div><div class="run-header-actions"><button class="button button-secondary" id="cancel-run" hidden>Cancel run</button><div class="run-status-pill" id="run-status">QUEUED</div></div></div>
         <div class="run-overview" id="run-overview"></div>
         <div class="ledger-strip"><div class="ledger-heading"><span class="ledger-icon">$</span><div><strong>Provider side-effect ledger</strong><small>Committed charges observed by the test provider</small></div></div><div class="charge-list" id="charge-list"></div></div>
         <div class="run-detail-grid"><div class="detail-card"><div class="detail-title"><span class="detail-title-icon assertion-icon">✓</span><div><strong>Business invariants</strong><small>Evaluated against recorded evidence</small></div></div><div id="assertion-list" class="assertion-list"></div></div><div class="detail-card timeline-card"><div class="detail-title"><span class="detail-title-icon timeline-icon">◷</span><div><strong>Execution timeline</strong><small>Persisted events in order</small></div></div><ol id="event-list" class="event-list"></ol></div></div>

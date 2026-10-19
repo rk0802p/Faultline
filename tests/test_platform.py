@@ -107,6 +107,25 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertIn("PROVIDER_IDEMPOTENCY_REPLAYED", [event["type"] for event in run["events"]])
         self.assertTrue(all(item["status"] == "passed" for item in run["assertions"]))
 
+    def test_scenario_versions_are_immutable_and_reproduction_bundle_is_available(self) -> None:
+        initial = self.request("GET", "/api/scenarios")[1]["scenarios"][0]
+        edited = dict(initial["definition"], amount_cents=3100)
+        status, result = self.request("POST", f"/api/scenarios/{initial['id']}/versions", {"definition": edited})
+        self.assertEqual((status, result["version"]), (201, 2))
+        versions = self.request("GET", f"/api/scenarios/{initial['id']}/versions")[1]["versions"]
+        self.assertEqual([item["version"] for item in versions], [2, 1])
+        self.assertEqual(versions[1]["definition"]["amount_cents"], initial["definition"]["amount_cents"])
+        run = self.launch_and_wait("fixed")
+        status, bundle = self.request("GET", f"/api/runs/{run['id']}/reproduce")
+        self.assertEqual(status, 200)
+        self.assertEqual(bundle["format"], "faultline-repro-v1")
+        self.assertIn("PAYMENT_HTTP_REQUEST", [event["type"] for event in bundle["run"]["events"]])
+
+    def test_invalid_scenario_is_rejected_with_validation_feedback(self) -> None:
+        status, result = self.request("POST", "/api/scenarios/validate", {"definition": {"name": "broken"}})
+        self.assertEqual(status, 400)
+        self.assertIn("unsupported scenario_version", result["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

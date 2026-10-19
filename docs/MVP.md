@@ -52,13 +52,17 @@ Delivered:
 
 ## Phase 2 — Usable authoring and debugging
 
-- Add scenario creation/editing, validation feedback, and immutable scenario versions.
-- Add reconnectable live updates and an explicit run state machine with cancellation/timeouts.
-- Inspect request/response details and improve event-to-assertion evidence navigation.
-- Export a sanitized reproduction bundle and add CLI execution against the same API.
-- Add visual workflow authoring after the scenario model stabilizes.
+**Status: In progress.** The first authoring and reproduction slice is available; lifecycle controls and visual workflow authoring remain.
 
-**Exit:** a developer can author, validate, execute, inspect, and reproduce scenarios through both the product and CLI.
+- [x] Create scenarios, edit definitions into immutable versions, and receive pre-save validation feedback.
+- [x] Pin each run to the scenario version used and retain a SHA-256 definition checksum.
+- [x] Record sanitized checkout/payment HTTP request and response bodies in the event timeline.
+- [x] Download a JSON reproduction bundle with the scenario, run evidence, and replay command.
+- [x] Execute runs through the same API using `python -m faultline.cli run --scenario payment-response-lost --implementation fixed`.
+- [ ] Add an explicit run state machine, cancellation, and bounded execution timeouts.
+- [ ] Add assertion-to-event navigation and visual workflow authoring after the scenario model stabilizes.
+
+**Exit:** a developer can author, validate, execute, inspect, cancel, and reproduce scenarios through both the product and CLI.
 
 ## Phase 3 — Integration depth
 

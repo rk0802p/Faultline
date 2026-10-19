@@ -140,6 +140,8 @@ class CheckoutHandler(BaseHTTPRequestHandler):
                     "amount_cents": amount_cents,
                     "idempotency_key": f"checkout:{order_id}" if fixed else None,
                 })
+                store.record_event(run_id, "PAYMENT_HTTP_REQUEST", {"method": "POST", "path": "/v1/charges", "attempt": attempt + 1,
+                                                                        "body": json.loads(request_body)})
                 connection = HTTPConnection("127.0.0.1", 8767, timeout=3)
                 try:
                     headers = {"Content-Type": "application/json"}
@@ -148,6 +150,8 @@ class CheckoutHandler(BaseHTTPRequestHandler):
                     connection.request("POST", "/v1/charges", request_body, headers)
                     response = connection.getresponse()
                     charge = json.loads(response.read())
+                    store.record_event(run_id, "PAYMENT_HTTP_RESPONSE", {"status": response.status, "attempt": attempt + 1,
+                                                                            "body": charge})
                     if response.status != 200:
                         raise RuntimeError(f"payment provider returned HTTP {response.status}")
                     break
@@ -163,6 +167,7 @@ class CheckoutHandler(BaseHTTPRequestHandler):
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
             json_reply(self, 400, {"error": str(exc)})
         except Exception as exc:
+            logger.exception("checkout request failed run_id=%s", payload.get("run_id", "unknown") if "payload" in locals() else "unknown")
             json_reply(self, 500, {"error": str(exc)})
 
     def log_message(self, format: str, *args: Any) -> None:

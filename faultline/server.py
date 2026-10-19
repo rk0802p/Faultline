@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -55,12 +56,29 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             self.respond(200, {"projects": store.list_projects()})
         elif path == "/api/scenarios":
             self.respond(200, {"scenarios": store.list_scenarios()})
+        elif re.fullmatch(r"/api/scenarios/[^/]+/versions", path):
+            scenario_id = path.split("/")[3]
+            versions = store.scenario_versions(scenario_id)
+            self.respond(200, {"versions": versions}) if versions else self.respond(404, {"error": "scenario not found"})
         elif path == "/api/runs":
             self.respond(200, {"runs": store.list_runs()})
         elif path.startswith("/api/runs/"):
-            run_id = path.removeprefix("/api/runs/")
-            run = store.get_run(run_id)
-            self.respond(200, {"run": run}) if run else self.respond(404, {"error": "run not found"})
+            parts = path.removeprefix("/api/runs/").split("/")
+            run_id = parts[0]
+            if len(parts) == 2 and parts[1] == "reproduce":
+                bundle = store.get_reproduction_bundle(run_id)
+                if bundle:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Disposition", f'attachment; filename="faultline-{run_id[:8]}-repro.json"')
+                    raw = json.dumps(bundle, indent=2).encode()
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                else: self.respond(404, {"error": "run not found"})
+            else:
+                run = store.get_run(run_id)
+                self.respond(200, {"run": run}) if run else self.respond(404, {"error": "run not found"})
         elif path == "/" or path == "/index.html":
             self.static_file("index.html", "text/html; charset=utf-8")
         elif path in {"/app.js", "/styles.css", "/report.css"}:
@@ -71,7 +89,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path != "/api/runs":
+        if path not in {"/api/runs", "/api/scenarios", "/api/scenarios/validate"} and not re.fullmatch(r"/api/scenarios/[^/]+/versions", path):
             self.respond(404, {"error": "not found"})
             return
         try:
@@ -80,6 +98,30 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 self.respond(413, {"error": "request too large"})
                 return
             payload = json.loads(self.rfile.read(length))
+            if not isinstance(payload, dict): raise ValueError("request body must be a JSON object")
+            if path == "/api/scenarios/validate":
+                definition = payload.get("definition", payload)
+                validate_scenario(definition)
+                self.respond(200, {"valid": True, "errors": []})
+                return
+            if path == "/api/scenarios":
+                definition = payload.get("definition")
+                validate_scenario(definition)
+                scenario_id = re.sub(r"[^a-z0-9]+", "-", definition["name"].lower()).strip("-")[:64]
+                if any(item["id"] == scenario_id for item in store.list_scenarios()): raise ValueError("scenario name already exists")
+                store.create_scenario(scenario_id, "faultline-demo", definition)
+                self.respond(201, {"scenario_id": scenario_id, "version": 1})
+                return
+            version_match = re.fullmatch(r"/api/scenarios/([^/]+)/versions", path)
+            if version_match:
+                scenario_id = version_match.group(1)
+                if not any(item["id"] == scenario_id for item in store.list_scenarios()):
+                    self.respond(404, {"error": "scenario not found"}); return
+                definition = payload.get("definition")
+                validate_scenario(definition)
+                version = store.add_scenario_version(scenario_id, definition)
+                self.respond(201, {"scenario_id": scenario_id, "version": version})
+                return
             scenario_id = payload.get("scenario_id", "payment-response-lost")
             implementation = payload.get("implementation", "vulnerable")
             if implementation not in {"vulnerable", "fixed"}:
@@ -90,7 +132,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 return
             validate_scenario(scenario["definition"])
             run_id = str(uuid4())
-            store.create_run(run_id, scenario_id, implementation)
+            store.create_run(run_id, scenario_id, scenario["version"], implementation)
             store.record_event(run_id, "RUN_QUEUED", {"scenario_id": scenario_id})
             submit(run_id, scenario["definition"], implementation)
             logger.info("submitted run_id=%s scenario=%s implementation=%s", run_id, scenario_id, implementation)

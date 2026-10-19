@@ -1,6 +1,7 @@
 """Small SQLite persistence layer for projects, scenarios, runs, and evidence."""
 
 import json
+import hashlib
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -59,9 +60,18 @@ def initialize() -> None:
                 definition_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS scenario_versions (
+                scenario_id TEXT NOT NULL REFERENCES scenarios(id) ON DELETE CASCADE,
+                version INTEGER NOT NULL,
+                definition_json TEXT NOT NULL,
+                checksum TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(scenario_id, version)
+            );
             CREATE TABLE IF NOT EXISTS runs (
                 id TEXT PRIMARY KEY,
                 scenario_id TEXT NOT NULL REFERENCES scenarios(id),
+                scenario_version INTEGER NOT NULL DEFAULT 1,
                 implementation TEXT NOT NULL,
                 status TEXT NOT NULL,
                 verdict TEXT NOT NULL DEFAULT 'pending',
@@ -90,6 +100,9 @@ def initialize() -> None:
             );
             """
         )
+        run_columns = {row["name"] for row in db.execute("PRAGMA table_info(runs)")}
+        if "scenario_version" not in run_columns:
+            db.execute("ALTER TABLE runs ADD COLUMN scenario_version INTEGER NOT NULL DEFAULT 1")
         db.execute(
             "INSERT OR IGNORE INTO projects VALUES (?, ?, ?, ?)",
             ("faultline-demo", "Checkout reliability lab", "Local, isolated checkout integration environment.", now()),
@@ -98,6 +111,15 @@ def initialize() -> None:
             "INSERT OR IGNORE INTO scenarios VALUES (?, ?, ?, ?, ?)",
             (definition["name"], "faultline-demo", definition["name"], json.dumps(definition), now()),
         )
+        existing = db.execute("SELECT 1 FROM scenario_versions WHERE scenario_id=?", (definition["name"],)).fetchone()
+        if not existing:
+            _insert_scenario_version(db, definition["name"], 1, definition)
+
+
+def _insert_scenario_version(db: sqlite3.Connection, scenario_id: str, version: int, definition: dict[str, Any]) -> None:
+    raw = json.dumps(definition, sort_keys=True, separators=(",", ":"))
+    db.execute("INSERT INTO scenario_versions VALUES (?, ?, ?, ?, ?)",
+               (scenario_id, version, raw, hashlib.sha256(raw.encode()).hexdigest(), now()))
 
 
 def list_projects() -> list[dict[str, Any]]:
@@ -110,16 +132,46 @@ def list_scenarios() -> list[dict[str, Any]]:
         rows = db.execute("SELECT * FROM scenarios ORDER BY name").fetchall()
         return [
             {"id": row["id"], "project_id": row["project_id"], "name": row["name"],
-             "definition": json.loads(row["definition_json"]), "created_at": row["created_at"]}
+             "definition": json.loads(row["definition_json"]), "created_at": row["created_at"],
+             "version": _latest_version(db, row["id"])}
             for row in rows
         ]
 
 
-def create_run(run_id: str, scenario_id: str, implementation: str) -> None:
+def _latest_version(db: sqlite3.Connection, scenario_id: str) -> int:
+    row = db.execute("SELECT MAX(version) FROM scenario_versions WHERE scenario_id=?", (scenario_id,)).fetchone()
+    return row[0] or 1
+
+
+def create_scenario(scenario_id: str, project_id: str, definition: dict[str, Any]) -> None:
+    with database() as db:
+        db.execute("INSERT INTO scenarios VALUES (?, ?, ?, ?, ?)",
+                   (scenario_id, project_id, definition["name"], json.dumps(definition), now()))
+        _insert_scenario_version(db, scenario_id, 1, definition)
+
+
+def add_scenario_version(scenario_id: str, definition: dict[str, Any]) -> int:
+    with database() as db:
+        row = db.execute("SELECT MAX(version) FROM scenario_versions WHERE scenario_id=?", (scenario_id,)).fetchone()
+        version = (row[0] or 0) + 1
+        _insert_scenario_version(db, scenario_id, version, definition)
+        db.execute("UPDATE scenarios SET name=?, definition_json=? WHERE id=?",
+                   (definition["name"], json.dumps(definition), scenario_id))
+        return version
+
+
+def scenario_versions(scenario_id: str) -> list[dict[str, Any]]:
+    with database() as db:
+        return [{"version": row["version"], "definition": json.loads(row["definition_json"]),
+                 "checksum": row["checksum"], "created_at": row["created_at"]}
+                for row in db.execute("SELECT * FROM scenario_versions WHERE scenario_id=? ORDER BY version DESC", (scenario_id,))]
+
+
+def create_run(run_id: str, scenario_id: str, scenario_version: int, implementation: str) -> None:
     with database() as db:
         db.execute(
-            "INSERT INTO runs(id, scenario_id, implementation, status, started_at) VALUES (?, ?, ?, 'queued', ?)",
-            (run_id, scenario_id, implementation, now()),
+            "INSERT INTO runs(id, scenario_id, scenario_version, implementation, status, started_at) VALUES (?, ?, ?, ?, 'queued', ?)",
+            (run_id, scenario_id, scenario_version, implementation, now()),
         )
 
 
@@ -160,7 +212,10 @@ def get_run(run_id: str) -> dict[str, Any] | None:
         row = db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         if row is None:
             return None
-        scenario = db.execute("SELECT * FROM scenarios WHERE id=?", (row["scenario_id"],)).fetchone()
+        scenario = db.execute("SELECT * FROM scenario_versions WHERE scenario_id=? AND version=?",
+                              (row["scenario_id"], row["scenario_version"])).fetchone()
+        if scenario is None:
+            scenario = db.execute("SELECT definition_json FROM scenarios WHERE id=?", (row["scenario_id"],)).fetchone()
         events = db.execute(
             "SELECT sequence, recorded_at, type, payload_json FROM run_events WHERE run_id=? ORDER BY sequence",
             (run_id,),
@@ -184,6 +239,15 @@ def get_run(run_id: str) -> dict[str, Any] | None:
         return result
 
 
+def get_reproduction_bundle(run_id: str) -> dict[str, Any] | None:
+    run = get_run(run_id)
+    if run is None:
+        return None
+    return {"format": "faultline-repro-v1", "run": run,
+            "replay": {"command": f"python -m faultline.cli run --scenario {run['scenario_id']} --implementation {run['implementation']}",
+                       "note": "Replays the recorded scenario against the local deterministic test services."}}
+
+
 def list_runs(limit: int = 30) -> list[dict[str, Any]]:
     with database() as db:
         rows = db.execute(
@@ -191,7 +255,7 @@ def list_runs(limit: int = 30) -> list[dict[str, Any]]:
             "ORDER BY r.started_at DESC LIMIT ?", (limit,)
         ).fetchall()
         return [
-            {"id": row["id"], "scenario_id": row["scenario_id"], "scenario": row["scenario_name"],
+            {"id": row["id"], "scenario_id": row["scenario_id"], "scenario_version": row["scenario_version"], "scenario": row["scenario_name"],
              "implementation": row["implementation"], "status": row["status"], "verdict": row["verdict"],
              "started_at": row["started_at"], "finished_at": row["finished_at"],
              "summary": json.loads(row["summary_json"]), "error": row["error"]}

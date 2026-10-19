@@ -28,10 +28,12 @@ def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> N
             "retries": scenario["retries"],
             "implementation": implementation,
         })
+        store.record_event(run_id, "CHECKOUT_HTTP_REQUEST", {"method": "POST", "path": "/v1/checkout", "body": json.loads(body)})
         connection = HTTPConnection("127.0.0.1", 8766, timeout=8)
         connection.request("POST", "/v1/checkout", body, {"Content-Type": "application/json"})
         response = connection.getresponse()
         checkout_result = json.loads(response.read())
+        store.record_event(run_id, "CHECKOUT_HTTP_RESPONSE", {"status": response.status, "body": checkout_result})
         connection.close()
         if response.status != 200:
             raise RuntimeError(checkout_result.get("error", f"checkout returned HTTP {response.status}"))

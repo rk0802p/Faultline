@@ -76,6 +76,7 @@ function renderRun(run) {
     return `<li class="event-item ${tone}"><strong>${String(event.sequence).padStart(2, "0")} · ${escapeHtml(event.type.replaceAll("_", " "))}</strong><small>${escapeHtml(detail || formatTime(event.recorded_at))}</small></li>`;
   }).join("") || '<li class="event-item"><strong>Waiting for events</strong><small>The runner is preparing the local test environment.</small></li>';
   $("#copy-run-id").dataset.runId = run.id;
+  $("#download-repro").href = `/api/runs/${encodeURIComponent(run.id)}/reproduce`;
   if (run.status === "queued" || run.status === "running") schedulePoll(run.id);
 }
 
@@ -107,7 +108,7 @@ async function launchRun(implementation) {
   const buttons = [...document.querySelectorAll(".run-button")];
   buttons.forEach((button) => { button.disabled = true; });
   try {
-    const scenario = state.scenarios[0];
+    const scenario = state.scenarios.find((item) => item.id === $("#scenario-select").value) || state.scenarios[0];
     if (!scenario) throw new Error("No runnable scenario is available");
     const { run_id: runId } = await request("/api/runs", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -126,8 +127,38 @@ async function initialize() {
     const [scenarioResponse] = await Promise.all([request("/api/scenarios"), refreshRuns()]);
     state.scenarios = scenarioResponse.scenarios;
     $("#scenario-count").textContent = String(state.scenarios.length);
+    const select = $("#scenario-select");
+    select.innerHTML = '<option value="">Create a new scenario…</option>' + state.scenarios.map((scenario) => `<option value="${escapeHtml(scenario.id)}">${escapeHtml(scenario.name)} · v${scenario.version}</option>`).join("");
+    select.value = state.scenarios[0]?.id || "";
+    setScenarioEditor();
     if (state.runs.length) await openRun(state.runs[0].id);
   } catch (error) { toast(`Faultline could not load: ${error.message}`); }
+}
+
+function setScenarioEditor() {
+  const selected = state.scenarios.find((item) => item.id === $("#scenario-select").value);
+  const definition = selected?.definition || { scenario_version: 1, name: "new-payment-scenario", description: "", order_id: "order-new", amount_cents: 2500, fault: "payment_response_lost_after_commit", retries: 1, assertion: "no_duplicate_charge" };
+  $("#scenario-json").value = JSON.stringify(definition, null, 2);
+  $("#save-scenario").textContent = selected ? "Save new version" : "Create scenario";
+}
+
+async function submitScenario(save) {
+  const feedback = $("#scenario-feedback");
+  try {
+    const definition = JSON.parse($("#scenario-json").value);
+    if (!save) {
+      const result = await request("/api/scenarios/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ definition }) });
+      feedback.textContent = result.valid ? "Definition is valid." : "Definition is invalid.";
+      return;
+    }
+    const selected = $("#scenario-select").value;
+    const path = selected ? `/api/scenarios/${encodeURIComponent(selected)}/versions` : "/api/scenarios";
+    const result = await request(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ definition }) });
+    feedback.textContent = `Saved ${selected ? `version ${result.version}` : "version 1"}.`;
+    await initialize();
+    if (result.scenario_id) $("#scenario-select").value = result.scenario_id;
+    setScenarioEditor();
+  } catch (error) { feedback.textContent = error.message; }
 }
 
 document.querySelectorAll(".run-button").forEach((button) => button.addEventListener("click", () => launchRun(button.dataset.implementation)));
@@ -139,5 +170,8 @@ $("#copy-run-id").addEventListener("click", async (event) => {
   try { await navigator.clipboard.writeText(runId); toast("Run ID copied"); }
   catch { toast(runId); }
 });
+$("#scenario-select").addEventListener("change", setScenarioEditor);
+$("#validate-scenario").addEventListener("click", () => submitScenario(false));
+$("#save-scenario").addEventListener("click", () => submitScenario(true));
 
 initialize();

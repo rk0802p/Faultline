@@ -28,6 +28,8 @@ For detailed server, adapter, and assertion logs, start with `python -m faultlin
 - Retries the checkout operation with or without an idempotency key.
 - Evaluates four invariants and persists a report, event timeline, and provider ledger.
 - Restricts target services to loopback; the scenario cannot supply arbitrary destinations.
+- Allows scenario creation/versioning in the dashboard, with each run retaining its scenario version.
+- Exposes request/response evidence, reproduction JSON downloads, and a CLI client that submits runs through the API.
 
 The fault is local and deterministic. It makes no calls to external services and is not production chaos tooling.
 
@@ -35,6 +37,7 @@ The fault is local and deterministic. It makes no calls to external services and
 
 ```sh
 python -m unittest discover -s tests -v
+python -m faultline.cli run --scenario payment-response-lost --implementation fixed
 ```
 
 Run `python -m compileall -q faultline tests` and `node --check faultline/web/app.js` for Python and browser-script syntax checks. VS Code launch and task definitions are in `.vscode/`.

@@ -1,0 +1,23 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Faultline: Test",
+      "type": "shell",
+      "command": "python -m unittest discover -s tests -v",
+      "problemMatcher": []
+    },
+    {
+      "label": "Faultline: Python syntax",
+      "type": "shell",
+      "command": "python -m compileall -q faultline tests",
+      "problemMatcher": []
+    },
+    {
+      "label": "Faultline: Browser JavaScript syntax",
+      "type": "shell",
+      "command": "node --check faultline/web/app.js",
+      "problemMatcher": []
+    }
+  ]
+}

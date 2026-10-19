@@ -1,6 +1,7 @@
 """Background scenario execution for the local checkout environment."""
 
 import json
+import logging
 import threading
 from http.client import HTTPConnection
 from typing import Any
@@ -9,7 +10,11 @@ from . import store
 from .adapters import provider
 
 
+logger = logging.getLogger("faultline.runner")
+
+
 def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> None:
+    logger.debug("run starting run_id=%s scenario=%s implementation=%s", run_id, scenario["name"], implementation)
     store.update_run(run_id, status="running", verdict="pending")
     store.record_event(run_id, "RUN_STARTED", {"implementation": implementation})
     try:
@@ -67,6 +72,11 @@ def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> N
         store.record_event(run_id, "ASSERTIONS_EVALUATED", {"count": len(assertions)})
         store.replace_assertions(run_id, assertions)
         verdict = "passed" if all(item["status"] == "passed" for item in assertions) else "failed"
+        logger.debug(
+            "assertions evaluated run_id=%s verdict=%s charges=%d failed=%s",
+            run_id, verdict, len(provider_charges),
+            [item["name"] for item in assertions if item["status"] == "failed"],
+        )
         summary = {
             "order_id": checkout_result["order_id"],
             "checkout_status": checkout_result["status"],
@@ -79,7 +89,9 @@ def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> N
         provider.cleanup(run_id)
         store.record_event(run_id, "RUN_COMPLETED", {"verdict": verdict})
         store.update_run(run_id, status="completed", verdict=verdict, summary=summary, finished=True)
+        logger.info("run completed run_id=%s verdict=%s", run_id, verdict)
     except Exception as exc:
+        logger.exception("run execution failed run_id=%s", run_id)
         store.record_event(run_id, "RUN_EXECUTION_FAILED", {"error": str(exc)[:500]})
         store.update_run(run_id, status="failed", verdict="error", error=str(exc)[:1000], finished=True)
 

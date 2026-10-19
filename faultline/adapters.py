@@ -5,6 +5,7 @@ provider. It commits a charge, then closes the connection before the response.
 """
 
 import json
+import logging
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,6 +14,9 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from . import store
+
+
+logger = logging.getLogger("faultline.adapter.http")
 
 
 class TestPaymentProvider:
@@ -28,6 +32,7 @@ class TestPaymentProvider:
         with self.lock:
             if key and (run_id, key) in self.idempotency:
                 result = self.idempotency[(run_id, key)]
+                logger.debug("idempotency replay run_id=%s charge_id=%s", run_id, result["id"])
                 store.record_event(run_id, "PROVIDER_IDEMPOTENCY_REPLAYED", {"charge_id": result["id"]})
                 return result, False
             result = {
@@ -44,6 +49,7 @@ class TestPaymentProvider:
             should_lose = lose_response and run_id not in self.faulted_runs
             if should_lose:
                 self.faulted_runs.add(run_id)
+                logger.debug("dropping provider response after commit run_id=%s charge_id=%s", run_id, result["id"])
                 store.record_event(run_id, "FAULT_RESPONSE_DROPPED", {"adapter": "local-http", "after_commit": True})
             return result, should_lose
 

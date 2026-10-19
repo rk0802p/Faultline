@@ -17,6 +17,8 @@ Open [http://127.0.0.1:8000](http://127.0.0.1:8000). The application starts the 
 
 Use **Run vulnerable** to see the duplicate-charge defect, or **Run fixed** to verify that the same retry uses an idempotency key. Each run executes asynchronously, saves its events and assertion results in SQLite, and appears in the run history. Data is stored in `data/faultline.sqlite3`.
 
+For detailed server, adapter, and assertion logs, start with `python -m faultline --debug`.
+
 ## What the first product slice does
 
 - Serves a workspace dashboard and control-plane API.
@@ -34,6 +36,8 @@ The fault is local and deterministic. It makes no calls to external services and
 ```sh
 python -m unittest discover -s tests -v
 ```
+
+Run `python -m compileall -q faultline tests` and `node --check faultline/web/app.js` for Python and browser-script syntax checks. VS Code launch and task definitions are in `.vscode/`.
 
 ## Project plan
 

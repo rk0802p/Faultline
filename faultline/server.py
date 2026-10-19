@@ -1,6 +1,7 @@
 """Faultline control-plane API and local product web server."""
 
 import json
+import logging
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -14,6 +15,7 @@ from .engine import submit
 
 
 WEB_ROOT = Path(__file__).resolve().parent / "web"
+logger = logging.getLogger("faultline.control")
 
 
 def validate_scenario(definition: dict[str, Any]) -> None:
@@ -91,6 +93,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             store.create_run(run_id, scenario_id, implementation)
             store.record_event(run_id, "RUN_QUEUED", {"scenario_id": scenario_id})
             submit(run_id, scenario["definition"], implementation)
+            logger.info("submitted run_id=%s scenario=%s implementation=%s", run_id, scenario_id, implementation)
             self.respond(202, {"run_id": run_id, "status": "queued"})
         except (ValueError, TypeError, AttributeError, json.JSONDecodeError) as exc:
             self.respond(400, {"error": str(exc)})
@@ -118,9 +121,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Start the local Faultline integration testing platform")
     parser.add_argument("--host", default="127.0.0.1", help="control-plane bind address (default: loopback)")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--debug", action="store_true", help="enable detailed run and adapter logs")
     args = parser.parse_args()
     if args.host not in {"127.0.0.1", "localhost"}:
         parser.error("the initial release is local-only; bind to loopback")
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
     store.initialize()
     local_services = start_local_services()
     server = ThreadingHTTPServer((args.host, args.port), ControlPlaneHandler)

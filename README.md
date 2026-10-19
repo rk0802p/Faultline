@@ -11,7 +11,7 @@ The first milestone is a local checkout demonstration of an ambiguous payment ou
 3. Faultline detects whether the retry created a duplicate charge.
 4. The same scenario can be run against an idempotent implementation.
 
-This repository is at project kickoff. The initial executable artifact is a small, dependency-free simulation that makes the defect and its fix concrete before adding orchestration, adapters, storage, or a UI.
+The first executable artifact is a small, dependency-free scenario runner. It reads a versioned JSON scenario, records an event history and charge ledger, and makes both the defect and its fix concrete before adding network adapters, storage, or a UI.
 
 ## Run the demonstration
 
@@ -21,7 +21,7 @@ Requires Python 3.10 or later. From the repository root:
 python examples/checkout_demo.py
 ```
 
-The script runs both vulnerable and fixed checkout behavior and prints the charge count and `no_duplicate_charge` verdict for each.
+The script runs both vulnerable and fixed checkout behavior from `scenarios/payment-response-lost.json`. The default output shows the verdict. Pass `--json` to print full evidence, or `--implementation vulnerable` / `--implementation fixed` to run one variant.
 
 ## Scope and checkpoints
 

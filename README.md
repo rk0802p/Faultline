@@ -1,40 +1,40 @@
 # Faultline
 
-Faultline tests whether applications remain correct when their dependencies fail.
+Faultline is an integration failure testing platform. It runs controlled dependency failures against a checkout workflow, records cross-service evidence, evaluates business invariants, and keeps a report that developers can inspect after the run.
 
-## First vertical slice
+## Run the application
 
-The first milestone is a local checkout demonstration of an ambiguous payment outcome:
-
-1. The payment provider records a successful charge.
-2. The response is lost, so checkout retries.
-3. Faultline detects whether the retry created a duplicate charge.
-4. The same scenario can be run against an idempotent implementation.
-
-The first executable artifact is a small, dependency-free scenario runner. It reads a versioned JSON scenario, records an event history and charge ledger, and makes both the defect and its fix concrete before adding network adapters, storage, or a UI.
-
-## Run the demonstration
-
-Requires Python 3.10 or later. From the repository root:
+Requires Python 3.10 or later. The initial product slice uses only the Python standard library and SQLite; it has no package installation step.
 
 ```sh
-python examples/checkout_demo.py
+python -m faultline
 ```
 
-The script runs both vulnerable and fixed checkout behavior from `scenarios/payment-response-lost.json`. Use `--implementation fixed` for a passing run, or `--implementation vulnerable` to observe the seeded invariant failure. Assertion failures return exit code 1; execution/configuration failures return exit code 2. Pass `--json` to print full evidence, or `--output artifacts/run.json` to save a run bundle with the scenario definition, run ID, timestamps, event history, charge ledger, and assertion result.
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). The application starts the control-plane API and two loopback-only test targets:
 
-Run the Phase 0 and 1 checks with:
+- **Checkout service** on `127.0.0.1:8766`
+- **Payment provider** on `127.0.0.1:8767`
+
+Use **Run vulnerable** to see the duplicate-charge defect, or **Run fixed** to verify that the same retry uses an idempotency key. Each run executes asynchronously, saves its events and assertion results in SQLite, and appears in the run history. Data is stored in `data/faultline.sqlite3`.
+
+## What the first product slice does
+
+- Serves a workspace dashboard and control-plane API.
+- Validates the checked-in, versioned scenario before execution.
+- Sends real HTTP requests from the sample checkout app to a local test provider.
+- Commits a test charge, then closes the provider connection to simulate a lost response.
+- Retries the checkout operation with or without an idempotency key.
+- Evaluates four invariants and persists a report, event timeline, and provider ledger.
+- Restricts target services to loopback; the scenario cannot supply arbitrary destinations.
+
+The fault is local and deterministic. It makes no calls to external services and is not production chaos tooling.
+
+## Checks
 
 ```sh
 python -m unittest discover -s tests -v
 ```
 
-The demo and checks use only the Python standard library; there are no package installation steps.
+## Project plan
 
-## Scope and checkpoints
-
-See [docs/MVP.md](docs/MVP.md) for the first milestone, acceptance criteria, and planned GitHub checkpoints.
-
-## Safety
-
-The initial demo is entirely local and makes no network calls. Faultline's first release is intended for isolated test environments, not production fault injection.
+See [docs/MVP.md](docs/MVP.md) for product scope, phased acceptance criteria, and GitHub checkpoint guidance.

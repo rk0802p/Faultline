@@ -1,113 +1,89 @@
-# MVP plan
+# Faultline product plan
 
 ## Product goal
 
-Prove the core Faultline promise with one reproducible local workflow: apply a failure after a test payment provider commits a charge but before checkout receives the response, then evaluate business state and preserve evidence for a regression run.
+Faultline helps developers test whether an application remains correct when an integration fails at an awkward point. It coordinates a workflow, injects a bounded dependency failure, evaluates business invariants, and stores evidence that can be inspected after the run.
 
-## First vertical slice
+## Architecture in the first product slice
 
-### Workflow
+- **Control plane:** local HTTP API for projects, scenarios, run submission, history, and reports.
+- **Web app:** workspace overview with scenario launch controls, run status, invariant results, and persisted event timeline.
+- **Execution worker:** background thread per submitted run. It uses a fixed loopback target and does not accept user-provided executable code or arbitrary URLs.
+- **Sample checkout:** a real local HTTP service that retries a payment operation after an unknown outcome.
+- **HTTP fault adapter:** the test payment provider commits the charge and closes the connection before returning a response.
+- **Evidence store:** SQLite stores projects, scenario definitions, run state, ordered events, assertions, and the sanitized charge ledger.
 
-1. Create a checkout order with a stable logical order ID.
-2. Call a controlled payment provider that records successful charges in a ledger.
-3. On the first provider call, commit the charge and simulate a lost response.
-4. Let checkout retry the uncertain operation.
-5. Inspect the provider ledger and evaluate `no_duplicate_charge`.
-6. Repeat using a stable idempotency key and verify that only one charge exists.
+The project uses Python 3.10+ and the standard library for this initial modular monolith. SQLite replaces PostgreSQL for the first local product slice so a contributor can start it without services or package installs. This is an implementation choice, not a requirement that future hosted deployments use Python or SQLite.
 
-### Initial invariants
+## Phase 0 — Product foundation
 
-- At most one successful charge exists for a logical order.
-- A completed order has a successful payment.
-- The scenario reaches a known terminal outcome.
+**Status: Complete.**
 
-The first simulation implements only the duplicate-charge invariant. The other invariants belong in the next runner/assertion milestone, once the scenario and evidence models exist.
+- [x] Convert the product brief into a bounded first vertical slice and acceptance criteria.
+- [x] Add a runnable product entry point and documented local setup.
+- [x] Keep the initial environment local-only and dependency-free.
+- [x] Establish control-plane, execution, adapter, data, and web boundaries in a modular monolith.
 
-## Milestones
+**Exit:** a new contributor can start the product and understand the workflow and safe operating boundary.
 
-### Completed at project kickoff
+## Phase 1 — Complete vertical slice
 
-Phase 0 and Phase 1 are complete for the local demo slice. The production platform stack is intentionally not locked yet; Python 3.10+ is only the dependency-free runtime for this proof of concept.
+**Status: Complete for the payment response-lost scenario.**
 
-- [x] Document the product slice, acceptance criteria, safe local scope, and next checkpoints.
-- [x] Document the one-command local run path and Python runtime.
-- [x] Provide a versioned scenario definition with validation.
-- [x] Reproduce the lost-response duplicate-charge bug and the idempotency fix against a deterministic test-provider ledger.
-- [x] Report order ID, attempts, charges, invariant verdict, run ID, and ordered evidence events.
-- [x] Add automated checks for the seeded defect, fixed behavior, scenario validation, and CLI result codes.
+1. The dashboard submits a versioned scenario through the control-plane API.
+2. The worker validates the scenario and starts a run with a persisted lifecycle.
+3. A local checkout service calls the local payment provider over HTTP.
+4. The provider records a successful charge, then the HTTP fault adapter drops the response.
+5. Checkout retries. The vulnerable implementation creates a duplicate; the fixed implementation reuses an idempotency key.
+6. Faultline records ordered events and a charge ledger, evaluates four invariants, and shows the report in the UI and run history.
 
-The first implementation is an in-process domain simulation, not a real HTTP adapter or network fault proxy. Those remain in the scenario-runner/integration milestone.
+Delivered:
 
-### M0 — Project foundation
+- [x] Project and scenario data model.
+- [x] Versioned scenario definition and pre-run validation.
+- [x] Controlled checkout HTTP service and payment provider.
+- [x] HTTP response-loss fault after provider commit.
+- [x] Asynchronous run submission, run status, persisted event history, and cleanup event.
+- [x] Four business invariants with evidence references.
+- [x] Results UI with run history, assertions, and timeline.
+- [x] Automated checks for the seeded duplicate-charge bug and fixed behavior.
 
-- Agree on the vertical slice and its acceptance criteria.
-- Keep the starting demo dependency-free and local.
-- Use Python 3.10+ for the local proof of concept; defer the production platform stack until contributor/runtime needs are clearer. Do not split into services or packages prematurely.
+**Exit:** Faultline catches the seeded duplicate-charge bug and records supporting evidence. The vulnerable run fails `no_duplicate_charge`; the fixed retry passes with one charge.
 
-**Status: Complete.** A new contributor can understand the intended workflow and run the demo with the documented runtime.
+## Phase 2 — Usable authoring and debugging
 
-### M1 — Reproducible checkout defect
+- Add scenario creation/editing, validation feedback, and immutable scenario versions.
+- Add reconnectable live updates and an explicit run state machine with cancellation/timeouts.
+- Inspect request/response details and improve event-to-assertion evidence navigation.
+- Export a sanitized reproduction bundle and add CLI execution against the same API.
+- Add visual workflow authoring after the scenario model stabilizes.
 
-- Provide vulnerable and idempotent checkout variants.
-- Provide a deterministic payment ledger and response-loss fault point.
-- Print an explicit invariant verdict and useful evidence (order ID, attempts, and charges).
+**Exit:** a developer can author, validate, execute, inspect, and reproduce scenarios through both the product and CLI.
 
-**Status: Complete.** Vulnerable behavior produces two successful charges and fails the invariant; fixed behavior produces one and passes. Automated checks cover this known defect and the regression behavior.
+## Phase 3 — Integration depth
 
-### M2 — Scenario runner and evidence
-
-- Define and validate a small versioned scenario format.
-- Model run status and ordered events.
-- Implement one controlled HTTP/provider fault adapter.
-- Persist run events and assertion results.
-
-**Exit:** one scenario runs repeatably and returns an evidence-backed verdict.
-
-### M3 — Usable inspection
-
-- Add scenario/project management and a run results view.
-- Show run status, event timeline, assertion results, and evidence after completion.
-- Add basic timeline replay.
-
-**Exit:** a developer can inspect a completed run without executing it again.
-
-### M4 — Regression and CI
-
-- Export a sanitized reproduction bundle.
-- Add CLI result codes for pass, assertion failure, and execution failure.
-- Run the deterministic scenario in isolated CI.
-
-**Exit:** the vulnerable case fails and the fixed case passes from the same scenario definition in local and CI workflows.
-
-### M5 — Broaden failure coverage
-
-- Add duplicate webhook and persistence failure scenarios.
-- Add asynchronous assertions, cleanup ownership/reporting, and additional adapters only as supported end-to-end.
+- Add duplicate/delayed webhook and persistence failure scenarios.
+- Add disposable database/provider adapters and asynchronous assertions.
+- Add failure coverage views and reusable scenario templates.
+- Report cleanup ownership and failures separately from scenario verdicts.
 
 **Exit:** multiple failure classes expose cross-service correctness defects with recorded evidence.
 
-## GitHub workflow and checkpoints
+## Phase 4 — CI and regression workflows
 
-- Track each milestone as a GitHub milestone; create focused issues for independently reviewable slices.
-- Link every PR to an issue and name the acceptance criterion it closes.
-- Keep scenario definitions and their expected verdicts in the same PR as the behavior they exercise.
-- Use one PR per vertical boundary (demo, scenario schema, runner, assertion/report, UI, CLI/CI) rather than one PR per speculative package.
-- Require a human-readable reproduction command and sample output for behavioral changes.
-- Add CI gates as the selected stack is established; keep their results visible on the PR.
+- Add regression suites, GitHub Actions integration, JUnit reports, and historical comparisons.
+- Enforce allowlists, resource/time limits, secret redaction, and cleanup in the CI execution path.
 
-## Out of scope for the first milestone
+**Exit:** a seeded regression fails CI with a downloadable, sanitized reproduction artifact.
 
-- Production chaos injection or arbitrary user-provided executable scenario code.
-- Kubernetes or broad infrastructure orchestration.
-- Multiple language SDKs, databases, brokers, and dozens of adapters.
-- Authentication, billing, collaboration, and advanced visual scenario editing.
+## Full MVP scope from the brief
 
-## MVP completion criteria
+The completed Phase 1 slice is the foundation; it is not the full MVP. Remaining MVP work includes three supported scenarios, Docker Compose deployment, at least four meaningful invariants across those scenarios, scenario replay, CLI execution, and full automated end-to-end coverage. Production chaos injection, arbitrary executable scenario code, Kubernetes orchestration, and dozens of adapters remain out of scope.
 
-- A new developer can start the isolated project using documented steps.
-- Normal checkout succeeds.
-- The seeded duplicate-charge defect is detected by an invariant, with relevant evidence.
-- A completed run is inspectable without re-execution.
-- The deterministic case produces a consistent verdict.
-- Scenario configuration is validated before execution.
-- Target allowlists, resource limits, cleanup, and secret redaction are enforced before expanding beyond the local demo.
+## GitHub checkpoints
+
+- Use the Phase 1 completion as the first reviewable product checkpoint.
+- Create one issue per Phase 2 capability and keep pull requests tied to its acceptance criterion.
+- Keep each supported scenario definition, adapter behavior, assertions, and expected evidence together in review.
+- Require a reproduction command and test outcome in behavior-changing pull requests.
+- Keep local commits on `main`; the project owner will create the GitHub remote and push when ready.

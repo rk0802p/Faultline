@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101a2d">
+  <title>Faultline · Integration failure lab</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/report.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="Faultline home">
+        <span class="brand-mark"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M17.4 2.5 7.2 17h7l-.9 12.5L25 14.7h-7.3l-.3-12.2Z"/></svg></span>
+        <span>faultline<span class="brand-period">.</span></span>
+      </a>
+      <div class="workspace-label">WORKSPACE</div>
+      <button class="workspace-switch"><span class="workspace-avatar">R</span><span class="workspace-copy"><strong>Reliability lab</strong><small>Personal workspace</small></span><span class="chevron">⌄</span></button>
+      <nav class="side-nav" aria-label="Main navigation">
+        <a class="nav-item active" href="#overview"><span class="nav-icon">◫</span>Overview</a>
+        <a class="nav-item" href="#scenarios"><span class="nav-icon">◇</span>Scenarios<span class="nav-count" id="scenario-count">1</span></a>
+        <a class="nav-item" href="#runs"><span class="nav-icon">◷</span>Run history</a>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="local-card"><span class="local-dot"></span><div><strong>Local environment</strong><small>Isolated test targets</small></div><span class="local-lock">⌑</span></div>
+        <div class="user-row"><span class="user-avatar">R</span><span><strong>Developer</strong><small>Local session</small></span><button class="more-button" aria-label="Account options">···</button></div>
+      </div>
+    </aside>
+
+    <main class="main-content" id="overview">
+      <header class="topbar"><div class="breadcrumbs"><span>Reliability lab</span><span class="crumb-slash">/</span><strong>Overview</strong></div><div class="topbar-right"><span class="environment-pill"><i></i> LOCAL LAB</span><button class="icon-button" title="Refresh data" id="refresh-button">↻</button></div></header>
+      <section class="page-heading"><div><div class="eyebrow">FAULTLINE WORKSPACE</div><h1>Integration failure lab</h1><p>Find out whether your checkout stays correct when a dependency fails.</p></div><div class="heading-date"><span class="live-indicator"></span> Ready to run</div></section>
+
+      <section class="hero-card">
+        <div class="hero-noise"></div><div class="hero-content"><div class="hero-kicker"><span class="hero-spark">✳</span> YOUR FIRST RESILIENCE CHECK</div><h2>Test the failure.<br><em>Prove the recovery.</em></h2><p>Payment succeeds. The response disappears. Does your checkout charge twice?</p><a class="hero-link" href="#scenarios">Explore the scenario <span>↘</span></a></div>
+        <div class="hero-visual" aria-hidden="true"><div class="diagram-node node-checkout"><span class="node-glyph">▣</span><span><b>Checkout</b><small>retrying request</small></span><i class="node-state pulse"></i></div><div class="diagram-line line-one"><span class="line-packet"></span></div><div class="fault-marker"><span>×</span><small>response lost</small></div><div class="diagram-line line-two"><span class="line-packet delayed"></span></div><div class="diagram-node node-payment"><span class="node-glyph payment-glyph">$</span><span><b>Payment API</b><small>charge committed</small></span><i class="node-state good"></i></div><div class="diagram-caption"><span class="caption-check">✓</span> side effect recorded</div></div>
+      </section>
+
+      <section class="metrics-grid" aria-label="Workspace metrics">
+        <article class="metric-card"><div class="metric-top"><span>Total runs</span><span class="metric-icon icon-blue">◷</span></div><strong id="metric-runs">0</strong><small>Across all scenarios</small></article>
+        <article class="metric-card"><div class="metric-top"><span>Issues caught</span><span class="metric-icon icon-red">⌁</span></div><strong id="metric-failures">0</strong><small>Invariant failures found</small></article>
+        <article class="metric-card"><div class="metric-top"><span>Passing runs</span><span class="metric-icon icon-green">✓</span></div><strong id="metric-passes">0</strong><small>Recovery behavior verified</small></article>
+        <article class="metric-card metric-adapter"><div class="metric-top"><span>Active adapter</span><span class="metric-icon icon-violet">⌘</span></div><strong>HTTP</strong><small><span class="adapter-status"></span> Local payment provider</small></article>
+      </section>
+
+      <div class="section-heading" id="scenarios"><div><div class="eyebrow">START HERE</div><h2>Failure scenarios</h2></div><span class="section-subtitle">Controlled experiments against your local checkout</span></div>
+      <section class="scenario-grid">
+        <article class="scenario-card">
+          <div class="scenario-card-top"><span class="scenario-symbol">↗</span><span class="scenario-tag">PAYMENTS</span><button class="kebab" aria-label="Scenario options">···</button></div>
+          <h3>Payment response lost</h3><p class="scenario-description">The provider commits a charge, then the response is dropped. Checkout retries with an uncertain outcome.</p>
+          <div class="scenario-flow"><span>Checkout</span><i>→</i><span class="flow-fault">Response timeout <b>×</b></span><i>→</i><span>Retry</span></div>
+          <div class="scenario-meta"><span><i class="meta-dot"></i> Deterministic</span><span>4 invariants</span></div>
+          <div class="scenario-actions"><button class="button button-primary run-button" data-implementation="vulnerable"><span>▶</span> Run vulnerable</button><button class="button button-secondary run-button" data-implementation="fixed">Run fixed <span>↗</span></button></div>
+        </article>
+        <aside class="how-card"><div class="how-icon">✳</div><div class="eyebrow">THE FAULTLINE LOOP</div><h3>Make the invisible visible.</h3><p>Faultline records what happened across the workflow, then checks the business rules that matter.</p><ol><li><span>01</span> Inject a controlled fault</li><li><span>02</span> Capture events and side effects</li><li><span>03</span> Evaluate business invariants</li></ol><div class="safe-note"><span>⌑</span> Runs stay inside this local lab.</div></aside>
+      </section>
+
+      <section class="run-panel" id="active-run" hidden>
+        <div class="run-panel-header"><div><div class="eyebrow">RUN INSPECTOR</div><h2 id="run-title">Run details</h2></div><div class="run-status-pill" id="run-status">QUEUED</div></div>
+        <div class="run-overview" id="run-overview"></div>
+        <div class="ledger-strip"><div class="ledger-heading"><span class="ledger-icon">$</span><div><strong>Provider side-effect ledger</strong><small>Committed charges observed by the test provider</small></div></div><div class="charge-list" id="charge-list"></div></div>
+        <div class="run-detail-grid"><div class="detail-card"><div class="detail-title"><span class="detail-title-icon assertion-icon">✓</span><div><strong>Business invariants</strong><small>Evaluated against recorded evidence</small></div></div><div id="assertion-list" class="assertion-list"></div></div><div class="detail-card timeline-card"><div class="detail-title"><span class="detail-title-icon timeline-icon">◷</span><div><strong>Execution timeline</strong><small>Persisted events in order</small></div></div><ol id="event-list" class="event-list"></ol></div></div>
+        <div class="report-footer"><span><span class="report-lock">⌑</span> Evidence saved to local run history</span><button class="text-button" id="copy-run-id">Copy run ID</button></div>
+      </section>
+
+      <section class="history-section" id="runs"><div class="section-heading history-heading"><div><div class="eyebrow">RECENT ACTIVITY</div><h2>Run history</h2></div><button class="text-button" id="history-refresh">View latest <span>↗</span></button></div><div class="history-table-wrap"><table class="history-table"><thead><tr><th>SCENARIO</th><th>IMPLEMENTATION</th><th>STATUS</th><th>VERDICT</th><th>STARTED</th><th></th></tr></thead><tbody id="history-body"><tr><td colspan="6" class="empty-row">No runs yet. Launch a scenario to see its evidence here.</td></tr></tbody></table></div></section>
+      <footer class="page-footer"><span>Faultline <b>0.1</b> · Local development build</span><span>Execution targets are restricted to loopback</span></footer>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

@@ -23,6 +23,14 @@ python examples/checkout_demo.py
 
 The script runs both vulnerable and fixed checkout behavior from `scenarios/payment-response-lost.json`. Use `--implementation fixed` for a passing run, or `--implementation vulnerable` to observe the seeded invariant failure. Assertion failures return exit code 1; execution/configuration failures return exit code 2. Pass `--json` to print full evidence, or `--output artifacts/run.json` to save a run bundle with the scenario definition, run ID, timestamps, event history, charge ledger, and assertion result.
 
+Run the Phase 0 and 1 checks with:
+
+```sh
+python -m unittest discover -s tests -v
+```
+
+The demo and checks use only the Python standard library; there are no package installation steps.
+
 ## Scope and checkpoints
 
 See [docs/MVP.md](docs/MVP.md) for the first milestone, acceptance criteria, and planned GitHub checkpoints.

@@ -25,13 +25,26 @@ The first simulation implements only the duplicate-charge invariant. The other i
 
 ## Milestones
 
+### Completed at project kickoff
+
+Phase 0 and Phase 1 are complete for the local demo slice. The production platform stack is intentionally not locked yet; Python 3.10+ is only the dependency-free runtime for this proof of concept.
+
+- [x] Document the product slice, acceptance criteria, safe local scope, and next checkpoints.
+- [x] Document the one-command local run path and Python runtime.
+- [x] Provide a versioned scenario definition with validation.
+- [x] Reproduce the lost-response duplicate-charge bug and the idempotency fix against a deterministic test-provider ledger.
+- [x] Report order ID, attempts, charges, invariant verdict, run ID, and ordered evidence events.
+- [x] Add automated checks for the seeded defect, fixed behavior, scenario validation, and CLI result codes.
+
+The first implementation is an in-process domain simulation, not a real HTTP adapter or network fault proxy. Those remain in the scenario-runner/integration milestone.
+
 ### M0 — Project foundation
 
 - Agree on the vertical slice and its acceptance criteria.
 - Keep the starting demo dependency-free and local.
-- Decide the production stack after inspecting contributor/runtime needs; do not split into services or packages prematurely.
+- Use Python 3.10+ for the local proof of concept; defer the production platform stack until contributor/runtime needs are clearer. Do not split into services or packages prematurely.
 
-**Exit:** a new contributor can understand the intended workflow and run the demo with a documented runtime.
+**Status: Complete.** A new contributor can understand the intended workflow and run the demo with the documented runtime.
 
 ### M1 — Reproducible checkout defect
 
@@ -39,7 +52,7 @@ The first simulation implements only the duplicate-charge invariant. The other i
 - Provide a deterministic payment ledger and response-loss fault point.
 - Print an explicit invariant verdict and useful evidence (order ID, attempts, and charges).
 
-**Exit:** vulnerable behavior produces two successful charges and fails the invariant; fixed behavior produces one and passes.
+**Status: Complete.** Vulnerable behavior produces two successful charges and fails the invariant; fixed behavior produces one and passes. Automated checks cover this known defect and the regression behavior.
 
 ### M2 — Scenario runner and evidence
 

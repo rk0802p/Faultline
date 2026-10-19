@@ -68,7 +68,7 @@ def load_scenario(path: Path) -> dict[str, Any]:
         raise ValueError("order_id must be a non-empty string")
     if not isinstance(scenario.get("name"), str) or not scenario["name"]:
         raise ValueError("name must be a non-empty string")
-    if not isinstance(scenario.get("amount_cents"), int) or scenario["amount_cents"] <= 0:
+    if type(scenario.get("amount_cents")) is not int or scenario["amount_cents"] <= 0:
         raise ValueError("amount_cents must be a positive integer")
     if scenario.get("retries") != 1:
         raise ValueError("this demo currently supports exactly one retry")

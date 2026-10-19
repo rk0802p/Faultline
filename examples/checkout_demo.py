@@ -6,10 +6,12 @@ This is a deterministic domain simulation, not a network fault proxy.
 """
 
 import argparse
+from datetime import datetime, timezone
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional
+from uuid import uuid4
 
 
 class ResponseLost(TimeoutError):
@@ -64,6 +66,8 @@ def load_scenario(path: Path) -> dict[str, Any]:
         raise ValueError("unsupported assertion; expected no_duplicate_charge")
     if not isinstance(scenario.get("order_id"), str) or not scenario["order_id"]:
         raise ValueError("order_id must be a non-empty string")
+    if not isinstance(scenario.get("name"), str) or not scenario["name"]:
+        raise ValueError("name must be a non-empty string")
     if not isinstance(scenario.get("amount_cents"), int) or scenario["amount_cents"] <= 0:
         raise ValueError("amount_cents must be a positive integer")
     if scenario.get("retries") != 1:
@@ -97,6 +101,8 @@ def checkout(
 
 
 def run_case(scenario: dict[str, Any], implementation: str) -> dict[str, Any]:
+    run_id = str(uuid4())
+    started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     fixed = implementation == "fixed"
     order_id = scenario["order_id"]
     provider = PaymentProvider()
@@ -109,8 +115,14 @@ def run_case(scenario: dict[str, Any], implementation: str) -> dict[str, Any]:
     )
     order_charges = [c for c in provider.charges if c.order_id == order_id]
     passed = len(order_charges) <= 1
+    for sequence, event in enumerate(provider.events, start=1):
+        event["sequence"] = sequence
     return {
+        "run_id": run_id,
+        "started_at": started_at,
+        "finished_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "scenario": scenario["name"],
+        "scenario_definition": scenario,
         "implementation": implementation,
         "order_id": order_id,
         "attempts": attempts,
@@ -139,6 +151,7 @@ def main() -> int:
     )
     parser.add_argument("--implementation", choices=("vulnerable", "fixed", "both"), default="both")
     parser.add_argument("--json", action="store_true", help="print the full run evidence as JSON")
+    parser.add_argument("--output", type=Path, help="write full run evidence to this JSON file")
     args = parser.parse_args()
     try:
         scenario = load_scenario(args.scenario)
@@ -146,16 +159,27 @@ def main() -> int:
         parser.error(str(exc))
 
     implementations = ("vulnerable", "fixed") if args.implementation == "both" else (args.implementation,)
-    reports = [run_case(scenario, implementation) for implementation in implementations]
+    try:
+        reports = [run_case(scenario, implementation) for implementation in implementations]
+    except Exception as exc:
+        print(f"execution failed: {exc}")
+        return 2
+    serialized = json.dumps(reports, indent=2)
+    if args.output:
+        try:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(serialized + "\n", encoding="utf-8")
+        except OSError as exc:
+            print(f"execution failed while writing run evidence: {exc}")
+            return 2
     if args.json:
-        print(json.dumps(reports, indent=2))
+        print(serialized)
     else:
         for report in reports:
             print_report(report)
 
-    # In both mode, the vulnerable run is expected to fail and the fixed run to pass.
-    expected = {"vulnerable": "failed", "fixed": "passed"}
-    return 0 if all(report["status"] == expected[report["implementation"]] for report in reports) else 1
+    # A failed invariant is a non-zero result so CI can block on correctness.
+    return 0 if all(report["status"] == "passed" for report in reports) else 1
 
 
 if __name__ == "__main__":

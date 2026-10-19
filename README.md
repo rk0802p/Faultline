@@ -21,7 +21,7 @@ Requires Python 3.10 or later. From the repository root:
 python examples/checkout_demo.py
 ```
 
-The script runs both vulnerable and fixed checkout behavior from `scenarios/payment-response-lost.json`. The default output shows the verdict. Pass `--json` to print full evidence, or `--implementation vulnerable` / `--implementation fixed` to run one variant.
+The script runs both vulnerable and fixed checkout behavior from `scenarios/payment-response-lost.json`. Use `--implementation fixed` for a passing run, or `--implementation vulnerable` to observe the seeded invariant failure. Assertion failures return exit code 1; execution/configuration failures return exit code 2. Pass `--json` to print full evidence, or `--output artifacts/run.json` to save a run bundle with the scenario definition, run ID, timestamps, event history, charge ledger, and assertion result.
 
 ## Scope and checkpoints
 

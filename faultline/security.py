@@ -1,8 +1,8 @@
-"""Security controls: loopback allowlist enforcement and sensitive data redaction.
+"""Security controls: loopback allowlist enforcement and best-effort sensitive data redaction.
 
 Implements Spec Section 16 & Section 6.1:
-- Secret redaction for credentials, PAN/card numbers, tokens, and authorization headers.
-- Loopback destination allowlist to strictly prevent unintended external requests.
+- Best-effort secret redaction for credentials, PAN/card numbers, tokens, and authorization headers.
+- Loopback destination allowlist to strictly prevent unintended external network requests.
 """
 
 import os
@@ -21,7 +21,8 @@ PAN_PATTERN = re.compile(r"\b(?:\d[ -]*?){13,19}\b")
 BEARER_PATTERN = re.compile(r"Bearer\s+([A-Za-z0-9_\-\.]+)", re.IGNORECASE)
 API_KEY_PATTERN = re.compile(r"\b(?:sk|pk)_(?:live|test)_[0-9a-zA-Z]{14,}\b")
 
-ALLOWED_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+# Strictly restricted loopback hosts (0.0.0.0 excluded as it is a wildcard bind address)
+ALLOWED_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 CONTAINER_ALLOWED_HOSTS = {
     h.strip().lower()
     for h in os.environ.get(
@@ -33,7 +34,7 @@ CONTAINER_ALLOWED_HOSTS = {
 
 
 def redact_sensitive(obj: Any) -> Any:
-    """Recursively redacts sensitive keys and pattern-matching strings from data structures."""
+    """Best-effort recursive redaction for common sensitive keys and pattern-matching strings."""
     if isinstance(obj, dict):
         sanitized = {}
         for key, value in obj.items():

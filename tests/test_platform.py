@@ -524,6 +524,8 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertTrue(security.is_loopback_allowed("http://127.0.0.1:8766/v1/checkout"))
         self.assertTrue(security.is_loopback_allowed("http://localhost:8000/api/runs"))
         self.assertTrue(security.is_loopback_allowed("127.0.0.1:8767"))
+        self.assertFalse(security.is_loopback_allowed("0.0.0.0"))
+        self.assertFalse(security.is_loopback_allowed("http://0.0.0.0:8000"))
         self.assertFalse(security.is_loopback_allowed("https://api.external-payment.com/v1/charges"))
         self.assertFalse(security.is_loopback_allowed("http://192.168.1.50:8000"))
 

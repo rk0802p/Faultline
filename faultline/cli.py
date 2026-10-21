@@ -167,7 +167,7 @@ def run_benchmark(base: str, timeout: float, debug: bool) -> int:
     fp_rate = (false_positives / total_defects * 100) if total_defects else 0
     print(f"Defect Detection Rate:   {detection_rate:.1f}% ({defects_caught}/{total_defects} caught)")
     print(f"False Positive Rate:     {fp_rate:.1f}% ({false_positives}/{total_defects})")
-    print(f"Evaluator Determinism:   100.0%")
+    print(f"Scenarios Verified:      {len(results)}/{total_defects} consistent outcomes")
     print("=" * 60)
 
     if defects_caught == total_defects and false_positives == 0:

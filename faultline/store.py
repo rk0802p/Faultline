@@ -1760,6 +1760,9 @@ def get_system_metrics() -> dict[str, Any]:
         active_workers = 1 if run_counts.get("running", 0) > 0 else 0
         uptime = round(time.time() - SYSTEM_START_TIME, 2)
 
+        redis_url = os.environ.get("REDIS_URL")
+        toxiproxy_url = os.environ.get("TOXIPROXY_URL")
+
         return {
             "uptime_seconds": uptime,
             "worker_health": {
@@ -1767,6 +1770,11 @@ def get_system_metrics() -> dict[str, Any]:
                 "queue_depth": queue_depth,
                 "active_workers": active_workers,
                 "concurrency_limit": 5,
+            },
+            "infrastructure": {
+                "execution_mode": "in_process_threads",
+                "redis_configured": bool(redis_url),
+                "toxiproxy_configured": bool(toxiproxy_url),
             },
             "runs": runs_metric,
             "assertions": assertions_metric,

@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.client import HTTPConnection, HTTPException
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
 from . import store
 
@@ -23,6 +24,57 @@ CHECKOUT_HOST = os.environ.get("CHECKOUT_HOST", "127.0.0.1")
 CHECKOUT_PORT = int(os.environ.get("CHECKOUT_PORT", 8766))
 PAYMENT_HOST = os.environ.get("PAYMENT_HOST", "127.0.0.1")
 PAYMENT_PORT = int(os.environ.get("PAYMENT_PORT", 8767))
+
+
+class ToxiproxyClient:
+    """Helper client to inspect and configure Shopify Toxiproxy proxies and toxics (Spec §12)."""
+
+    def __init__(self, base_url: str = "http://127.0.0.1:8474") -> None:
+        self.base_url = os.environ.get("TOXIPROXY_URL", base_url).rstrip("/")
+
+    def is_available(self) -> bool:
+        try:
+            req = Request(f"{self.base_url}/version", method="GET")
+            with urlopen(req, timeout=1) as resp:
+                return resp.status == 200
+        except Exception:
+            return False
+
+    def list_proxies(self) -> dict[str, Any]:
+        try:
+            req = Request(f"{self.base_url}/proxies", method="GET")
+            with urlopen(req, timeout=2) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            logger.debug("Toxiproxy not reachable at %s: %s", self.base_url, exc)
+            return {}
+
+    def add_toxic(
+        self,
+        proxy_name: str,
+        toxic_type: str,
+        stream: str = "upstream",
+        toxicity: float = 1.0,
+        attributes: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "name": f"{toxic_type}_{int(time.time())}",
+            "type": toxic_type,
+            "stream": stream,
+            "toxicity": toxicity,
+            "attributes": attributes or {},
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = Request(f"{self.base_url}/proxies/{proxy_name}/toxics", data=data, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urlopen(req, timeout=2) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            logger.warning("Failed to configure toxic on %s: %s", proxy_name, exc)
+            return {"error": str(exc)}
+
+
+toxiproxy = ToxiproxyClient()
 
 
 class TestPaymentProvider:

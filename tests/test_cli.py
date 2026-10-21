@@ -250,6 +250,45 @@ class FaultlineCliTests(unittest.TestCase):
         self.assertIn("Faultline Reusable Scenario Templates", stdout.getvalue())
         self.assertIn("payment-response-lost-tpl", stdout.getvalue())
 
+    def test_cli_metrics_command(self) -> None:
+        metrics_response = {
+            "uptime_seconds": 120.5,
+            "worker_health": {"status": "healthy", "queue_depth": 0, "active_workers": 1},
+            "runs": {"total": 5, "completed": 4, "failed": 1, "timed_out": 0, "cancelled": 0, "queued": 0, "running": 0},
+            "assertions": {"total": 10, "passed": 8, "failed": 2, "pass_rate_percent": 80.0},
+        }
+        stdout, stderr = io.StringIO(), io.StringIO()
+        args = ["faultline.cli", "metrics"]
+        with patch.object(sys, "argv", args), \
+                patch("faultline.cli.api_json", return_value=metrics_response), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 0)
+        self.assertIn("Faultline Control Plane Operational Metrics", stdout.getvalue())
+        self.assertIn("HEALTHY", stdout.getvalue())
+        self.assertIn("80.0%", stdout.getvalue())
+
+    def test_cli_prune_command(self) -> None:
+        prune_response = {
+            "project_id": "faultline-demo",
+            "cutoff": "2026-09-22T00:00:00Z",
+            "max_age_days": 30,
+            "keep_baselines": True,
+            "dry_run": False,
+            "pruned_run_count": 3,
+            "skipped_baselines": 1,
+        }
+        stdout, stderr = io.StringIO(), io.StringIO()
+        args = ["faultline.cli", "prune", "--project", "faultline-demo", "--days", "30"]
+        with patch.object(sys, "argv", args), \
+                patch("faultline.cli.api_json", return_value=prune_response), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 0)
+        self.assertIn("Faultline Retention Pruning", stdout.getvalue())
+        self.assertIn("Runs Pruned:      3", stdout.getvalue())
+        self.assertIn("Baselines Kept:   1", stdout.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

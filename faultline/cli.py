@@ -180,7 +180,7 @@ def run_benchmark(base: str, timeout: float, debug: bool) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Faultline CLI for integration failure testing and benchmarks")
-    parser.add_argument("command", choices=["run", "report", "benchmark", "templates"], help="command to execute (run, report, benchmark, or templates)")
+    parser.add_argument("command", choices=["run", "report", "benchmark", "templates", "metrics", "prune"], help="command to execute (run, report, benchmark, templates, metrics, or prune)")
     parser.add_argument("--scenario", help="scenario ID to run")
     parser.add_argument("--suite", help="suite ID to run all member scenarios")
     parser.add_argument("--implementation", choices=["vulnerable", "fixed"], default="vulnerable")
@@ -190,10 +190,57 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=30)
     parser.add_argument("--debug", action="store_true", help="enable detailed debugging and request diagnostics")
     parser.add_argument("--run-id", help="specific run ID for report command (default: latest run)")
+    parser.add_argument("--project", default="faultline-demo", help="project ID for project-scoped commands (prune)")
+    parser.add_argument("--days", type=int, default=30, help="max age in days for retention pruning (default: 30)")
+    parser.add_argument("--no-keep-baselines", action="store_true", help="allow pruning baseline runs during retention cleanup")
+    parser.add_argument("--dry-run", action="store_true", help="preview retention cleanup without deleting runs")
     args = parser.parse_args()
 
     base = args.base_url.rstrip("/")
     try:
+        if args.command == "metrics":
+            metrics_data = api_json(f"{base}/api/metrics")
+            if args.output:
+                Path(args.output).write_text(json.dumps(metrics_data, indent=2), encoding="utf-8")
+                print(f"Metrics written to {args.output}")
+            else:
+                runs = metrics_data.get("runs", {})
+                assertions = metrics_data.get("assertions", {})
+                worker = metrics_data.get("worker_health", {})
+                print("=" * 60)
+                print("Faultline Control Plane Operational Metrics (Spec §21.2)")
+                print("=" * 60)
+                print(f"  • System Uptime:       {metrics_data.get('uptime_seconds', 0)} seconds")
+                print(f"  • Worker Health:       {str(worker.get('status', 'unknown')).upper()} (queue depth: {worker.get('queue_depth', 0)}, active: {worker.get('active_workers', 0)})")
+                print(f"  • Total Runs:          {runs.get('total', 0)}")
+                print(f"      - Completed:       {runs.get('completed', 0)}")
+                print(f"      - Failed:          {runs.get('failed', 0)}")
+                print(f"      - Timed Out:       {runs.get('timed_out', 0)}")
+                print(f"      - Cancelled:       {runs.get('cancelled', 0)}")
+                print(f"      - Queued/Running:  {runs.get('queued', 0)} / {runs.get('running', 0)}")
+                print(f"  • Invariant Pass Rate: {assertions.get('pass_rate_percent', 0.0)}% ({assertions.get('passed', 0)}/{assertions.get('total', 0)} passed)")
+                print("=" * 60)
+            return 0
+
+        if args.command == "prune":
+            prune_payload = {
+                "max_age_days": args.days,
+                "keep_baselines": not args.no_keep_baselines,
+                "dry_run": args.dry_run,
+            }
+            res = api_json(f"{base}/api/projects/{args.project}/prune", prune_payload)
+            mode = "DRY RUN PREVIEW" if res.get("dry_run") else "EXECUTION COMPLETE"
+            print("=" * 60)
+            print(f"Faultline Retention Pruning [{mode}]")
+            print("=" * 60)
+            print(f"  • Project:          {res.get('project_id')}")
+            print(f"  • Cutoff:           {res.get('cutoff')} (older than {res.get('max_age_days')} days)")
+            print(f"  • Keep Baselines:   {res.get('keep_baselines')}")
+            print(f"  • Runs Pruned:      {res.get('pruned_run_count')}")
+            print(f"  • Baselines Kept:   {res.get('skipped_baselines')}")
+            print("=" * 60)
+            return 0
+
         if args.command == "templates":
             templates_data = api_json(f"{base}/api/templates")["templates"]
             print("=" * 60)

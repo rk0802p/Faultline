@@ -6,6 +6,7 @@ provider. It commits a charge, then closes the connection before the response.
 
 import json
 import logging
+import os
 import socket
 import threading
 import time
@@ -18,8 +19,10 @@ from . import store
 
 
 logger = logging.getLogger("faultline.adapter.http")
-CHECKOUT_PORT = 8766
-PAYMENT_PORT = 8767
+CHECKOUT_HOST = os.environ.get("CHECKOUT_HOST", "127.0.0.1")
+CHECKOUT_PORT = int(os.environ.get("CHECKOUT_PORT", 8766))
+PAYMENT_HOST = os.environ.get("PAYMENT_HOST", "127.0.0.1")
+PAYMENT_PORT = int(os.environ.get("PAYMENT_PORT", 8767))
 
 
 class TestPaymentProvider:
@@ -211,6 +214,9 @@ class ProviderHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path in {"/v1/health", "/health"}:
+            json_reply(self, 200, {"status": "ok", "service": "payment-provider"})
+            return
         if parsed.path == "/v1/refunds":
             run_id = parse_qs(parsed.query).get("run_id", [""])[0]
             json_reply(self, 200, {"refunds": provider.refund_ledger(run_id)})
@@ -276,7 +282,7 @@ class CheckoutHandler(BaseHTTPRequestHandler):
                 })
                 store.record_event(run_id, "PAYMENT_HTTP_REQUEST", {"method": "POST", "path": "/v1/charges", "attempt": attempt + 1,
                                                                         "body": json.loads(request_body)})
-                connection = HTTPConnection("127.0.0.1", PAYMENT_PORT, timeout=min(3, remaining))
+                connection = HTTPConnection(PAYMENT_HOST, PAYMENT_PORT, timeout=min(3, remaining))
                 try:
                     headers = {"Content-Type": "application/json"}
                     if payload["fault"]:
@@ -310,7 +316,7 @@ class CheckoutHandler(BaseHTTPRequestHandler):
                         "order_id": order_id,
                         "charge_id": charge["id"],
                     })
-                    refund_conn = HTTPConnection("127.0.0.1", PAYMENT_PORT, timeout=min(3, max(1, remaining)))
+                    refund_conn = HTTPConnection(PAYMENT_HOST, PAYMENT_PORT, timeout=min(3, max(1, remaining)))
                     try:
                         refund_body = json.dumps({
                             "run_id": run_id,
@@ -370,6 +376,9 @@ class CheckoutHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path in {"/v1/health", "/health"}:
+            json_reply(self, 200, {"status": "ok", "service": "checkout-service"})
+            return
         if parsed.path == "/v1/fulfillments":
             run_id = parse_qs(parsed.query).get("run_id", [""])[0]
             json_reply(self, 200, {"fulfillments": checkout_service.ledger(run_id)})
@@ -380,15 +389,59 @@ class CheckoutHandler(BaseHTTPRequestHandler):
         return
 
 
-def start_local_services(*, checkout_port: int = 8766, payment_port: int = 8767) -> list[ThreadingHTTPServer]:
-    global CHECKOUT_PORT, PAYMENT_PORT
+def start_local_services(
+    *,
+    checkout_port: int = 8766,
+    payment_port: int = 8767,
+    checkout_host: str = "127.0.0.1",
+    payment_host: str = "127.0.0.1",
+) -> list[ThreadingHTTPServer]:
+    global CHECKOUT_PORT, PAYMENT_PORT, CHECKOUT_HOST, PAYMENT_HOST
     servers: list[ThreadingHTTPServer] = []
-    for port, handler in ((payment_port, ProviderHandler), (checkout_port, CheckoutHandler)):
-        server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+    for host, port, handler in ((payment_host, payment_port, ProviderHandler), (checkout_host, checkout_port, CheckoutHandler)):
+        server = ThreadingHTTPServer((host, port), handler)
         servers.append(server)
+    PAYMENT_HOST = servers[0].server_address[0]
     PAYMENT_PORT = servers[0].server_address[1]
+    CHECKOUT_HOST = servers[1].server_address[0]
     CHECKOUT_PORT = servers[1].server_address[1]
     for server in servers:
         threading.Thread(target=server.serve_forever, daemon=True,
                          name=f"faultline-local-{server.server_address[1]}").start()
     return servers
+
+
+def main() -> int:
+    import argparse
+    parser = argparse.ArgumentParser(description="Start Faultline checkout or payment microservices")
+    parser.add_argument("--service", choices=["all", "checkout", "payment"], default="all")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--checkout-port", type=int, default=8766)
+    parser.add_argument("--payment-port", type=int, default=8767)
+    args = parser.parse_args()
+
+    servers: list[ThreadingHTTPServer] = []
+    if args.service in {"all", "payment"}:
+        p_server = ThreadingHTTPServer((args.host, args.payment_port), ProviderHandler)
+        servers.append(p_server)
+        print(f"Payment provider running on {args.host}:{args.payment_port}")
+    if args.service in {"all", "checkout"}:
+        c_server = ThreadingHTTPServer((args.host, args.checkout_port), CheckoutHandler)
+        servers.append(c_server)
+        print(f"Checkout service running on {args.host}:{args.checkout_port}")
+
+    for s in servers:
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        for s in servers:
+            s.shutdown()
+            s.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

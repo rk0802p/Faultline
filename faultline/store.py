@@ -7,7 +7,7 @@ import socket
 import sqlite3
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -18,6 +18,7 @@ from . import security
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("FAULTLINE_DATA_DIR", ROOT / "data"))
 DB_PATH = DATA_DIR / "faultline.sqlite3"
+SYSTEM_START_TIME = time.time()
 
 
 def now() -> str:
@@ -1703,5 +1704,171 @@ def list_suite_results(suite_id: str, limit: int = 20) -> list[dict[str, Any]]:
                 "finished_at": r["finished_at"],
             })
         return result
+
+
+def get_system_metrics() -> dict[str, Any]:
+    with database() as db:
+        status_rows = db.execute(
+            "SELECT status, count(*) as count FROM runs GROUP BY status"
+        ).fetchall()
+        run_counts = {row["status"]: row["count"] for row in status_rows}
+        total_runs = sum(run_counts.values())
+
+        runs_metric = {
+            "queued": run_counts.get("queued", 0),
+            "running": run_counts.get("running", 0),
+            "completed": run_counts.get("completed", 0),
+            "failed": run_counts.get("failed", 0),
+            "timed_out": run_counts.get("timed_out", 0),
+            "cancelled": run_counts.get("cancelled", 0),
+            "total": total_runs,
+        }
+
+        assertion_rows = db.execute(
+            "SELECT status, count(*) as count FROM assertions GROUP BY status"
+        ).fetchall()
+        assertion_counts = {row["status"]: row["count"] for row in assertion_rows}
+        total_assertions = sum(assertion_counts.values())
+        passed_assertions = assertion_counts.get("passed", 0) + assertion_counts.get("pass", 0)
+        failed_assertions = assertion_counts.get("failed", 0) + assertion_counts.get("fail", 0)
+        pass_rate = round((passed_assertions / total_assertions) * 100, 2) if total_assertions > 0 else 100.0
+        assertions_metric = {
+            "total": total_assertions,
+            "passed": passed_assertions,
+            "failed": failed_assertions,
+            "pass_rate_percent": pass_rate,
+        }
+
+        total_suites = db.execute("SELECT count(*) as count FROM test_suites").fetchone()["count"]
+        suite_rows = db.execute(
+            "SELECT status, count(*) as count FROM suite_runs GROUP BY status"
+        ).fetchall()
+        suite_counts = {row["status"]: row["count"] for row in suite_rows}
+        total_suite_runs = sum(suite_counts.values())
+        suites_metric = {
+            "total_suites": total_suites,
+            "total_runs": total_suite_runs,
+            "status_counts": suite_counts,
+        }
+
+        total_scenarios = db.execute("SELECT count(*) as count FROM scenarios").fetchone()["count"]
+        total_versions = db.execute("SELECT count(*) as count FROM scenario_versions").fetchone()["count"]
+        total_spans = db.execute("SELECT count(*) as count FROM run_spans").fetchone()["count"]
+        total_snapshots = db.execute("SELECT count(*) as count FROM state_snapshots").fetchone()["count"]
+
+        queue_depth = run_counts.get("queued", 0)
+        active_workers = 1 if run_counts.get("running", 0) > 0 else 0
+        uptime = round(time.time() - SYSTEM_START_TIME, 2)
+
+        return {
+            "uptime_seconds": uptime,
+            "worker_health": {
+                "status": "healthy",
+                "queue_depth": queue_depth,
+                "active_workers": active_workers,
+                "concurrency_limit": 5,
+            },
+            "runs": runs_metric,
+            "assertions": assertions_metric,
+            "suites": suites_metric,
+            "inventory": {
+                "scenarios": total_scenarios,
+                "scenario_versions": total_versions,
+                "telemetry_spans": total_spans,
+                "state_snapshots": total_snapshots,
+            },
+        }
+
+
+def get_prometheus_metrics() -> str:
+    metrics = get_system_metrics()
+    runs = metrics["runs"]
+    assertions = metrics["assertions"]
+    lines = [
+        "# HELP faultline_runs_total Total runs partitioned by lifecycle status",
+        "# TYPE faultline_runs_total gauge",
+    ]
+    for status, count in runs.items():
+        if status != "total":
+            lines.append(f'faultline_runs_total{{status="{status}"}} {count}')
+    lines.extend([
+        "# HELP faultline_assertions_total Invariant assertions evaluated",
+        "# TYPE faultline_assertions_total counter",
+        f'faultline_assertions_total{{status="passed"}} {assertions["passed"]}',
+        f'faultline_assertions_total{{status="failed"}} {assertions["failed"]}',
+        "# HELP faultline_queue_depth Current runner queue depth",
+        "# TYPE faultline_queue_depth gauge",
+        f'faultline_queue_depth {metrics["worker_health"]["queue_depth"]}',
+        "# HELP faultline_uptime_seconds Faultline control-plane uptime in seconds",
+        "# TYPE faultline_uptime_seconds counter",
+        f'faultline_uptime_seconds {metrics["uptime_seconds"]}',
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def prune_project_runs(
+    project_id: str,
+    max_age_days: int = 30,
+    keep_baselines: bool = True,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat().replace("+00:00", "Z")
+
+    with database() as db:
+        project = db.execute("SELECT id FROM projects WHERE id=?", (project_id,)).fetchone()
+        if not project:
+            raise KeyError(f"Project '{project_id}' not found")
+
+        query = """
+            SELECT r.id, r.is_baseline, r.status, r.started_at
+            FROM runs r
+            JOIN scenarios s ON r.scenario_id = s.id
+            WHERE s.project_id = ?
+              AND r.started_at <= ?
+              AND r.status IN ('completed', 'failed', 'timed_out', 'cancelled')
+        """
+        rows = db.execute(query, (project_id, cutoff)).fetchall()
+
+        pruned_ids = []
+        skipped_baselines = 0
+        for r in rows:
+            if keep_baselines and r["is_baseline"]:
+                skipped_baselines += 1
+                continue
+            pruned_ids.append(r["id"])
+
+        if not dry_run and pruned_ids:
+            placeholders = ",".join("?" for _ in pruned_ids)
+            db.execute(f"DELETE FROM runs WHERE id IN ({placeholders})", pruned_ids)
+
+    if not dry_run and pruned_ids:
+        record_audit_event(
+            project_id=project_id,
+            action="PROJECT_PRUNED",
+            actor="system",
+            target_type="project",
+            target_id=project_id,
+            details={
+                "max_age_days": max_age_days,
+                "cutoff": cutoff,
+                "keep_baselines": keep_baselines,
+                "pruned_run_count": len(pruned_ids),
+                "pruned_run_ids": pruned_ids,
+                "skipped_baselines": skipped_baselines,
+            },
+        )
+
+    return {
+        "project_id": project_id,
+        "max_age_days": max_age_days,
+        "cutoff": cutoff,
+        "keep_baselines": keep_baselines,
+        "dry_run": dry_run,
+        "pruned_run_count": len(pruned_ids),
+        "pruned_run_ids": pruned_ids,
+        "skipped_baselines": skipped_baselines,
+    }
+
 
 

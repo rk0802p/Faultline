@@ -3,6 +3,7 @@ import json
 import tempfile
 import threading
 import time
+from typing import Any
 import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
@@ -51,14 +52,20 @@ class FaultlinePlatformTests(unittest.TestCase):
         adapters.CHECKOUT_PORT, adapters.PAYMENT_PORT = cls.old_checkout_port, cls.old_payment_port
         cls.temp_dir.cleanup()
 
-    def request(self, method: str, path: str, payload: dict | None = None) -> tuple[int, dict]:
+    def request(self, method: str, path: str, payload: dict | None = None, headers: dict | None = None) -> tuple[int, Any]:
         connection = http.client.HTTPConnection("127.0.0.1", self.api_port, timeout=15)
         body = json.dumps(payload) if payload is not None else None
-        headers = {"Content-Type": "application/json"} if body else {}
-        connection.request(method, path, body, headers)
+        req_headers = {"Content-Type": "application/json"} if body else {}
+        if headers:
+            req_headers.update(headers)
+        connection.request(method, path, body, req_headers)
         response = connection.getresponse()
         raw = response.read()
-        result = json.loads(raw) if raw else {}
+        content_type = response.getheader("Content-Type", "")
+        if "json" in content_type:
+            result = json.loads(raw) if raw else {}
+        else:
+            result = raw.decode("utf-8") if raw else ""
         connection.close()
         return response.status, result
 
@@ -768,6 +775,94 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertTrue(diff_data["has_baseline"])
         self.assertEqual(diff_data["baseline_run_id"], run_id)
         self.assertIn("regression_status", diff_data)
+
+    def test_operational_metrics_endpoint(self) -> None:
+        # JSON metrics endpoint
+        status, metrics = self.request("GET", "/api/metrics")
+        self.assertEqual(status, 200)
+        self.assertIn("uptime_seconds", metrics)
+        self.assertGreaterEqual(metrics["uptime_seconds"], 0)
+        self.assertEqual(metrics["worker_health"]["status"], "healthy")
+        self.assertIn("queue_depth", metrics["worker_health"])
+        self.assertIn("runs", metrics)
+        self.assertIn("completed", metrics["runs"])
+        self.assertIn("total", metrics["runs"])
+        self.assertIn("assertions", metrics)
+        self.assertIn("pass_rate_percent", metrics["assertions"])
+        self.assertIn("suites", metrics)
+        self.assertIn("inventory", metrics)
+        self.assertGreaterEqual(metrics["inventory"]["scenarios"], 1)
+
+        # Prometheus format via query parameter
+        status, prom_text = self.request("GET", "/api/metrics?format=prometheus")
+        self.assertEqual(status, 200)
+        self.assertIsInstance(prom_text, str)
+        self.assertIn("faultline_runs_total", prom_text)
+        self.assertIn("faultline_assertions_total", prom_text)
+        self.assertIn("faultline_queue_depth", prom_text)
+        self.assertIn("faultline_uptime_seconds", prom_text)
+
+        # Prometheus format via Accept header
+        status, prom_header_text = self.request("GET", "/api/metrics", headers={"Accept": "text/plain"})
+        self.assertEqual(status, 200)
+        self.assertIsInstance(prom_header_text, str)
+        self.assertIn("faultline_runs_total", prom_header_text)
+
+    def test_artifact_retention_and_pruning_policy(self) -> None:
+        # 1. Run two scenarios
+        run_ephemeral = self.launch_and_wait("fixed")
+        run_baseline = self.launch_and_wait("fixed")
+        eph_id = run_ephemeral["id"]
+        base_id = run_baseline["id"]
+
+        # 2. Designate second run as baseline
+        status, _ = self.request("POST", f"/api/runs/{base_id}/baseline", {})
+        self.assertEqual(status, 200)
+
+        # 3. Dry run retention prune (max_age_days=0, keep_baselines=True)
+        status, dry_res = self.request("POST", "/api/projects/faultline-demo/prune", {
+            "max_age_days": 0,
+            "keep_baselines": True,
+            "dry_run": True,
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(dry_res["dry_run"])
+        self.assertIn(eph_id, dry_res["pruned_run_ids"])
+        self.assertNotIn(base_id, dry_res["pruned_run_ids"])
+        self.assertGreaterEqual(dry_res["skipped_baselines"], 1)
+
+        # Verify run is NOT deleted during dry run
+        status, eph_check = self.request("GET", f"/api/runs/{eph_id}")
+        self.assertEqual(status, 200)
+
+        # 4. Actual execution of retention prune
+        status, prune_res = self.request("POST", "/api/projects/faultline-demo/prune", {
+            "max_age_days": 0,
+            "keep_baselines": True,
+            "dry_run": False,
+        })
+        self.assertEqual(status, 200)
+        self.assertFalse(prune_res["dry_run"])
+        self.assertIn(eph_id, prune_res["pruned_run_ids"])
+        self.assertNotIn(base_id, prune_res["pruned_run_ids"])
+
+        # Ephemeral run is pruned
+        status, _ = self.request("GET", f"/api/runs/{eph_id}")
+        self.assertEqual(status, 404)
+
+        # Baseline run is preserved
+        status, base_check = self.request("GET", f"/api/runs/{base_id}")
+        self.assertEqual(status, 200)
+
+        # 5. Check PROJECT_PRUNED audit event recorded
+        status, audit = self.request("GET", "/api/projects/faultline-demo/audit-events")
+        self.assertEqual(status, 200)
+        pruned_events = [e for e in audit["audit_events"] if e["action"] == "PROJECT_PRUNED"]
+        self.assertGreaterEqual(len(pruned_events), 1)
+
+        # 6. Non-existent project returns 404
+        status, err = self.request("POST", "/api/projects/non-existent-proj/prune", {"max_age_days": 30})
+        self.assertEqual(status, 404)
 
 
 if __name__ == "__main__":

@@ -419,6 +419,100 @@ function setupAuditModal() {
   });
 }
 
+function setupMetricsModal() {
+  const openBtn = $("#open-metrics-btn");
+  const closeBtn = $("#close-metrics-btn");
+  const modal = $("#metrics-modal");
+  const content = $("#metrics-content");
+  if (!openBtn || !modal) return;
+  openBtn.addEventListener("click", async () => {
+    modal.hidden = !modal.hidden;
+    if (!modal.hidden) await loadOperationalMetrics();
+  });
+  closeBtn?.addEventListener("click", () => {
+    modal.hidden = true;
+  });
+
+  async function loadOperationalMetrics() {
+    try {
+      content.innerHTML = '<span style="color:#64748b;font-size:11px">Fetching operational metrics...</span>';
+      const m = await request("/api/metrics");
+      const r = m.runs || {};
+      const a = m.assertions || {};
+      const w = m.worker_health || {};
+      content.innerHTML = `
+        <div style="background:#f8fafc;padding:10px;border-radius:6px;border:1px solid #e2e8f0">
+          <strong style="font-size:11px;color:#475569">RUNNER &amp; WORKER</strong>
+          <div style="font-size:16px;font-weight:700;color:#0f172a;margin-top:4px">${escapeHtml(String(w.status || 'healthy')).toUpperCase()}</div>
+          <small style="color:#64748b;font-size:10px">Queue: ${w.queue_depth || 0} · Active: ${w.active_workers || 0}</small>
+        </div>
+        <div style="background:#f8fafc;padding:10px;border-radius:6px;border:1px solid #e2e8f0">
+          <strong style="font-size:11px;color:#475569">RUN EXECUTION STATS</strong>
+          <div style="font-size:16px;font-weight:700;color:#0f172a;margin-top:4px">${r.total || 0} runs</div>
+          <small style="color:#64748b;font-size:10px">✓ ${r.completed || 0} · ✕ ${r.failed || 0} · ⏱ ${r.timed_out || 0} · ⊘ ${r.cancelled || 0}</small>
+        </div>
+        <div style="background:#f8fafc;padding:10px;border-radius:6px;border:1px solid #e2e8f0">
+          <strong style="font-size:11px;color:#475569">INVARIANT PASS RATE</strong>
+          <div style="font-size:16px;font-weight:700;color:#0f172a;margin-top:4px">${a.pass_rate_percent || 100}%</div>
+          <small style="color:#64748b;font-size:10px">${a.passed || 0} passed / ${a.total || 0} assertions</small>
+        </div>
+        <div style="background:#f8fafc;padding:10px;border-radius:6px;border:1px solid #e2e8f0">
+          <strong style="font-size:11px;color:#475569">SYSTEM UPTIME</strong>
+          <div style="font-size:16px;font-weight:700;color:#0f172a;margin-top:4px">${Math.floor(m.uptime_seconds || 0)}s</div>
+          <small style="color:#64748b;font-size:10px">Control plane running</small>
+        </div>
+      `;
+    } catch (err) {
+      content.innerHTML = `<span style="color:#dc2626;font-size:11px">Failed to load metrics: ${escapeHtml(err.message)}</span>`;
+    }
+  }
+}
+
+function setupPruneModal() {
+  const openBtn = $("#open-prune-btn");
+  const closeBtn = $("#close-prune-btn");
+  const modal = $("#prune-modal");
+  const execBtn = $("#execute-prune-btn");
+  const daysInput = $("#prune-days-input");
+  const keepBaselinesBox = $("#prune-keep-baselines");
+  const dryRunBox = $("#prune-dry-run");
+  const resultsDiv = $("#prune-results");
+  if (!openBtn || !modal) return;
+  openBtn.addEventListener("click", () => {
+    modal.hidden = !modal.hidden;
+    if (resultsDiv) resultsDiv.hidden = true;
+  });
+  closeBtn?.addEventListener("click", () => {
+    modal.hidden = true;
+  });
+  execBtn?.addEventListener("click", async () => {
+    try {
+      execBtn.disabled = true;
+      execBtn.textContent = "Pruning...";
+      const days = parseInt(daysInput.value, 10) || 30;
+      const keepBaselines = keepBaselinesBox.checked;
+      const dryRun = dryRunBox.checked;
+      const res = await request("/api/projects/faultline-demo/prune", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ max_age_days: days, keep_baselines: keepBaselines, dry_run: dryRun }),
+      });
+      resultsDiv.hidden = false;
+      const mode = res.dry_run ? "Preview (Dry Run)" : "Completed";
+      resultsDiv.innerHTML = `<strong>Prune ${mode}:</strong> Pruned ${res.pruned_run_count} runs (older than ${res.cutoff}), preserved ${res.skipped_baselines} baselines.`;
+      toast(`Pruning finished: ${res.pruned_run_count} run(s) pruned.`);
+      if (!res.dry_run && res.pruned_run_count > 0) {
+        await refresh();
+      }
+    } catch (err) {
+      toast(`Prune error: ${err.message}`);
+    } finally {
+      execBtn.disabled = false;
+      execBtn.textContent = "Execute Prune";
+    }
+  });
+}
+
 function setupGenerateFromGaps() {
   const btn = $("#generate-gaps-btn");
   if (!btn) return;
@@ -582,6 +676,8 @@ async function initialize() {
     setScenarioEditor();
     setupOpenApiImporter();
     setupAuditModal();
+    setupMetricsModal();
+    setupPruneModal();
     setupGenerateFromGaps();
     setupTelemetry();
     setupBranching();

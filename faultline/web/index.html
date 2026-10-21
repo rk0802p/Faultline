@@ -31,7 +31,7 @@
     </aside>
 
     <main class="main-content" id="overview">
-      <header class="topbar"><div class="breadcrumbs"><span>Reliability lab</span><span class="crumb-slash">/</span><strong>Overview</strong></div><div class="topbar-right"><span class="environment-pill" id="services-health-pill"><i></i> LOCAL LAB</span><button class="button button-secondary" id="open-audit-btn" style="padding:4px 8px;font-size:10px">Audit log</button><button class="icon-button" title="Refresh data" id="refresh-button">↻</button></div></header>
+      <header class="topbar"><div class="breadcrumbs"><span>Reliability lab</span><span class="crumb-slash">/</span><strong>Overview</strong></div><div class="topbar-right"><span class="environment-pill" id="services-health-pill"><i></i> LOCAL LAB</span><button class="button button-secondary" id="open-metrics-btn" style="padding:4px 8px;font-size:10px">Metrics</button><button class="button button-secondary" id="open-prune-btn" style="padding:4px 8px;font-size:10px">Prune data</button><button class="button button-secondary" id="open-audit-btn" style="padding:4px 8px;font-size:10px">Audit log</button><button class="icon-button" title="Refresh data" id="refresh-button">↻</button></div></header>
       <section class="page-heading"><div><div class="eyebrow">FAULTLINE WORKSPACE</div><h1>Integration failure lab</h1><p>Find out whether your checkout stays correct when a dependency fails.</p></div><div class="heading-date"><span class="live-indicator"></span> Ready to run</div></section>
 
       <section class="hero-card">
@@ -199,6 +199,40 @@
           <button class="more-button" id="close-audit-btn" style="margin-left:auto">✕</button>
         </div>
         <div id="audit-log-list" style="margin-top:10px;max-height:220px;overflow-y:auto"></div>
+      </section>
+
+      <section class="detail-card" id="metrics-modal" style="margin-top:14px" hidden>
+        <div class="detail-title">
+          <span class="detail-title-icon" style="background:#e0f2fe;color:#0284c7">📊</span>
+          <div>
+            <strong>Operational Metrics (Spec §21.2)</strong>
+            <small>Control plane uptime, queue-depth, worker health, and invariant assertion stats</small>
+          </div>
+          <button class="more-button" id="close-metrics-btn" style="margin-left:auto">✕</button>
+        </div>
+        <div id="metrics-content" style="margin-top:12px;display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:12px"></div>
+        <div style="margin-top:10px;display:flex;justify-content:flex-end;gap:10px">
+          <a href="/api/metrics?format=prometheus" target="_blank" class="button button-secondary" style="font-size:10px;text-decoration:none">Prometheus Export ↗</a>
+          <a href="/api/metrics" target="_blank" class="button button-secondary" style="font-size:10px;text-decoration:none">Raw JSON ↗</a>
+        </div>
+      </section>
+
+      <section class="detail-card" id="prune-modal" style="margin-top:14px" hidden>
+        <div class="detail-title">
+          <span class="detail-title-icon" style="background:#fef3c7;color:#d97706">🧹</span>
+          <div>
+            <strong>Artifact Retention &amp; Pruning Policy (Spec §16 &amp; §21.2)</strong>
+            <small>Clean up obsolete run events, telemetry traces, and execution snapshots</small>
+          </div>
+          <button class="more-button" id="close-prune-btn" style="margin-left:auto">✕</button>
+        </div>
+        <div style="display:flex;gap:14px;margin-top:12px;align-items:center;flex-wrap:wrap">
+          <label style="font-size:11px">Max age (days): <input type="number" id="prune-days-input" value="30" min="0" max="365" style="width:60px;padding:3px 6px;border:1px solid #dfe5ee;border-radius:4px"></label>
+          <label style="font-size:11px"><input type="checkbox" id="prune-keep-baselines" checked> Preserve baseline runs</label>
+          <label style="font-size:11px"><input type="checkbox" id="prune-dry-run"> Dry run preview</label>
+          <button class="button button-primary" id="execute-prune-btn" style="margin-left:auto">Execute Prune</button>
+        </div>
+        <div id="prune-results" style="margin-top:10px;font-size:11px;color:#475569" hidden></div>
       </section>
 
       <section class="templates-section" id="templates">

@@ -74,6 +74,21 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             self.respond(200, {"status": "ok", "service": "faultline-control-plane"})
         elif path == "/api/projects":
             self.respond(200, {"projects": store.list_projects()})
+        elif path == "/api/metrics":
+            parsed_query = parse_qs(urlparse(self.path).query)
+            accept_header = self.headers.get("Accept", "")
+            if parsed_query.get("format") == ["prometheus"] or "text/plain" in accept_header:
+                raw = store.get_prometheus_metrics().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(raw)
+            else:
+                self.respond(200, store.get_system_metrics())
+        elif re.fullmatch(r"/api/projects/[^/]+/suites", path):
+            self.respond(200, {"suites": store.list_suites()})
         elif path == "/api/coverage":
             self.respond(200, store.get_coverage_matrix())
         elif re.fullmatch(r"/api/projects/[^/]+/tasks", path):
@@ -188,6 +203,8 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             and not re.fullmatch(r"/api/runs/[^/]+/tasks", path)
             and not re.fullmatch(r"/api/suites/[^/]+/runs", path)
             and not re.fullmatch(r"/api/suites/[^/]+/scenarios", path)
+            and not re.fullmatch(r"/api/projects/[^/]+/prune", path)
+            and not re.fullmatch(r"/api/projects/[^/]+/suites", path)
         ):
             self.respond(404, {"error": "not found"})
             return
@@ -196,7 +213,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             if length > 16_384:
                 self.respond(413, {"error": "request too large"})
                 return
-            payload = json.loads(self.rfile.read(length))
+            payload = json.loads(self.rfile.read(length)) if length > 0 else {}
             if not isinstance(payload, dict): raise ValueError("request body must be a JSON object")
             cancel_match = re.fullmatch(r"/api/runs/([^/]+)/cancel", path)
             if cancel_match:
@@ -207,6 +224,33 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 else:
                     run = store.get_run(run_id)
                     self.respond(409, {"error": "run is not cancellable", "status": run["status"] if run else "not_found"})
+                return
+            prune_match = re.fullmatch(r"/api/projects/([^/]+)/prune", path)
+            if prune_match:
+                project_id = prune_match.group(1)
+                max_age_days = int(payload.get("max_age_days", 30))
+                keep_baselines = bool(payload.get("keep_baselines", True))
+                dry_run = bool(payload.get("dry_run", False))
+                try:
+                    res = store.prune_project_runs(project_id, max_age_days, keep_baselines, dry_run)
+                    self.respond(200, res)
+                except KeyError as exc:
+                    self.respond(404, {"error": str(exc)})
+                return
+            proj_suite_match = re.fullmatch(r"/api/projects/([^/]+)/suites", path)
+            if proj_suite_match:
+                project_id = proj_suite_match.group(1)
+                suite_id = payload.get("id") or re.sub(r"[^a-z0-9]+", "-", payload.get("name", "").lower()).strip("-")[:64]
+                if not suite_id:
+                    raise ValueError("suite id or name is required")
+                name = payload.get("name") or suite_id
+                description = payload.get("description", "")
+                scenarios = payload.get("scenarios", [])
+                if not isinstance(scenarios, list) or not scenarios:
+                    raise ValueError("scenarios must be a non-empty list of scenario IDs")
+                store.create_suite(suite_id, project_id, name, description, scenarios)
+                store.record_audit_event(project_id, "developer", "SUITE_CREATED", "suite", suite_id, {"scenarios": scenarios})
+                self.respond(201, {"suite_id": suite_id})
                 return
             branch_match = re.fullmatch(r"/api/runs/([^/]+)/branch", path)
             if branch_match:
@@ -449,20 +493,27 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
 
 def main() -> int:
     import argparse
+    import os
 
     parser = argparse.ArgumentParser(description="Start the local Faultline integration testing platform")
     parser.add_argument("--host", default="127.0.0.1", help="control-plane bind address (default: loopback)")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--debug", action="store_true", help="enable detailed run and adapter logs")
+    parser.add_argument("--no-embedded-services", action="store_true", help="disable embedded checkout and payment services for multi-container deployments")
     args = parser.parse_args()
-    if args.host not in {"127.0.0.1", "localhost"}:
-        parser.error("the initial release is local-only; bind to loopback")
+
+    allow_external = os.environ.get("FAULTLINE_ALLOW_EXTERNAL") == "1"
+    if args.host not in {"127.0.0.1", "localhost"} and not (allow_external and args.host == "0.0.0.0"):
+        parser.error("the initial release is local-only; bind to loopback (or set FAULTLINE_ALLOW_EXTERNAL=1 for containerized setups)")
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     store.initialize()
-    local_services = start_local_services()
+    if not (args.no_embedded_services or os.environ.get("FAULTLINE_NO_EMBEDDED_SERVICES") == "1"):
+        local_services = start_local_services()
+    else:
+        local_services = []
     server = ThreadingHTTPServer((args.host, args.port), ControlPlaneHandler)
     print(f"Faultline is ready at http://{args.host}:{args.port}")
     print("Local test targets: checkout 127.0.0.1:8766, payment provider 127.0.0.1:8767")

@@ -5,6 +5,7 @@ Implements Spec Section 16 & Section 6.1:
 - Loopback destination allowlist to strictly prevent unintended external requests.
 """
 
+import os
 import re
 from typing import Any
 from urllib.parse import urlparse
@@ -21,6 +22,14 @@ BEARER_PATTERN = re.compile(r"Bearer\s+([A-Za-z0-9_\-\.]+)", re.IGNORECASE)
 API_KEY_PATTERN = re.compile(r"\b(?:sk|pk)_(?:live|test)_[0-9a-zA-Z]{14,}\b")
 
 ALLOWED_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+CONTAINER_ALLOWED_HOSTS = {
+    h.strip().lower()
+    for h in os.environ.get(
+        "FAULTLINE_ALLOWED_HOSTS",
+        "checkout-service,payment-provider,toxiproxy,redis"
+    ).split(",")
+    if h.strip()
+}
 
 
 def redact_sensitive(obj: Any) -> Any:
@@ -53,7 +62,7 @@ def is_loopback_allowed(target: str) -> bool:
         hostname = parsed.hostname or ""
     else:
         hostname = target.split(":")[0].strip()
-    return hostname.lower() in ALLOWED_LOOPBACK_HOSTS
+    return (hostname.lower() in ALLOWED_LOOPBACK_HOSTS) or (hostname.lower() in CONTAINER_ALLOWED_HOSTS)
 
 
 def assert_loopback_safe(target: str) -> None:

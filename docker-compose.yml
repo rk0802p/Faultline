@@ -1,17 +1,111 @@
 version: '3.8'
 
 services:
-  faultline:
+  control-plane:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: faultline-app
+    container_name: faultline-control-plane
+    command: ["python", "-m", "faultline.server", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - FAULTLINE_DATA_DIR=/app/data
+      - FAULTLINE_ALLOW_EXTERNAL=1
+      - FAULTLINE_NO_EMBEDDED_SERVICES=1
+      - CHECKOUT_HOST=checkout-service
+      - CHECKOUT_PORT=8766
+      - FAULTLINE_ALLOWED_HOSTS=127.0.0.1,localhost,checkout-service,payment-provider,toxiproxy,redis
+      - REDIS_URL=redis://redis:6379/0
+      - TOXIPROXY_URL=http://toxiproxy:8474
+    depends_on:
+      checkout-service:
+        condition: service_healthy
+      payment-provider:
+        condition: service_healthy
+      toxiproxy:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  checkout-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: faultline-checkout-service
+    command: ["python", "-m", "faultline.adapters", "--service", "checkout", "--host", "0.0.0.0", "--checkout-port", "8766"]
+    ports:
       - "8766:8766"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - FAULTLINE_DATA_DIR=/app/data
+      - PAYMENT_HOST=payment-provider
+      - PAYMENT_PORT=8767
+      - CHECKOUT_PORT=8766
+    depends_on:
+      payment-provider:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/v1/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  payment-provider:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: faultline-payment-provider
+    command: ["python", "-m", "faultline.adapters", "--service", "payment", "--host", "0.0.0.0", "--payment-port", "8767"]
+    ports:
       - "8767:8767"
     volumes:
       - ./data:/app/data
     environment:
       - FAULTLINE_DATA_DIR=/app/data
+      - PAYMENT_PORT=8767
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8767/v1/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.7.0
+    container_name: faultline-toxiproxy
+    ports:
+      - "8474:8474"
+      - "8475-8480:8475-8480"
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: faultline-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  redis-data:
+
+networks:
+  default:
+    name: faultline-network

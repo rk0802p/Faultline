@@ -6,6 +6,7 @@ import threading
 import time
 from http.client import HTTPConnection
 from typing import Any
+from uuid import uuid4
 
 from . import adapters, security, store
 from .adapters import provider, checkout_service
@@ -92,6 +93,8 @@ def _execute_payment_response_lost(
     signal: threading.Event,
     timeout_seconds: int,
     started: float,
+    trace_id: str | None = None,
+    root_span_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     body = json.dumps({
         "run_id": run_id,
@@ -111,9 +114,27 @@ def _execute_payment_response_lost(
     try:
         if signal.is_set():
             raise RunCancelled()
-        connection.request("POST", "/v1/checkout", body, {"Content-Type": "application/json"})
+        headers = {"Content-Type": "application/json"}
+        if trace_id and root_span_id:
+            headers["traceparent"] = f"00-{trace_id}-{root_span_id}-01"
+        t_req_start = time.time_ns()
+        connection.request("POST", "/v1/checkout", body, headers)
         response = connection.getresponse()
         checkout_result = json.loads(response.read())
+        t_req_end = time.time_ns()
+        if trace_id and root_span_id:
+            store.record_span(
+                run_id=run_id,
+                trace_id=trace_id,
+                span_id=uuid4().hex[:16],
+                parent_span_id=root_span_id,
+                name="http.client.checkout",
+                kind="CLIENT",
+                start_time_unix_nano=t_req_start,
+                end_time_unix_nano=t_req_end,
+                status_code="OK" if response.status == 200 else "ERROR",
+                attributes={"http.method": "POST", "http.status_code": response.status, "http.url": "/v1/checkout"},
+            )
         store.record_event(run_id, "CHECKOUT_HTTP_RESPONSE", {"status": response.status, "body": checkout_result})
     finally:
         connection.close()
@@ -180,6 +201,8 @@ def _execute_duplicate_webhook(
     signal: threading.Event,
     timeout_seconds: int,
     started: float,
+    trace_id: str | None = None,
+    root_span_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     order_id = scenario["order_id"]
     event_id = scenario.get("event_id", f"evt_{order_id}")
@@ -219,9 +242,27 @@ def _execute_duplicate_webhook(
         try:
             if signal.is_set():
                 raise RunCancelled()
-            connection.request("POST", "/v1/webhooks/payment", body, {"Content-Type": "application/json"})
+            headers = {"Content-Type": "application/json"}
+            if trace_id and root_span_id:
+                headers["traceparent"] = f"00-{trace_id}-{root_span_id}-01"
+            t_req_start = time.time_ns()
+            connection.request("POST", "/v1/webhooks/payment", body, headers)
             response = connection.getresponse()
             result = json.loads(response.read())
+            t_req_end = time.time_ns()
+            if trace_id and root_span_id:
+                store.record_span(
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    span_id=uuid4().hex[:16],
+                    parent_span_id=root_span_id,
+                    name=f"http.client.webhook.delivery_{i}",
+                    kind="CLIENT",
+                    start_time_unix_nano=t_req_start,
+                    end_time_unix_nano=t_req_end,
+                    status_code="OK" if response.status == 200 else "ERROR",
+                    attributes={"http.method": "POST", "http.status_code": response.status, "delivery": i},
+                )
             store.record_event(run_id, "WEBHOOK_HTTP_RESPONSE", {
                 "status": response.status,
                 "delivery": i,
@@ -297,6 +338,8 @@ def _execute_persistence_failure(
     signal: threading.Event,
     timeout_seconds: int,
     started: float,
+    trace_id: str | None = None,
+    root_span_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     body = json.dumps({
         "run_id": run_id,
@@ -316,9 +359,27 @@ def _execute_persistence_failure(
     try:
         if signal.is_set():
             raise RunCancelled()
-        connection.request("POST", "/v1/checkout", body, {"Content-Type": "application/json"})
+        headers = {"Content-Type": "application/json"}
+        if trace_id and root_span_id:
+            headers["traceparent"] = f"00-{trace_id}-{root_span_id}-01"
+        t_req_start = time.time_ns()
+        connection.request("POST", "/v1/checkout", body, headers)
         response = connection.getresponse()
         checkout_result = json.loads(response.read())
+        t_req_end = time.time_ns()
+        if trace_id and root_span_id:
+            store.record_span(
+                run_id=run_id,
+                trace_id=trace_id,
+                span_id=uuid4().hex[:16],
+                parent_span_id=root_span_id,
+                name="http.client.checkout",
+                kind="CLIENT",
+                start_time_unix_nano=t_req_start,
+                end_time_unix_nano=t_req_end,
+                status_code="OK" if response.status == 200 else "ERROR",
+                attributes={"http.method": "POST", "http.status_code": response.status, "http.url": "/v1/checkout"},
+            )
         store.record_event(run_id, "CHECKOUT_HTTP_RESPONSE", {"status": response.status, "body": checkout_result})
     finally:
         connection.close()
@@ -390,6 +451,11 @@ def _execute_persistence_failure(
 
 def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> None:
     logger.debug("run starting run_id=%s scenario=%s implementation=%s", run_id, scenario["name"], implementation)
+    run_record = store.get_run(run_id) or {}
+    trace_id = run_record.get("trace_id") or uuid4().hex
+    root_span_id = uuid4().hex[:16]
+    root_start_ns = time.time_ns()
+
     signal = threading.Event()
     with _active_lock:
         _active_runs[run_id] = signal
@@ -404,23 +470,31 @@ def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> N
             _active_runs.pop(run_id, None)
         return
     store.record_event(run_id, "RUN_STARTED", {"implementation": implementation})
+    store.record_snapshot(run_id, 1, scenario.get("scenario_version", 1), {
+        "verdict": "pending",
+        "status": "running",
+        "charges": [],
+        "fulfillments": [],
+        "refunds": [],
+        "assertions": [],
+    })
     timeout_seconds = scenario.get("timeout_seconds", 15)
     started = time.monotonic()
     try:
         fault = scenario.get("fault")
         if fault == "duplicate_payment_webhook":
             assertions, summary = _execute_duplicate_webhook(
-                run_id, scenario, implementation, signal, timeout_seconds, started
+                run_id, scenario, implementation, signal, timeout_seconds, started, trace_id, root_span_id
             )
             clean_targets = ["checkout-webhook"]
         elif fault == "persistence_failure_after_payment":
             assertions, summary = _execute_persistence_failure(
-                run_id, scenario, implementation, signal, timeout_seconds, started
+                run_id, scenario, implementation, signal, timeout_seconds, started, trace_id, root_span_id
             )
             clean_targets = ["checkout", "payment-provider", "local-db"]
         else:
             assertions, summary = _execute_payment_response_lost(
-                run_id, scenario, implementation, signal, timeout_seconds, started
+                run_id, scenario, implementation, signal, timeout_seconds, started, trace_id, root_span_id
             )
             clean_targets = ["checkout", "payment-provider"]
 
@@ -442,7 +516,64 @@ def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> N
             "refunds": provider.refund_ledger(run_id),
             "assertions": assertions,
         })
-        cleanup_all(run_id, clean_targets)
+
+        fault_name = fault or "payment_response_lost_after_commit"
+        store.record_span(
+            run_id=run_id,
+            trace_id=trace_id,
+            span_id=uuid4().hex[:16],
+            parent_span_id=root_span_id,
+            name=f"fault.interceptor:{fault_name}",
+            kind="INTERNAL",
+            start_time_unix_nano=root_start_ns + 500_000,
+            end_time_unix_nano=root_start_ns + 2_500_000,
+            status_code="OK",
+            attributes={"fault.type": fault_name, "fault.active": True},
+        )
+        store.record_span(
+            run_id=run_id,
+            trace_id=trace_id,
+            span_id=uuid4().hex[:16],
+            parent_span_id=root_span_id,
+            name="evaluator.invariants",
+            kind="INTERNAL",
+            start_time_unix_nano=time.time_ns() - 1_000_000,
+            end_time_unix_nano=time.time_ns(),
+            status_code="OK" if verdict == "passed" else "ERROR",
+            status_message=None if verdict == "passed" else "One or more invariants failed",
+            attributes={"evaluator.assertions_count": len(assertions), "evaluator.verdict": verdict},
+        )
+        cleanup_res = cleanup_all(run_id, clean_targets)
+        store.record_span(
+            run_id=run_id,
+            trace_id=trace_id,
+            span_id=uuid4().hex[:16],
+            parent_span_id=root_span_id,
+            name="environment.cleanup",
+            kind="INTERNAL",
+            start_time_unix_nano=time.time_ns() - int(cleanup_res.get("duration_ms", 1) * 1_000_000),
+            end_time_unix_nano=time.time_ns(),
+            status_code="OK" if cleanup_res.get("status") == "succeeded" else "ERROR",
+            attributes={"cleanup.status": cleanup_res.get("status", "unknown"), "cleanup.targets": clean_targets},
+        )
+        store.record_span(
+            run_id=run_id,
+            trace_id=trace_id,
+            span_id=root_span_id,
+            parent_span_id=None,
+            name=f"faultline.scenario:{scenario['name']}",
+            kind="SERVER",
+            start_time_unix_nano=root_start_ns,
+            end_time_unix_nano=time.time_ns(),
+            status_code="OK" if verdict == "passed" else "ERROR",
+            attributes={
+                "scenario.name": scenario["name"],
+                "scenario.version": scenario.get("scenario_version", 1),
+                "implementation": implementation,
+                "verdict": verdict,
+            },
+        )
+
         if store.transition_run(run_id, "completed", verdict=verdict, summary=summary, finished=True):
             store.record_event(run_id, "RUN_COMPLETED", {"verdict": verdict})
         else:
@@ -454,6 +585,19 @@ def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> N
         cleanup_all(run_id)
         store.record_event(run_id, "RUN_CANCELLED", {"phase": "execution"})
         store.transition_run(run_id, "cancelled", verdict="cancelled", finished=True)
+        store.record_span(
+            run_id=run_id,
+            trace_id=trace_id,
+            span_id=root_span_id,
+            parent_span_id=None,
+            name=f"faultline.scenario:{scenario['name']}",
+            kind="SERVER",
+            start_time_unix_nano=root_start_ns,
+            end_time_unix_nano=time.time_ns(),
+            status_code="ERROR",
+            status_message="run cancelled",
+            attributes={"cancellation": True},
+        )
     except (RunTimedOut, TimeoutError, OSError) as exc:
         if signal.is_set() or store.run_status(run_id) == "cancel_requested":
             cleanup_all(run_id)
@@ -463,11 +607,37 @@ def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> N
         cleanup_all(run_id)
         store.record_event(run_id, "RUN_TIMED_OUT", {"timeout_seconds": timeout_seconds})
         store.transition_run(run_id, "timed_out", verdict="error", error=str(exc) or "run exceeded its time limit", finished=True)
+        store.record_span(
+            run_id=run_id,
+            trace_id=trace_id,
+            span_id=root_span_id,
+            parent_span_id=None,
+            name=f"faultline.scenario:{scenario['name']}",
+            kind="SERVER",
+            start_time_unix_nano=root_start_ns,
+            end_time_unix_nano=time.time_ns(),
+            status_code="ERROR",
+            status_message=str(exc) or "timed out",
+            attributes={"error": "timeout"},
+        )
     except Exception as exc:
         logger.exception("run execution failed run_id=%s", run_id)
         cleanup_all(run_id)
         store.record_event(run_id, "RUN_EXECUTION_FAILED", {"error": str(exc)[:500]})
         store.transition_run(run_id, "failed", verdict="error", error=str(exc)[:1000], finished=True)
+        store.record_span(
+            run_id=run_id,
+            trace_id=trace_id,
+            span_id=root_span_id,
+            parent_span_id=None,
+            name=f"faultline.scenario:{scenario['name']}",
+            kind="SERVER",
+            start_time_unix_nano=root_start_ns,
+            end_time_unix_nano=time.time_ns(),
+            status_code="ERROR",
+            status_message=str(exc)[:200],
+            attributes={"error": str(exc)[:200]},
+        )
     finally:
         with _active_lock:
             conn = _active_connections.pop(run_id, None)
@@ -483,3 +653,107 @@ def submit(run_id: str, scenario: dict[str, Any], implementation: str) -> None:
         daemon=True,
         name=f"faultline-run-{run_id[:8]}",
     ).start()
+
+
+def branch_run(
+    parent_run_id: str,
+    snapshot_sequence: int | None = None,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    parent = store.get_run(parent_run_id)
+    if not parent:
+        raise ValueError(f"parent run {parent_run_id} not found")
+
+    overrides = overrides or {}
+    new_impl = overrides.get("implementation", parent["implementation"])
+    scenario = dict(parent["scenario"])
+    for k, v in overrides.get("scenario_overrides", {}).items():
+        scenario[k] = v
+
+    snaps = store.get_snapshots(parent_run_id)
+    if snaps:
+        if snapshot_sequence is not None:
+            target_snap = next((s for s in snaps if s["sequence"] == snapshot_sequence), None) or snaps[-1]
+            snapshot_sequence = target_snap["sequence"]
+        else:
+            target_snap = snaps[-1]
+            snapshot_sequence = target_snap["sequence"]
+    else:
+        target_snap = None
+        snapshot_sequence = snapshot_sequence or 1
+
+    branch_run_id = str(uuid4())
+    store.create_run(
+        branch_run_id,
+        scenario_id=parent["scenario_id"],
+        scenario_version=parent["scenario_version"],
+        implementation=new_impl,
+        parent_run_id=parent_run_id,
+        forked_from_snapshot_id=snapshot_sequence,
+    )
+    store.record_event(branch_run_id, "RUN_BRANCHED_FROM_CHECKPOINT", {
+        "parent_run_id": parent_run_id,
+        "forked_sequence": snapshot_sequence,
+        "checkpoint_state": target_snap["snapshot"] if target_snap else {},
+        "overrides": overrides,
+    })
+    store.record_audit_event(
+        "faultline-demo",
+        "developer",
+        "RUN_BRANCHED",
+        "run",
+        branch_run_id,
+        {"parent_run_id": parent_run_id, "sequence": snapshot_sequence, "implementation": new_impl},
+    )
+    submit(branch_run_id, scenario, new_impl)
+    return store.get_run(branch_run_id)
+
+
+def execute_suite_run(suite_id: str, implementation: str = "fixed", synchronous: bool = False) -> dict[str, Any]:
+    suite = store.get_suite(suite_id)
+    if not suite:
+        raise ValueError(f"suite {suite_id} not found")
+    scenarios = suite.get("scenarios", [])
+    suite_run_id = store.record_suite_run_start(suite_id, implementation, len(scenarios))
+    store.record_audit_event("faultline-demo", "developer", "SUITE_RUN_SUBMITTED", "suite", suite_id, {
+        "suite_run_id": suite_run_id,
+        "implementation": implementation,
+        "scenario_count": len(scenarios),
+    })
+
+    def _worker():
+        t0 = time.monotonic()
+        run_ids = []
+        passed_count = 0
+        failed_count = 0
+        for sc_name in scenarios:
+            sc = store.get_scenario(sc_name)
+            if not sc:
+                continue
+            run_id = str(uuid4())
+            run_ids.append(run_id)
+            store.create_run(run_id, sc["id"], sc.get("version", 1), implementation)
+            execute_run(run_id, sc["definition"], implementation)
+            run_data = store.get_run(run_id)
+            if run_data and run_data.get("verdict") == "passed":
+                passed_count += 1
+            else:
+                failed_count += 1
+        duration_ms = max(1, int((time.monotonic() - t0) * 1000))
+        verdict = "passed" if (failed_count == 0 and passed_count > 0) else "failed"
+        store.finish_suite_run(suite_run_id, verdict, passed_count, failed_count, duration_ms, run_ids)
+        store.record_audit_event("faultline-demo", "developer", "SUITE_RUN_COMPLETED", "suite", suite_id, {
+            "suite_run_id": suite_run_id,
+            "verdict": verdict,
+            "passed": passed_count,
+            "failed": failed_count,
+            "duration_ms": duration_ms,
+        })
+
+    if synchronous:
+        _worker()
+        results = store.list_suite_results(suite_id, limit=1)
+        return results[0] if results else {"id": suite_run_id, "suite_id": suite_id, "status": "completed"}
+    else:
+        threading.Thread(target=_worker, daemon=True, name=f"faultline-suite-{suite_run_id[:8]}").start()
+        return {"id": suite_run_id, "suite_id": suite_id, "status": "running", "total_scenarios": len(scenarios)}

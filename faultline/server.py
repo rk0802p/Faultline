@@ -87,6 +87,9 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             self.respond(200, {"audit_events": store.list_audit_events(project_id)})
         elif path == "/api/suites":
             self.respond(200, {"suites": store.list_suites()})
+        elif re.fullmatch(r"/api/suites/[^/]+/results", path):
+            suite_id = path.split("/")[3]
+            self.respond(200, {"results": store.list_suite_results(suite_id)})
         elif re.fullmatch(r"/api/suites/[^/]+", path):
             suite_id = path.split("/")[3]
             suite = store.get_suite(suite_id)
@@ -99,6 +102,11 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             self.respond(200, {"template": template}) if template else self.respond(404, {"error": "template not found"})
         elif path == "/api/scenarios":
             self.respond(200, {"scenarios": store.list_scenarios()})
+        elif re.fullmatch(r"/api/scenarios/[^/]+/baseline-diff", path):
+            scenario_id = path.split("/")[3]
+            parsed_query = parse_qs(urlparse(self.path).query)
+            target_run_id = parsed_query.get("target_run_id", [None])[0]
+            self.respond(200, store.get_scenario_baseline_diff(scenario_id, target_run_id))
         elif re.fullmatch(r"/api/scenarios/[^/]+/versions", path):
             scenario_id = path.split("/")[3]
             versions = store.scenario_versions(scenario_id)
@@ -141,6 +149,9 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 seq = int(parsed_query.get("sequence", [0])[0])
                 st = store.reconstruct_state_at(run_id, seq)
                 self.respond(200, {"state": st}) if st else self.respond(404, {"error": "run not found"})
+            elif len(parts) == 2 and parts[1] in {"telemetry", "traces"}:
+                telemetry = store.get_run_telemetry(run_id)
+                self.respond(200, telemetry) if telemetry else self.respond(404, {"error": "run not found"})
             elif len(parts) == 2 and parts[1] == "reproduce":
                 bundle = store.get_reproduction_bundle(run_id)
                 if bundle:
@@ -168,10 +179,15 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
         if (
             path not in {"/api/runs", "/api/scenarios", "/api/scenarios/validate", "/api/suites", "/api/scenarios/import-incident", "/api/workflows/import-openapi", "/api/scenarios/generate-from-gaps"}
             and not re.fullmatch(r"/api/scenarios/[^/]+/versions", path)
+            and not re.fullmatch(r"/api/scenarios/[^/]+/versions/[^/]+/clone", path)
             and not re.fullmatch(r"/api/templates/[^/]+/instantiate", path)
             and not re.fullmatch(r"/api/runs/[^/]+/cancel", path)
+            and not re.fullmatch(r"/api/runs/[^/]+/branch", path)
+            and not re.fullmatch(r"/api/runs/[^/]+/baseline", path)
             and not re.fullmatch(r"/api/runs/[^/]+/annotations", path)
             and not re.fullmatch(r"/api/runs/[^/]+/tasks", path)
+            and not re.fullmatch(r"/api/suites/[^/]+/runs", path)
+            and not re.fullmatch(r"/api/suites/[^/]+/scenarios", path)
         ):
             self.respond(404, {"error": "not found"})
             return
@@ -191,6 +207,61 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 else:
                     run = store.get_run(run_id)
                     self.respond(409, {"error": "run is not cancellable", "status": run["status"] if run else "not_found"})
+                return
+            branch_match = re.fullmatch(r"/api/runs/([^/]+)/branch", path)
+            if branch_match:
+                run_id = branch_match.group(1)
+                snapshot_seq = payload.get("snapshot_sequence")
+                overrides = payload.get("overrides", {})
+                try:
+                    branched_run = engine.branch_run(run_id, snapshot_seq, overrides)
+                    self.respond(201, {"run": branched_run})
+                except ValueError as exc:
+                    self.respond(404, {"error": str(exc)})
+                return
+            baseline_match = re.fullmatch(r"/api/runs/([^/]+)/baseline", path)
+            if baseline_match:
+                run_id = baseline_match.group(1)
+                try:
+                    res = store.set_baseline_run(run_id)
+                    self.respond(200, res)
+                except ValueError as exc:
+                    self.respond(404, {"error": str(exc)})
+                return
+            suite_run_match = re.fullmatch(r"/api/suites/([^/]+)/runs", path)
+            if suite_run_match:
+                suite_id = suite_run_match.group(1)
+                impl = payload.get("implementation", "fixed")
+                sync = payload.get("synchronous", False)
+                try:
+                    res = engine.execute_suite_run(suite_id, implementation=impl, synchronous=sync)
+                    self.respond(202 if not sync else 200, {"suite_run": res})
+                except ValueError as exc:
+                    self.respond(404, {"error": str(exc)})
+                return
+            suite_scen_match = re.fullmatch(r"/api/suites/([^/]+)/scenarios", path)
+            if suite_scen_match:
+                suite_id = suite_scen_match.group(1)
+                scenario_id = payload.get("scenario_id")
+                if not scenario_id:
+                    raise ValueError("scenario_id is required")
+                try:
+                    res = store.add_scenario_to_suite(suite_id, scenario_id)
+                    self.respond(201, res)
+                except ValueError as exc:
+                    self.respond(404, {"error": str(exc)})
+                return
+            clone_match = re.fullmatch(r"/api/scenarios/([^/]+)/versions/([^/]+)/clone", path)
+            if clone_match:
+                scenario_id = clone_match.group(1)
+                version = int(clone_match.group(2))
+                target_sc_id = payload.get("target_scenario_id")
+                name_suffix = payload.get("name_suffix", " (Clone)")
+                try:
+                    res = store.clone_scenario_version(scenario_id, version, target_sc_id, name_suffix)
+                    self.respond(201, res)
+                except ValueError as exc:
+                    self.respond(404, {"error": str(exc)})
                 return
             ann_match = re.fullmatch(r"/api/runs/([^/]+)/annotations", path)
             if ann_match:

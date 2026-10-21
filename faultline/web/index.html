@@ -139,7 +139,23 @@
             </form>
           </div>
         </div>
-        <div class="report-footer"><span><span class="report-lock">⌑</span> Evidence saved to local run history</span><div><button class="text-button" id="diff-toggle-btn">Compare with baseline ⇄</button> <a class="text-button" id="download-repro" href="#" download>Download reproduction</a> <button class="text-button" id="copy-run-id">Copy run ID</button></div></div>
+        <div class="report-footer"><span><span class="report-lock">⌑</span> Evidence saved to local run history</span><div><button class="text-button" id="telemetry-btn">OpenTelemetry Traces 📊</button> <button class="text-button" id="branch-checkpoint-btn">Branch Run 🌿</button> <button class="text-button" id="set-baseline-btn">Set Baseline 🎯</button> <button class="text-button" id="diff-toggle-btn">Compare with baseline ⇄</button> <a class="text-button" id="download-repro" href="#" download>Download reproduction</a> <button class="text-button" id="copy-run-id">Copy run ID</button></div></div>
+        <div id="telemetry-card" class="detail-card" style="margin-top:14px" hidden>
+          <div class="detail-title">
+            <span class="detail-title-icon" style="background:#e0f2fe;color:#0284c7">📊</span>
+            <div>
+              <strong>OpenTelemetry Distributed Traces (Spec §11.5)</strong>
+              <small id="telemetry-subtitle">Correlated span waterfall &amp; W3C trace context</small>
+            </div>
+            <button class="more-button" id="close-telemetry-btn" style="margin-left:auto">✕</button>
+          </div>
+          <div style="margin:10px 0;display:flex;align-items:center;gap:12px;font-size:11px;flex-wrap:wrap">
+            <span>Trace ID: <code id="telemetry-trace-id" style="background:#f1f5f9;padding:2px 6px;border-radius:4px"></code></span>
+            <span>Spans: <strong id="telemetry-span-count"></strong></span>
+            <button class="button button-secondary" id="copy-traceparent-btn" style="padding:2px 6px;font-size:10px">Copy W3C traceparent</button>
+          </div>
+          <div id="telemetry-spans-list" style="margin-top:10px;display:flex;flex-direction:column;gap:6px"></div>
+        </div>
         <div id="run-diff-card" class="detail-card diff-card" style="margin-top:14px" hidden>
           <div class="detail-title"><span class="detail-title-icon" style="background:#f0eaff;color:#7c52db">⇄</span><div><strong>Run comparison & divergence</strong><small id="diff-subtitle">Compare with another run to identify earliest behavioral divergence</small></div></div>
           <div style="display:flex;gap:10px;align-items:center;margin:12px 0 8px">

@@ -26,7 +26,7 @@ def now() -> str:
 
 def connect() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(DB_PATH, timeout=10)
+    connection = sqlite3.connect(DB_PATH, timeout=30)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA journal_mode = WAL")
     connection.execute("PRAGMA foreign_keys = ON")
@@ -165,6 +165,35 @@ def initialize() -> None:
                 created_at TEXT NOT NULL,
                 UNIQUE(run_id, sequence)
             );
+            CREATE TABLE IF NOT EXISTS suite_runs (
+                id TEXT PRIMARY KEY,
+                suite_id TEXT NOT NULL REFERENCES test_suites(id) ON DELETE CASCADE,
+                implementation TEXT NOT NULL,
+                status TEXT NOT NULL,
+                verdict TEXT NOT NULL DEFAULT 'pending',
+                total_scenarios INTEGER NOT NULL,
+                passed_scenarios INTEGER NOT NULL DEFAULT 0,
+                failed_scenarios INTEGER NOT NULL DEFAULT 0,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                run_ids_json TEXT NOT NULL DEFAULT '[]',
+                started_at TEXT NOT NULL,
+                finished_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS run_spans (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                trace_id TEXT NOT NULL,
+                span_id TEXT NOT NULL,
+                parent_span_id TEXT,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                start_time_unix_nano INTEGER NOT NULL,
+                end_time_unix_nano INTEGER NOT NULL,
+                status_code TEXT NOT NULL,
+                status_message TEXT,
+                attributes_json TEXT NOT NULL DEFAULT '{}',
+                events_json TEXT NOT NULL DEFAULT '[]'
+            );
             """
         )
         run_columns = {row["name"] for row in db.execute("PRAGMA table_info(runs)")}
@@ -172,6 +201,14 @@ def initialize() -> None:
             db.execute("ALTER TABLE runs ADD COLUMN scenario_version INTEGER NOT NULL DEFAULT 1")
         if "cleanup_json" not in run_columns:
             db.execute("ALTER TABLE runs ADD COLUMN cleanup_json TEXT NOT NULL DEFAULT '{}'")
+        if "parent_run_id" not in run_columns:
+            db.execute("ALTER TABLE runs ADD COLUMN parent_run_id TEXT")
+        if "forked_from_snapshot_id" not in run_columns:
+            db.execute("ALTER TABLE runs ADD COLUMN forked_from_snapshot_id INTEGER")
+        if "trace_id" not in run_columns:
+            db.execute("ALTER TABLE runs ADD COLUMN trace_id TEXT")
+        if "is_baseline" not in run_columns:
+            db.execute("ALTER TABLE runs ADD COLUMN is_baseline INTEGER NOT NULL DEFAULT 0")
         db.execute(
             "INSERT OR IGNORE INTO projects VALUES (?, ?, ?, ?)",
             ("faultline-demo", "Checkout reliability lab", "Local, isolated checkout integration environment.", now()),
@@ -351,6 +388,10 @@ def list_scenarios() -> list[dict[str, Any]]:
         ]
 
 
+def get_scenario(scenario_id: str) -> dict[str, Any] | None:
+    return next((s for s in list_scenarios() if s["id"] == scenario_id), None)
+
+
 def _latest_version(db: sqlite3.Connection, scenario_id: str) -> int:
     row = db.execute("SELECT MAX(version) FROM scenario_versions WHERE scenario_id=?", (scenario_id,)).fetchone()
     return row[0] or 1
@@ -380,11 +421,24 @@ def scenario_versions(scenario_id: str) -> list[dict[str, Any]]:
                 for row in db.execute("SELECT * FROM scenario_versions WHERE scenario_id=? ORDER BY version DESC", (scenario_id,))]
 
 
-def create_run(run_id: str, scenario_id: str, scenario_version: int, implementation: str) -> None:
+def create_run(
+    run_id: str,
+    scenario_id: str,
+    scenario_version: int,
+    implementation: str,
+    parent_run_id: str | None = None,
+    forked_from_snapshot_id: int | None = None,
+    trace_id: str | None = None,
+) -> None:
+    if not trace_id:
+        trace_id = uuid4().hex
     with database() as db:
         db.execute(
-            "INSERT INTO runs(id, scenario_id, scenario_version, implementation, status, started_at) VALUES (?, ?, ?, ?, 'queued', ?)",
-            (run_id, scenario_id, scenario_version, implementation, now()),
+            """INSERT INTO runs(
+                id, scenario_id, scenario_version, implementation, status, started_at,
+                parent_run_id, forked_from_snapshot_id, trace_id, is_baseline
+            ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, 0)""",
+            (run_id, scenario_id, scenario_version, implementation, now(), parent_run_id, forked_from_snapshot_id, trace_id),
         )
 
 
@@ -485,6 +539,10 @@ def get_run(run_id: str) -> dict[str, Any] | None:
             except Exception:
                 pass
         result["cleanup"] = cleanup_data or {"status": "untracked", "owned_resources": []}
+        result["parent_run_id"] = result.get("parent_run_id")
+        result["forked_from_snapshot_id"] = result.get("forked_from_snapshot_id")
+        result["trace_id"] = result.get("trace_id")
+        result["is_baseline"] = bool(result.get("is_baseline", 0))
         result["events"] = [
             {"sequence": event["sequence"], "recorded_at": event["recorded_at"], "type": event["type"],
              "payload": json.loads(event["payload_json"])} for event in events
@@ -602,6 +660,10 @@ def list_runs(limit: int = 30) -> list[dict[str, Any]]:
                 "finished_at": row["finished_at"],
                 "summary": json.loads(row["summary_json"]),
                 "error": row["error"],
+                "parent_run_id": row["parent_run_id"] if "parent_run_id" in row.keys() else None,
+                "forked_from_snapshot_id": row["forked_from_snapshot_id"] if "forked_from_snapshot_id" in row.keys() else None,
+                "trace_id": row["trace_id"] if "trace_id" in row.keys() else None,
+                "is_baseline": bool(row["is_baseline"]) if "is_baseline" in row.keys() else False,
             })
         return result
 
@@ -1321,5 +1383,325 @@ def get_project_services(project_id: str = "faultline-demo") -> list[dict[str, A
             svc["error"] = str(exc)
             svc["latency_ms"] = None
     return services
+
+
+def record_span(
+    run_id: str,
+    trace_id: str,
+    span_id: str,
+    name: str,
+    kind: str = "INTERNAL",
+    parent_span_id: str | None = None,
+    start_time_unix_nano: int = 0,
+    end_time_unix_nano: int = 0,
+    status_code: str = "OK",
+    status_message: str | None = None,
+    attributes: dict[str, Any] | None = None,
+    events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    clean_attrs = security.redact_sensitive(attributes or {})
+    span_pk = f"{run_id}:{span_id}"
+    with database() as db:
+        db.execute(
+            """INSERT OR REPLACE INTO run_spans (
+                id, run_id, trace_id, span_id, parent_span_id, name, kind,
+                start_time_unix_nano, end_time_unix_nano, status_code, status_message,
+                attributes_json, events_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                span_pk,
+                run_id,
+                trace_id,
+                span_id,
+                parent_span_id,
+                name,
+                kind,
+                int(start_time_unix_nano),
+                int(end_time_unix_nano),
+                status_code,
+                status_message,
+                json.dumps(clean_attrs),
+                json.dumps(events or []),
+            ),
+        )
+    return {
+        "id": span_id,
+        "trace_id": trace_id,
+        "span_id": span_id,
+        "parent_span_id": parent_span_id,
+        "name": name,
+        "kind": kind,
+        "duration_ms": max(0, int((end_time_unix_nano - start_time_unix_nano) / 1_000_000)),
+        "status": status_code,
+        "attributes": clean_attrs,
+    }
+
+
+def get_run_telemetry(run_id: str) -> dict[str, Any] | None:
+    with database() as db:
+        run_row = db.execute("SELECT id, scenario_id, scenario_version, implementation, verdict, trace_id, started_at, finished_at FROM runs WHERE id=?", (run_id,)).fetchone()
+        if not run_row:
+            return None
+        trace_id = run_row["trace_id"] or uuid4().hex
+        span_rows = db.execute("SELECT * FROM run_spans WHERE run_id=? ORDER BY start_time_unix_nano ASC", (run_id,)).fetchall()
+        spans = []
+        for r in span_rows:
+            spans.append({
+                "spanId": r["span_id"],
+                "parentSpanId": r["parent_span_id"],
+                "name": r["name"],
+                "kind": r["kind"],
+                "startTimeUnixNano": str(r["start_time_unix_nano"]),
+                "endTimeUnixNano": str(r["end_time_unix_nano"]),
+                "durationMs": max(0, int((r["end_time_unix_nano"] - r["start_time_unix_nano"]) / 1_000_000)),
+                "statusCode": r["status_code"],
+                "statusMessage": r["status_message"],
+                "attributes": json.loads(r["attributes_json"]),
+                "events": json.loads(r["events_json"]),
+            })
+        root_span = next((s for s in spans if not s["parentSpanId"]), None)
+
+        otlp_spans = []
+        for s in spans:
+            otlp_attrs = []
+            for k, v in s["attributes"].items():
+                if isinstance(v, bool):
+                    otlp_attrs.append({"key": k, "value": {"boolValue": v}})
+                elif isinstance(v, int):
+                    otlp_attrs.append({"key": k, "value": {"intValue": v}})
+                elif isinstance(v, float):
+                    otlp_attrs.append({"key": k, "value": {"doubleValue": v}})
+                else:
+                    otlp_attrs.append({"key": k, "value": {"stringValue": str(v)}})
+            span_dict = {
+                "traceId": trace_id,
+                "spanId": s["spanId"],
+                "name": s["name"],
+                "kind": 1 if s["kind"] == "INTERNAL" else (2 if s["kind"] == "SERVER" else 3),
+                "startTimeUnixNano": s["startTimeUnixNano"],
+                "endTimeUnixNano": s["endTimeUnixNano"],
+                "attributes": otlp_attrs,
+                "status": {"code": 1 if s["statusCode"] == "OK" else 2, "message": s["statusMessage"] or ""},
+            }
+            if s["parentSpanId"]:
+                span_dict["parentSpanId"] = s["parentSpanId"]
+            otlp_spans.append(span_dict)
+
+        return {
+            "traceId": trace_id,
+            "rootSpanId": root_span["spanId"] if root_span else (spans[0]["spanId"] if spans else None),
+            "spanCount": len(spans),
+            "runId": run_id,
+            "scenarioId": run_row["scenario_id"],
+            "verdict": run_row["verdict"],
+            "spans": spans,
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": [
+                            {"key": "service.name", "value": {"stringValue": "faultline-lab"}},
+                            {"key": "service.version", "value": {"stringValue": "1.0.0"}},
+                            {"key": "project.id", "value": {"stringValue": "faultline-demo"}},
+                            {"key": "run.id", "value": {"stringValue": run_id}},
+                        ]
+                    },
+                    "scopeSpans": [
+                        {
+                            "scope": {"name": "faultline.tracer", "version": "1.0.0"},
+                            "spans": otlp_spans,
+                        }
+                    ]
+                }
+            ]
+        }
+
+
+def set_baseline_run(run_id: str) -> dict[str, Any]:
+    with database() as db:
+        row = db.execute("SELECT id, scenario_id FROM runs WHERE id=?", (run_id,)).fetchone()
+        if not row:
+            raise ValueError(f"run {run_id} not found")
+        scenario_id = row["scenario_id"]
+        db.execute("UPDATE runs SET is_baseline=0 WHERE scenario_id=?", (scenario_id,))
+        db.execute("UPDATE runs SET is_baseline=1 WHERE id=?", (run_id,))
+    record_audit_event("faultline-demo", "developer", "SCENARIO_BASELINE_SET", "run", run_id, {"scenario_id": scenario_id})
+    return {"run_id": run_id, "scenario_id": scenario_id, "is_baseline": True}
+
+
+def get_scenario_baseline_diff(scenario_id: str, target_run_id: str | None = None) -> dict[str, Any]:
+    with database() as db:
+        baseline_row = db.execute("SELECT id FROM runs WHERE scenario_id=? AND is_baseline=1", (scenario_id,)).fetchone()
+        if not baseline_row:
+            baseline_row = db.execute("SELECT id FROM runs WHERE scenario_id=? AND verdict='passed' ORDER BY started_at ASC LIMIT 1", (scenario_id,)).fetchone()
+        if not baseline_row:
+            baseline_row = db.execute("SELECT id FROM runs WHERE scenario_id=? ORDER BY started_at ASC LIMIT 1", (scenario_id,)).fetchone()
+
+        if not baseline_row:
+            return {
+                "has_baseline": False,
+                "scenario_id": scenario_id,
+                "message": "No baseline run exists for this scenario yet",
+            }
+
+        baseline_id = baseline_row["id"]
+        if target_run_id:
+            target_id = target_run_id
+        else:
+            target_row = db.execute("SELECT id FROM runs WHERE scenario_id=? AND id!=? ORDER BY started_at DESC LIMIT 1", (scenario_id, baseline_id)).fetchone()
+            target_id = target_row["id"] if target_row else baseline_id
+
+    diff_result = diff_runs(baseline_id, target_id)
+    baseline_run = get_run(baseline_id)
+    target_run = get_run(target_id)
+
+    b_verdict = baseline_run["verdict"] if baseline_run else "unknown"
+    t_verdict = target_run["verdict"] if target_run else "unknown"
+    if b_verdict == "passed" and t_verdict == "passed":
+        regression_status = "stable_pass"
+    elif b_verdict == "failed" and t_verdict == "passed":
+        regression_status = "regression_resolved"
+    elif b_verdict == "passed" and t_verdict == "failed":
+        regression_status = "regression_introduced"
+    else:
+        regression_status = "stable_failure"
+
+    return {
+        "has_baseline": True,
+        "scenario_id": scenario_id,
+        "baseline_run_id": baseline_id,
+        "target_run_id": target_id,
+        "regression_status": regression_status,
+        "baseline_verdict": b_verdict,
+        "target_verdict": t_verdict,
+        "diff": diff_result,
+    }
+
+
+def clone_scenario_version(
+    scenario_id: str,
+    version: int,
+    new_scenario_id: str | None = None,
+    name_suffix: str = " (Clone)",
+) -> dict[str, Any]:
+    with database() as db:
+        sc = db.execute("SELECT * FROM scenarios WHERE id=?", (scenario_id,)).fetchone()
+        if not sc:
+            raise ValueError(f"scenario {scenario_id} not found")
+        vrow = db.execute("SELECT * FROM scenario_versions WHERE scenario_id=? AND version=?", (scenario_id, version)).fetchone()
+        if not vrow:
+            raise ValueError(f"scenario {scenario_id} version {version} not found")
+
+        definition = json.loads(vrow["definition_json"])
+        project_id = sc["project_id"]
+
+        if new_scenario_id:
+            target_id = new_scenario_id
+            target_name = definition["name"] + name_suffix
+            definition["name"] = target_name
+            db.execute(
+                "INSERT INTO scenarios (id, project_id, name, definition_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                (target_id, project_id, target_name, json.dumps(definition), now()),
+            )
+            _insert_scenario_version(db, target_id, 1, definition)
+            result = {"scenario_id": target_id, "version": 1, "definition": definition}
+            audit_args = (project_id, "developer", "SCENARIO_CLONED", "scenario", target_id, {
+                "source_scenario_id": scenario_id,
+                "source_version": version,
+                "target_scenario_id": target_id,
+            })
+        else:
+            next_version = db.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM scenario_versions WHERE scenario_id=?", (scenario_id,)
+            ).fetchone()[0]
+            _insert_scenario_version(db, scenario_id, next_version, definition)
+            db.execute("UPDATE scenarios SET definition_json=? WHERE id=?", (json.dumps(definition), scenario_id))
+            result = {"scenario_id": scenario_id, "version": next_version, "definition": definition}
+            audit_args = (project_id, "developer", "SCENARIO_VERSION_CLONED", "scenario", scenario_id, {
+                "source_version": version,
+                "new_version": next_version,
+            })
+
+    record_audit_event(*audit_args)
+    return result
+
+
+def add_scenario_to_suite(suite_id: str, scenario_id: str) -> dict[str, Any]:
+    with database() as db:
+        suite = db.execute("SELECT id FROM test_suites WHERE id=?", (suite_id,)).fetchone()
+        if not suite:
+            raise ValueError(f"suite {suite_id} not found")
+        scenario = db.execute("SELECT id FROM scenarios WHERE id=?", (scenario_id,)).fetchone()
+        if not scenario:
+            raise ValueError(f"scenario {scenario_id} not found")
+        next_seq = db.execute(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM suite_scenarios WHERE suite_id=?", (suite_id,)
+        ).fetchone()[0]
+        db.execute(
+            "INSERT OR REPLACE INTO suite_scenarios (suite_id, scenario_id, sequence) VALUES (?, ?, ?)",
+            (suite_id, scenario_id, next_seq),
+        )
+    record_audit_event("faultline-demo", "developer", "SUITE_SCENARIO_ADDED", "suite", suite_id, {"scenario_id": scenario_id})
+    return {"suite_id": suite_id, "scenario_id": scenario_id, "sequence": next_seq}
+
+
+def record_suite_run_start(suite_id: str, implementation: str, total_scenarios: int) -> str:
+    suite_run_id = str(uuid4())
+    with database() as db:
+        db.execute(
+            """INSERT INTO suite_runs (
+                id, suite_id, implementation, status, verdict, total_scenarios,
+                passed_scenarios, failed_scenarios, duration_ms, run_ids_json, started_at
+            ) VALUES (?, ?, ?, 'running', 'pending', ?, 0, 0, 0, '[]', ?)""",
+            (suite_run_id, suite_id, implementation, total_scenarios, now()),
+        )
+    return suite_run_id
+
+
+def finish_suite_run(
+    suite_run_id: str,
+    verdict: str,
+    passed: int,
+    failed: int,
+    duration_ms: int,
+    run_ids: list[str],
+) -> None:
+    with database() as db:
+        db.execute(
+            """UPDATE suite_runs SET
+                status='completed', verdict=?, passed_scenarios=?, failed_scenarios=?,
+                duration_ms=?, run_ids_json=?, finished_at=?
+            WHERE id=?""",
+            (verdict, passed, failed, duration_ms, json.dumps(run_ids), now(), suite_run_id),
+        )
+
+
+def list_suite_results(suite_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    with database() as db:
+        rows = db.execute(
+            "SELECT * FROM suite_runs WHERE suite_id=? ORDER BY started_at DESC LIMIT ?",
+            (suite_id, limit),
+        ).fetchall()
+        result = []
+        for r in rows:
+            run_ids = json.loads(r["run_ids_json"]) if r["run_ids_json"] else []
+            total = r["total_scenarios"]
+            passed = r["passed_scenarios"]
+            pass_rate = round((passed / total) * 100, 1) if total > 0 else 0.0
+            result.append({
+                "id": r["id"],
+                "suite_id": r["suite_id"],
+                "implementation": r["implementation"],
+                "status": r["status"],
+                "verdict": r["verdict"],
+                "total_scenarios": total,
+                "passed_scenarios": passed,
+                "failed_scenarios": r["failed_scenarios"],
+                "pass_rate": pass_rate,
+                "duration_ms": r["duration_ms"],
+                "run_ids": run_ids,
+                "started_at": r["started_at"],
+                "finished_at": r["finished_at"],
+            })
+        return result
 
 

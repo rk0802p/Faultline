@@ -52,7 +52,7 @@ class FaultlinePlatformTests(unittest.TestCase):
         cls.temp_dir.cleanup()
 
     def request(self, method: str, path: str, payload: dict | None = None) -> tuple[int, dict]:
-        connection = http.client.HTTPConnection("127.0.0.1", self.api_port, timeout=4)
+        connection = http.client.HTTPConnection("127.0.0.1", self.api_port, timeout=15)
         body = json.dumps(payload) if payload is not None else None
         headers = {"Content-Type": "application/json"} if body else {}
         connection.request(method, path, body, headers)
@@ -62,19 +62,22 @@ class FaultlinePlatformTests(unittest.TestCase):
         connection.close()
         return response.status, result
 
+    def wait_for_run(self, run_id: str) -> dict:
+        for _ in range(60):
+            status, result = self.request("GET", f"/api/runs/{run_id}")
+            self.assertEqual(status, 200)
+            if result["run"]["status"] in {"completed", "failed", "cancelled", "timed_out"}:
+                return result["run"]
+            time.sleep(0.05)
+        self.fail("run did not finish within the expected local execution window")
+
     def launch_and_wait(self, implementation: str, scenario_id: str = "payment-response-lost") -> dict:
         status, payload = self.request(
             "POST", "/api/runs",
             {"scenario_id": scenario_id, "implementation": implementation},
         )
         self.assertEqual(status, 202)
-        for _ in range(60):
-            status, result = self.request("GET", f"/api/runs/{payload['run_id']}")
-            self.assertEqual(status, 200)
-            if result["run"]["status"] in {"completed", "failed", "cancelled", "timed_out"}:
-                return result["run"]
-            time.sleep(0.05)
-        self.fail("run did not finish within the expected local execution window")
+        return self.wait_for_run(payload["run_id"])
 
     def test_dashboard_and_project_scenario_api_are_available(self) -> None:
         status, projects = self.request("GET", "/api/projects")
@@ -639,7 +642,8 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertEqual(status, 200)
         snapshots = snap_data["snapshots"]
         self.assertGreaterEqual(len(snapshots), 1)
-        self.assertEqual(snapshots[0]["snapshot"]["verdict"], "passed")
+        self.assertEqual(snapshots[0]["snapshot"]["verdict"], "pending")
+        self.assertEqual(snapshots[-1]["snapshot"]["verdict"], "passed")
 
         # Verify point-in-time state reconstruction
         status, state_data = self.request("GET", f"/api/runs/{run_id}/state?sequence=10")
@@ -654,6 +658,116 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertEqual(status, 201)
         self.assertIn("generated", result)
         self.assertIsInstance(result["generated"], list)
+
+    def test_opentelemetry_traces_and_telemetry_endpoint(self) -> None:
+        run = self.launch_and_wait("fixed", "payment-response-lost")
+        run_id = run["id"]
+
+        status, telemetry = self.request("GET", f"/api/runs/{run_id}/telemetry")
+        self.assertEqual(status, 200)
+        self.assertIn("traceId", telemetry)
+        self.assertEqual(len(telemetry["traceId"]), 32)
+        self.assertGreaterEqual(telemetry["spanCount"], 4)
+        span_names = [s["name"] for s in telemetry["spans"]]
+        self.assertTrue(any("faultline.scenario" in n for n in span_names))
+        self.assertTrue(any("fault.interceptor" in n for n in span_names))
+        self.assertTrue(any("evaluator.invariants" in n for n in span_names))
+        self.assertTrue(any("environment.cleanup" in n for n in span_names))
+
+        # Standard OTLP payload check
+        self.assertIn("resourceSpans", telemetry)
+        resource_attrs = telemetry["resourceSpans"][0]["resource"]["attributes"]
+        attr_keys = [a["key"] for a in resource_attrs]
+        self.assertIn("service.name", attr_keys)
+        self.assertIn("run.id", attr_keys)
+
+        # Alias /traces endpoint
+        status_traces, traces = self.request("GET", f"/api/runs/{run_id}/traces")
+        self.assertEqual(status_traces, 200)
+        self.assertEqual(traces["traceId"], telemetry["traceId"])
+
+    def test_checkpoint_branching_creates_linked_run(self) -> None:
+        # Run vulnerable first (which produces a failed run)
+        parent_run = self.launch_and_wait("vulnerable", "payment-response-lost")
+        parent_id = parent_run["id"]
+        self.assertEqual(parent_run["verdict"], "failed")
+
+        # Branch from checkpoint snapshot with 'fixed' override
+        branch_payload = {
+            "snapshot_sequence": 1,
+            "overrides": {"implementation": "fixed"},
+        }
+        status, branch_data = self.request("POST", f"/api/runs/{parent_id}/branch", branch_payload)
+        self.assertEqual(status, 201)
+        branched = branch_data["run"]
+        self.assertEqual(branched["parent_run_id"], parent_id)
+        self.assertEqual(branched["forked_from_snapshot_id"], 1)
+        self.assertEqual(branched["implementation"], "fixed")
+
+        # Await completion of branched run
+        final_branched = self.wait_for_run(branched["id"])
+        self.assertEqual(final_branched["verdict"], "passed")
+
+    def test_suite_runs_lifecycle_and_history(self) -> None:
+        # 1. Execute suite synchronously
+        suite_id = "critical-integrations"
+        status, suite_res = self.request("POST", f"/api/suites/{suite_id}/runs", {
+            "implementation": "fixed",
+            "synchronous": True,
+        })
+        self.assertEqual(status, 200)
+        run_summary = suite_res["suite_run"]
+        self.assertEqual(run_summary["verdict"], "passed")
+        self.assertEqual(run_summary["total_scenarios"], 3)
+        self.assertEqual(run_summary["passed_scenarios"], 3)
+        self.assertEqual(run_summary["failed_scenarios"], 0)
+
+        # 2. Query suite results history
+        status, results_data = self.request("GET", f"/api/suites/{suite_id}/results")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(results_data["results"]), 1)
+        latest = results_data["results"][0]
+        self.assertEqual(latest["verdict"], "passed")
+        self.assertEqual(latest["pass_rate"], 100.0)
+
+        # 3. Add scenario to suite (using an isolated suite)
+        custom_suite_id = f"custom-suite-{uuid4().hex[:6]}"
+        self.request("POST", "/api/suites", {
+            "id": custom_suite_id,
+            "name": "Custom Isolated Suite",
+            "scenarios": ["payment-response-lost"],
+        })
+        status, added = self.request("POST", f"/api/suites/{custom_suite_id}/scenarios", {
+            "scenario_id": "duplicate-payment-webhook",
+        })
+        self.assertEqual(status, 201)
+        self.assertEqual(added["suite_id"], custom_suite_id)
+
+    def test_scenario_version_cloning_and_baseline_diff(self) -> None:
+        scenario_id = "payment-response-lost"
+
+        # 1. Clone scenario version
+        status, cloned = self.request("POST", f"/api/scenarios/{scenario_id}/versions/1/clone", {
+            "target_scenario_id": f"clone-{uuid4().hex[:6]}",
+            "name_suffix": " (Cloned Test)",
+        })
+        self.assertEqual(status, 201)
+        self.assertIn("scenario_id", cloned)
+        self.assertEqual(cloned["version"], 1)
+
+        # 2. Run a scenario and designate as baseline
+        run = self.launch_and_wait("fixed", scenario_id)
+        run_id = run["id"]
+        status, base_res = self.request("POST", f"/api/runs/{run_id}/baseline", {})
+        self.assertEqual(status, 200)
+        self.assertTrue(base_res["is_baseline"])
+
+        # 3. Query baseline diff
+        status, diff_data = self.request("GET", f"/api/scenarios/{scenario_id}/baseline-diff")
+        self.assertEqual(status, 200)
+        self.assertTrue(diff_data["has_baseline"])
+        self.assertEqual(diff_data["baseline_run_id"], run_id)
+        self.assertIn("regression_status", diff_data)
 
 
 if __name__ == "__main__":

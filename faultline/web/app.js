@@ -451,6 +451,126 @@ function setupGenerateFromGaps() {
   });
 }
 
+async function loadRunTelemetry(runId) {
+  const panel = $("#telemetry-card");
+  const traceIdEl = $("#telemetry-trace-id");
+  const countEl = $("#telemetry-span-count");
+  const listEl = $("#telemetry-spans-list");
+  if (!panel || !traceIdEl || !listEl) return;
+  try {
+    listEl.innerHTML = '<span style="font-size:11px;color:#94a3b8">Loading OpenTelemetry trace...</span>';
+    const data = await request(`/api/runs/${encodeURIComponent(runId)}/telemetry`);
+    traceIdEl.textContent = data.traceId;
+    countEl.textContent = String(data.spanCount);
+
+    const copyBtn = $("#copy-traceparent-btn");
+    if (copyBtn) {
+      copyBtn.onclick = () => {
+        const traceparent = `00-${data.traceId}-${data.rootSpanId || data.traceId.slice(0, 16)}-01`;
+        navigator.clipboard.writeText(traceparent).then(() => toast("Copied traceparent to clipboard"));
+      };
+    }
+
+    if (!data.spans || !data.spans.length) {
+      listEl.innerHTML = '<span style="font-size:11px;color:#94a3b8">No spans recorded for this run.</span>';
+      return;
+    }
+
+    const maxDuration = Math.max(...data.spans.map((s) => s.durationMs || 1), 1);
+    listEl.innerHTML = data.spans.map((s) => {
+      const isRoot = !s.parentSpanId;
+      const barWidth = Math.max(8, Math.round(((s.durationMs || 1) / maxDuration) * 100));
+      const statusColor = s.statusCode === "OK" ? "#16a34a" : "#dc2626";
+      const kindColor = s.kind === "SERVER" ? "#2563eb" : (s.kind === "CLIENT" ? "#7c3aed" : "#0d9488");
+      const attrBadges = Object.entries(s.attributes || {})
+        .slice(0, 4)
+        .map(([k, v]) => `<span style="font-size:9px;background:#f8fafc;border:1px solid #e2e8f0;padding:1px 4px;border-radius:3px;color:#64748b">${escapeHtml(k)}=${escapeHtml(String(v))}</span>`)
+        .join(" ");
+
+      return `
+        <div style="padding:6px 8px;border-radius:6px;background:${isRoot ? '#f8fafc' : '#ffffff'};border:1px solid #e2e8f0;font-size:11px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+            <div style="display:flex;align-items:center;gap:6px">
+              <span style="font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px;background:${kindColor}15;color:${kindColor}">${escapeHtml(s.kind)}</span>
+              <strong style="color:#0f172a">${escapeHtml(s.name)}</strong>
+              <code style="font-size:9px;color:#94a3b8">span:${escapeHtml(s.spanId.slice(0, 8))}</code>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="font-weight:600;color:${statusColor}">${escapeHtml(s.statusCode)}</span>
+              <span style="color:#64748b;font-size:10px">${s.durationMs}ms</span>
+            </div>
+          </div>
+          <div style="background:#f1f5f9;height:4px;border-radius:2px;overflow:hidden;margin:4px 0">
+            <div style="background:${kindColor};width:${barWidth}%;height:100%"></div>
+          </div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px">${attrBadges}</div>
+        </div>
+      `;
+    }).join("");
+  } catch (err) {
+    listEl.innerHTML = `<span style="font-size:11px;color:#ef4444">Failed loading telemetry: ${escapeHtml(err.message)}</span>`;
+  }
+}
+
+function setupTelemetry() {
+  const btn = $("#telemetry-btn");
+  const closeBtn = $("#close-telemetry-btn");
+  const card = $("#telemetry-card");
+  if (!btn || !card) return;
+  btn.addEventListener("click", async () => {
+    card.hidden = !card.hidden;
+    if (!card.hidden && state.selectedRunId) {
+      await loadRunTelemetry(state.selectedRunId);
+    }
+  });
+  closeBtn?.addEventListener("click", () => { card.hidden = true; });
+}
+
+function setupBranching() {
+  const btn = $("#branch-checkpoint-btn");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    if (!state.selectedRunId) return;
+    const impl = window.prompt("Fork alternative run from latest checkpoint.\\nEnter implementation ('fixed' or 'vulnerable'):", "fixed");
+    if (!impl || !["fixed", "vulnerable"].includes(impl.trim().toLowerCase())) return;
+    try {
+      btn.disabled = true;
+      toast("Branching new run from checkpoint...");
+      const { run } = await request(`/api/runs/${encodeURIComponent(state.selectedRunId)}/branch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ overrides: { implementation: impl.trim().toLowerCase() } }),
+      });
+      toast(`Branched new run: ${run.id.slice(0, 8)}`);
+      await refreshRuns();
+      await openRun(run.id);
+    } catch (err) {
+      toast(`Branch error: ${err.message}`);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+function setupBaseline() {
+  const btn = $("#set-baseline-btn");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    if (!state.selectedRunId) return;
+    try {
+      btn.disabled = true;
+      await request(`/api/runs/${encodeURIComponent(state.selectedRunId)}/baseline`, { method: "POST" });
+      toast("Run designated as scenario baseline 🎯");
+      await refreshRuns();
+      await openRun(state.selectedRunId);
+    } catch (err) {
+      toast(`Baseline error: ${err.message}`);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
 async function initialize() {
   try {
     const [scenarioResponse] = await Promise.all([request("/api/scenarios"), refreshRuns(), refreshCoverage(), loadTemplates(), checkServicesHealth()]);
@@ -463,6 +583,9 @@ async function initialize() {
     setupOpenApiImporter();
     setupAuditModal();
     setupGenerateFromGaps();
+    setupTelemetry();
+    setupBranching();
+    setupBaseline();
     if (state.runs.length) await openRun(state.runs[0].id);
   } catch (error) { toast(`Faultline could not load: ${error.message}`); }
 }

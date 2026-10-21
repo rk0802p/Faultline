@@ -55,15 +55,46 @@ def redact_sensitive(obj: Any) -> Any:
 
 
 def is_loopback_allowed(target: str) -> bool:
-    """Verifies that a target URL or host string resolves strictly to loopback."""
+    """Verifies that a target URL or host string resolves strictly to loopback or allowed container hosts."""
+    if not target or not isinstance(target, str):
+        return False
+    target = target.strip()
     if not target:
         return False
     if "://" in target:
-        parsed = urlparse(target)
-        hostname = parsed.hostname or ""
+        try:
+            parsed = urlparse(target)
+        except Exception:
+            return False
+        # Only permit standard HTTP/HTTPS schemes
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return False
+        # Reject embedded credentials (e.g. http://user:pass@127.0.0.1)
+        if parsed.username or parsed.password:
+            return False
+        hostname = (parsed.hostname or "").lower()
     else:
-        hostname = target.split(":")[0].strip()
-    return (hostname.lower() in ALLOWED_LOOPBACK_HOSTS) or (hostname.lower() in CONTAINER_ALLOWED_HOSTS)
+        # Check if IPv6 literal like [::1]:8000 or [::1]
+        if target.startswith("["):
+            bracket_end = target.find("]")
+            if bracket_end == -1:
+                return False
+            hostname = target[1:bracket_end].lower()
+            remainder = target[bracket_end + 1:]
+            if remainder and not remainder.startswith(":"):
+                return False
+        else:
+            # IPv4 or hostname like 127.0.0.1:8000 or localhost
+            # If target has multiple colons without brackets (e.g. raw ::1), handle it
+            if target.count(":") > 1:
+                hostname = target.lower()
+            else:
+                hostname = target.split(":")[0].strip().lower()
+
+    if not hostname or hostname == "0.0.0.0":
+        return False
+
+    return (hostname in ALLOWED_LOOPBACK_HOSTS) or (hostname in CONTAINER_ALLOWED_HOSTS)
 
 
 def assert_loopback_safe(target: str) -> None:

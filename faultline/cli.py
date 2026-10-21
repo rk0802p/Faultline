@@ -118,7 +118,7 @@ def poll_run(base: str, run_id: str, timeout: float, debug: bool = False) -> dic
     return None
 
 
-def run_benchmark(base: str, timeout: float, debug: bool) -> int:
+def run_benchmark(base: str, timeout: float, debug: bool, measure_determinism: bool = False) -> int:
     print("=" * 60)
     print("Faultline Integration Reliability Benchmark (Spec §17.4)")
     print("=" * 60)
@@ -127,6 +127,8 @@ def run_benchmark(base: str, timeout: float, debug: bool) -> int:
     defects_caught = 0
     total_defects = len(scenarios_data)
     false_positives = 0
+    determinism_matches = 0
+    determinism_total = 0
 
     for sc in scenarios_data:
         sc_id = sc["id"]
@@ -134,7 +136,7 @@ def run_benchmark(base: str, timeout: float, debug: bool) -> int:
             print(f"[benchmark] Testing defect detection on {sc_id} (vulnerable)...", file=sys.stderr)
         sub_v = api_json(f"{base}/api/runs", {"scenario_id": sc_id, "implementation": "vulnerable"})
         res_v = poll_run(base, sub_v["run_id"], timeout, debug)
-        vuln_detected = res_v and res_v.get("verdict") == "failed"
+        vuln_detected = bool(res_v and res_v.get("status") == "completed" and res_v.get("verdict") == "failed")
         if vuln_detected:
             defects_caught += 1
 
@@ -142,9 +144,25 @@ def run_benchmark(base: str, timeout: float, debug: bool) -> int:
             print(f"[benchmark] Testing fix validation on {sc_id} (fixed)...", file=sys.stderr)
         sub_f = api_json(f"{base}/api/runs", {"scenario_id": sc_id, "implementation": "fixed"})
         res_f = poll_run(base, sub_f["run_id"], timeout, debug)
-        fixed_passed = res_f and res_f.get("verdict") == "passed"
-        if res_f and res_f.get("verdict") != "passed":
+        fixed_passed = bool(
+            res_f is not None
+            and res_f.get("status") == "completed"
+            and res_f.get("verdict") == "passed"
+        )
+        if not fixed_passed:
             false_positives += 1
+
+        if measure_determinism and fixed_passed:
+            if debug:
+                print(f"[benchmark] Measuring determinism on {sc_id} (repeat run)...", file=sys.stderr)
+            sub_rep = api_json(f"{base}/api/runs", {"scenario_id": sc_id, "implementation": "fixed"})
+            res_rep = poll_run(base, sub_rep["run_id"], timeout, debug)
+            determinism_total += 1
+            if res_rep and res_rep.get("status") == "completed" and res_rep.get("verdict") == res_f.get("verdict"):
+                inv1 = [(a.get("name"), a.get("status")) for a in res_f.get("assertions", [])]
+                inv2 = [(a.get("name"), a.get("status")) for a in res_rep.get("assertions", [])]
+                if inv1 == inv2:
+                    determinism_matches += 1
 
         results.append({
             "scenario": sc_id,
@@ -158,7 +176,7 @@ def run_benchmark(base: str, timeout: float, debug: bool) -> int:
     for r in results:
         v_mark = "PASS (defect caught)" if r["defect_caught"] else "FAIL (defect missed)"
         f_mark = "PASS (verified)" if r["fix_verified"] else "FAIL (unexpected error)"
-        print(f"  • {r['scenario']}:")
+        print(f"  * {r['scenario']}:")
         print(f"      Vulnerable run: {v_mark}")
         print(f"      Fixed run:      {f_mark}")
 
@@ -167,10 +185,17 @@ def run_benchmark(base: str, timeout: float, debug: bool) -> int:
     fp_rate = (false_positives / total_defects * 100) if total_defects else 0
     print(f"Defect Detection Rate:   {detection_rate:.1f}% ({defects_caught}/{total_defects} caught)")
     print(f"False Positive Rate:     {fp_rate:.1f}% ({false_positives}/{total_defects})")
+    if measure_determinism and determinism_total > 0:
+        det_rate = (determinism_matches / determinism_total) * 100
+        print(f"Evaluator Determinism:   {det_rate:.1f}% ({determinism_matches}/{determinism_total} repeated runs matched)")
+    else:
+        print("Evaluator Determinism:   NOT MEASURED (use --measure-determinism)")
     print(f"Scenarios Verified:      {len(results)}/{total_defects} consistent outcomes")
     print("=" * 60)
 
-    if defects_caught == total_defects and false_positives == 0:
+    all_defects_detected = (defects_caught == total_defects) and (total_defects > 0)
+    all_fixes_verified = all(r["fix_verified"] for r in results) and (len(results) > 0)
+    if all_defects_detected and all_fixes_verified and false_positives == 0:
         print("Benchmark PASSED: All seeded integration defects detected and verified.")
         return 0
     else:
@@ -194,6 +219,7 @@ def main() -> int:
     parser.add_argument("--days", type=int, default=30, help="max age in days for retention pruning (default: 30)")
     parser.add_argument("--no-keep-baselines", action="store_true", help="allow pruning baseline runs during retention cleanup")
     parser.add_argument("--dry-run", action="store_true", help="preview retention cleanup without deleting runs")
+    parser.add_argument("--measure-determinism", action="store_true", help="measure evaluator determinism by running repeated evaluations")
     args = parser.parse_args()
 
     base = args.base_url.rstrip("/")
@@ -208,17 +234,17 @@ def main() -> int:
                 assertions = metrics_data.get("assertions", {})
                 worker = metrics_data.get("worker_health", {})
                 print("=" * 60)
-                print("Faultline Control Plane Operational Metrics (Spec §21.2)")
+                print("Faultline Control Plane Operational Metrics (Spec Section 21.2)")
                 print("=" * 60)
-                print(f"  • System Uptime:       {metrics_data.get('uptime_seconds', 0)} seconds")
-                print(f"  • Worker Health:       {str(worker.get('status', 'unknown')).upper()} (queue depth: {worker.get('queue_depth', 0)}, active: {worker.get('active_workers', 0)})")
-                print(f"  • Total Runs:          {runs.get('total', 0)}")
+                print(f"  * System Uptime:       {metrics_data.get('uptime_seconds', 0)} seconds")
+                print(f"  * Worker Health:       {str(worker.get('status', 'unknown')).upper()} (queue depth: {worker.get('queue_depth', 0)}, active: {worker.get('active_workers', 0)})")
+                print(f"  * Total Runs:          {runs.get('total', 0)}")
                 print(f"      - Completed:       {runs.get('completed', 0)}")
                 print(f"      - Failed:          {runs.get('failed', 0)}")
                 print(f"      - Timed Out:       {runs.get('timed_out', 0)}")
                 print(f"      - Cancelled:       {runs.get('cancelled', 0)}")
                 print(f"      - Queued/Running:  {runs.get('queued', 0)} / {runs.get('running', 0)}")
-                print(f"  • Invariant Pass Rate: {assertions.get('pass_rate_percent', 0.0)}% ({assertions.get('passed', 0)}/{assertions.get('total', 0)} passed)")
+                print(f"  * Invariant Pass Rate: {assertions.get('pass_rate_percent', 0.0)}% ({assertions.get('passed', 0)}/{assertions.get('total', 0)} passed)")
                 print("=" * 60)
             return 0
 
@@ -233,11 +259,11 @@ def main() -> int:
             print("=" * 60)
             print(f"Faultline Retention Pruning [{mode}]")
             print("=" * 60)
-            print(f"  • Project:          {res.get('project_id')}")
-            print(f"  • Cutoff:           {res.get('cutoff')} (older than {res.get('max_age_days')} days)")
-            print(f"  • Keep Baselines:   {res.get('keep_baselines')}")
-            print(f"  • Runs Pruned:      {res.get('pruned_run_count')}")
-            print(f"  • Baselines Kept:   {res.get('skipped_baselines')}")
+            print(f"  * Project:          {res.get('project_id')}")
+            print(f"  * Cutoff:           {res.get('cutoff')} (older than {res.get('max_age_days')} days)")
+            print(f"  * Keep Baselines:   {res.get('keep_baselines')}")
+            print(f"  * Runs Pruned:      {res.get('pruned_run_count')}")
+            print(f"  * Baselines Kept:   {res.get('skipped_baselines')}")
             print("=" * 60)
             return 0
 
@@ -247,7 +273,7 @@ def main() -> int:
             print(f"Faultline Reusable Scenario Templates ({len(templates_data)} available)")
             print("=" * 60)
             for tpl in templates_data:
-                print(f"  • {tpl['id']} [{tpl['category']}]:")
+                print(f"  * {tpl['id']} [{tpl['category']}]:")
                 print(f"      Name:        {tpl['name']}")
                 print(f"      Description: {tpl['description']}")
                 print(f"      Invariants:  {', '.join(tpl['expected_invariants'])}")
@@ -256,7 +282,7 @@ def main() -> int:
             return 0
 
         if args.command == "benchmark":
-            return run_benchmark(base, args.timeout, args.debug)
+            return run_benchmark(base, args.timeout, args.debug, args.measure_determinism)
 
         if args.command == "report":
             run_id = args.run_id

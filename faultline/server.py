@@ -161,7 +161,14 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 self.respond(200, {"snapshots": store.get_snapshots(run_id)})
             elif len(parts) == 2 and parts[1] == "state":
                 parsed_query = parse_qs(urlparse(self.path).query)
-                seq = int(parsed_query.get("sequence", [0])[0])
+                raw_seq = parsed_query.get("sequence", ["0"])[0]
+                try:
+                    seq = int(raw_seq)
+                    if seq < 0:
+                        raise ValueError()
+                except (ValueError, TypeError):
+                    self.respond(400, {"error": "sequence must be a non-negative integer"})
+                    return
                 st = store.reconstruct_state_at(run_id, seq)
                 self.respond(200, {"state": st}) if st else self.respond(404, {"error": "run not found"})
             elif len(parts) == 2 and parts[1] in {"telemetry", "traces"}:

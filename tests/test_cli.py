@@ -206,8 +206,8 @@ class FaultlineCliTests(unittest.TestCase):
                 {"id": "sc-1", "definition": {"fault": "payment_response_lost_after_commit"}}
             ]
         }
-        run_v_res = {"run": {"verdict": "failed"}}
-        run_f_res = {"run": {"verdict": "passed"}}
+        run_v_res = {"run": {"status": "completed", "verdict": "failed"}}
+        run_f_res = {"run": {"status": "completed", "verdict": "passed"}}
         api_responses = [
             scenarios_response,
             {"run_id": "r-v"},
@@ -225,6 +225,65 @@ class FaultlineCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Faultline Integration Reliability Benchmark", stdout.getvalue())
         self.assertIn("Defect Detection Rate:   100.0%", stdout.getvalue())
+        self.assertIn("Evaluator Determinism:   NOT MEASURED", stdout.getvalue())
+        self.assertIn("Benchmark PASSED", stdout.getvalue())
+
+    def test_cli_benchmark_fails_when_fixed_run_times_out_or_fails(self) -> None:
+        scenarios_response = {
+            "scenarios": [
+                {"id": "sc-1", "definition": {"fault": "payment_response_lost_after_commit"}}
+            ]
+        }
+        api_responses = [
+            scenarios_response,
+            {"run_id": "r-v"},
+            {"run_id": "r-f"},
+        ]
+        # Vulnerable run catches defect, but fixed run times out (poll_run returns None)
+        poll_responses = [
+            {"status": "completed", "verdict": "failed"},
+            None,
+        ]
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        args = ["faultline.cli", "benchmark"]
+        with patch.object(sys, "argv", args), \
+                patch("faultline.cli.api_json", side_effect=api_responses), \
+                patch("faultline.cli.poll_run", side_effect=poll_responses), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 1)
+        self.assertIn("False Positive Rate:     100.0% (1/1)", stdout.getvalue())
+        self.assertIn("Benchmark FAILED", stdout.getvalue())
+
+    def test_cli_benchmark_measure_determinism_flag(self) -> None:
+        scenarios_response = {
+            "scenarios": [
+                {"id": "sc-1", "definition": {"fault": "payment_response_lost_after_commit"}}
+            ]
+        }
+        api_responses = [
+            scenarios_response,
+            {"run_id": "r-v"},
+            {"run_id": "r-f1"},
+            {"run_id": "r-f2"},
+        ]
+        run_assertions = [{"name": "no_duplicate_charge", "status": "passed"}]
+        poll_responses = [
+            {"status": "completed", "verdict": "failed", "assertions": run_assertions},
+            {"status": "completed", "verdict": "passed", "assertions": run_assertions},
+            {"status": "completed", "verdict": "passed", "assertions": run_assertions},
+        ]
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        args = ["faultline.cli", "benchmark", "--measure-determinism"]
+        with patch.object(sys, "argv", args), \
+                patch("faultline.cli.api_json", side_effect=api_responses), \
+                patch("faultline.cli.poll_run", side_effect=poll_responses), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 0)
+        self.assertIn("Evaluator Determinism:   100.0%", stdout.getvalue())
         self.assertIn("Benchmark PASSED", stdout.getvalue())
 
     def test_cli_templates_command(self) -> None:

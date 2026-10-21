@@ -108,6 +108,7 @@ def _execute_payment_response_lost(
     store.record_event(run_id, "CHECKOUT_HTTP_REQUEST", {"method": "POST", "path": "/v1/checkout", "body": json.loads(body)})
     if signal.is_set():
         raise RunCancelled()
+    security.assert_loopback_safe(adapters.CHECKOUT_HOST)
     connection = HTTPConnection(adapters.CHECKOUT_HOST, adapters.CHECKOUT_PORT, timeout=timeout_seconds + 2)
     with _active_lock:
         _active_connections[run_id] = connection
@@ -236,6 +237,7 @@ def _execute_duplicate_webhook(
             "body": json.loads(body),
         })
 
+        security.assert_loopback_safe(adapters.CHECKOUT_HOST)
         connection = HTTPConnection(adapters.CHECKOUT_HOST, adapters.CHECKOUT_PORT, timeout=timeout_seconds + 2)
         with _active_lock:
             _active_connections[run_id] = connection
@@ -353,6 +355,7 @@ def _execute_persistence_failure(
     store.record_event(run_id, "CHECKOUT_HTTP_REQUEST", {"method": "POST", "path": "/v1/checkout", "body": json.loads(body)})
     if signal.is_set():
         raise RunCancelled()
+    security.assert_loopback_safe(adapters.CHECKOUT_HOST)
     connection = HTTPConnection(adapters.CHECKOUT_HOST, adapters.CHECKOUT_PORT, timeout=timeout_seconds + 2)
     with _active_lock:
         _active_connections[run_id] = connection

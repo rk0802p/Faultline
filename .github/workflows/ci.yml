@@ -67,7 +67,7 @@ jobs:
             --output test-results/critical-integrations-junit.xml
 
       - name: Run Defect Detection Benchmark (100% Target)
-        run: python -m faultline.cli benchmark
+        run: python -m faultline.cli benchmark --measure-determinism
 
       - name: Verify Operational Metrics & Prometheus Export
         run: python -m faultline.cli metrics

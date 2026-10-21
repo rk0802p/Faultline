@@ -11,9 +11,8 @@ from pathlib import Path
 
 from http.server import ThreadingHTTPServer
 
-from faultline import engine, store
+from faultline import adapters, engine, security, server, store
 from faultline.adapters import provider, start_local_services
-from faultline import adapters
 from faultline.server import ControlPlaneHandler
 
 
@@ -865,6 +864,110 @@ class FaultlinePlatformTests(unittest.TestCase):
         # 6. Non-existent project returns 404
         status, err = self.request("POST", "/api/projects/non-existent-proj/prune", {"max_age_days": 30})
         self.assertEqual(status, 404)
+
+    def test_all_scenario_templates_validate_and_instantiate(self) -> None:
+        """Verify that every built-in template satisfies validate_scenario and can be instantiated."""
+        status, data = self.request("GET", "/api/templates")
+        self.assertEqual(status, 200)
+        templates = data["templates"]
+        self.assertGreaterEqual(len(templates), 3)
+
+        for tpl in templates:
+            t_id = tpl["id"]
+            d_def = tpl["default_definition"]
+            # 1. Default definition must validate cleanly
+            server.validate_scenario(d_def)
+
+            # 2. Instantiate template into a distinct scenario
+            new_sc_id = f"test-inst-{t_id[:12]}"
+            status, inst_data = self.request("POST", f"/api/templates/{t_id}/instantiate", {
+                "scenario_id": new_sc_id,
+            })
+            self.assertEqual(status, 201)
+            inst_def = inst_data["instance"]["definition"]
+            # 3. Instantiated definition must validate cleanly
+            server.validate_scenario(inst_def)
+
+    def test_state_reconstruction_input_validation(self) -> None:
+        """Verify that malformed or negative sequence parameters return 400 Bad Request."""
+        run = self.launch_and_wait("fixed", "payment-response-lost")
+        run_id = run["id"]
+
+        # Valid sequence returns 200
+        status, data = self.request("GET", f"/api/runs/{run_id}/state?sequence=1")
+        self.assertEqual(status, 200)
+        self.assertIn("state", data)
+
+        # Malformed non-integer sequence returns 400
+        status, data = self.request("GET", f"/api/runs/{run_id}/state?sequence=not-a-number")
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+
+        # Negative sequence returns 400
+        status, data = self.request("GET", f"/api/runs/{run_id}/state?sequence=-5")
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+
+    def test_security_loopback_and_url_boundary_validation(self) -> None:
+        """Verify robust URL parsing, scheme checking, credential rejection, and wildcard rejection."""
+        # 1. 0.0.0.0 must be rejected
+        self.assertFalse(security.is_loopback_allowed("0.0.0.0"))
+        self.assertFalse(security.is_loopback_allowed("http://0.0.0.0:8000"))
+        self.assertFalse(security.is_loopback_allowed("0.0.0.0:8766"))
+
+        # 2. Valid loopbacks
+        self.assertTrue(security.is_loopback_allowed("127.0.0.1"))
+        self.assertTrue(security.is_loopback_allowed("127.0.0.1:8000"))
+        self.assertTrue(security.is_loopback_allowed("http://127.0.0.1:8000"))
+        self.assertTrue(security.is_loopback_allowed("localhost"))
+        self.assertTrue(security.is_loopback_allowed("localhost:8766"))
+        self.assertTrue(security.is_loopback_allowed("http://localhost:8766"))
+        self.assertTrue(security.is_loopback_allowed("::1"))
+        self.assertTrue(security.is_loopback_allowed("[::1]:8000"))
+        self.assertTrue(security.is_loopback_allowed("http://[::1]:8000"))
+
+        # 3. Invalid schemes must be rejected
+        self.assertFalse(security.is_loopback_allowed("ftp://127.0.0.1:21"))
+        self.assertFalse(security.is_loopback_allowed("file:///etc/passwd"))
+        self.assertFalse(security.is_loopback_allowed("gopher://127.0.0.1"))
+
+        # 4. Embedded credentials in URLs must be rejected
+        self.assertFalse(security.is_loopback_allowed("http://admin:secret@127.0.0.1:8000"))
+        self.assertFalse(security.is_loopback_allowed("http://user@localhost:8766"))
+
+        # 5. External domains must be rejected
+        self.assertFalse(security.is_loopback_allowed("http://evil.com"))
+        self.assertFalse(security.is_loopback_allowed("http://169.254.169.254"))
+        self.assertFalse(security.is_loopback_allowed("http://8.8.8.8"))
+
+        # 6. assert_loopback_safe raises PermissionError
+        with self.assertRaises(PermissionError):
+            security.assert_loopback_safe("http://evil.com")
+        with self.assertRaises(PermissionError):
+            security.assert_loopback_safe("0.0.0.0")
+
+    def test_security_redaction_nested_structures(self) -> None:
+        """Verify recursive sensitive data redaction on nested dicts, lists, and strings."""
+        payload = {
+            "order_id": "order-123",
+            "password": "super-secret-pass",
+            "token": "tok_live_123456",
+            "nested": {
+                "authorization": "Bearer secret-token-xyz.123",
+                "api_key": "sk_test_51234567890abcdef",
+                "card_number": "4111 2222 3333 4444",
+                "safe_list": ["item1", "Bearer my-jwt-token-val"],
+            },
+        }
+        sanitized = security.redact_sensitive(payload)
+        self.assertEqual(sanitized["order_id"], "order-123")
+        self.assertEqual(sanitized["password"], "[REDACTED]")
+        self.assertEqual(sanitized["token"], "[REDACTED]")
+        self.assertEqual(sanitized["nested"]["authorization"], "[REDACTED]")
+        self.assertEqual(sanitized["nested"]["api_key"], "[REDACTED]")
+        self.assertEqual(sanitized["nested"]["card_number"], "[REDACTED]")
+        self.assertEqual(sanitized["nested"]["safe_list"][0], "item1")
+        self.assertIn("[REDACTED]", sanitized["nested"]["safe_list"][1])
 
 
 if __name__ == "__main__":

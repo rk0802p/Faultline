@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-from . import store
+from . import security, store
 
 
 logger = logging.getLogger("faultline.adapter.http")
@@ -31,6 +31,7 @@ class ToxiproxyClient:
 
     def __init__(self, base_url: str = "http://127.0.0.1:8474") -> None:
         self.base_url = os.environ.get("TOXIPROXY_URL", base_url).rstrip("/")
+        security.assert_loopback_safe(self.base_url)
 
     def is_available(self) -> bool:
         try:
@@ -334,6 +335,7 @@ class CheckoutHandler(BaseHTTPRequestHandler):
                 })
                 store.record_event(run_id, "PAYMENT_HTTP_REQUEST", {"method": "POST", "path": "/v1/charges", "attempt": attempt + 1,
                                                                         "body": json.loads(request_body)})
+                security.assert_loopback_safe(PAYMENT_HOST)
                 connection = HTTPConnection(PAYMENT_HOST, PAYMENT_PORT, timeout=min(3, remaining))
                 try:
                     headers = {"Content-Type": "application/json"}
@@ -368,6 +370,7 @@ class CheckoutHandler(BaseHTTPRequestHandler):
                         "order_id": order_id,
                         "charge_id": charge["id"],
                     })
+                    security.assert_loopback_safe(PAYMENT_HOST)
                     refund_conn = HTTPConnection(PAYMENT_HOST, PAYMENT_PORT, timeout=min(3, max(1, remaining)))
                     try:
                         refund_body = json.dumps({

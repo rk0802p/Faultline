@@ -286,9 +286,9 @@ def initialize() -> None:
                     "fault": "duplicate_payment_webhook",
                     "webhook_deliveries": 2,
                     "delay_ms": 100,
-                    "assertion": "no_duplicate_fulfillment",
+                    "assertion": "idempotent_webhook_processing",
                 }),
-                json.dumps(["webhook_fault_activation_confirmed", "no_duplicate_fulfillment", "webhook_terminal_state", "all_webhooks_processed"]),
+                json.dumps(["webhook_fault_activation_confirmed", "idempotent_webhook_processing", "webhook_terminal_state", "all_webhooks_processed"]),
                 "Clears processed webhook idempotency ledger and resets fulfillment records.",
             ),
             (
@@ -299,6 +299,7 @@ def initialize() -> None:
                 json.dumps({
                     "order_id": {"type": "string", "default": "order-tpl-003"},
                     "amount_cents": {"type": "integer", "default": 5500},
+                    "retries": {"type": "integer", "default": 0},
                     "compensate": {"type": "boolean", "default": True},
                 }),
                 json.dumps({
@@ -307,11 +308,12 @@ def initialize() -> None:
                     "description": "Verify compensating refund reconciles payment when local database persistence fails after external commit.",
                     "order_id": "order-tpl-003",
                     "amount_cents": 5500,
-                    "fault": "partial_persistence_failure",
+                    "fault": "persistence_failure_after_payment",
+                    "retries": 0,
                     "compensate": True,
-                    "assertion": "no_uncompensated_charge",
+                    "assertion": "charge_compensated_on_failure",
                 }),
-                json.dumps(["persistence_fault_activated", "no_uncompensated_charge", "compensating_refund_issued", "order_persistence_consistent"]),
+                json.dumps(["persistence_fault_activated", "charge_compensated_on_failure", "compensating_refund_issued", "order_persistence_consistent"]),
                 "Purges provider refunds ledger and resets temporary order rows.",
             ),
             (
@@ -321,7 +323,7 @@ def initialize() -> None:
                 "Tests client behavior when dependency returns HTTP 429 Too Many Requests with Retry-After header. Verifies retry jitter and exponential backoff.",
                 json.dumps({
                     "order_id": {"type": "string", "default": "order-tpl-004"},
-                    "max_retries": {"type": "integer", "default": 3},
+                    "max_retries": {"type": "integer", "default": 2},
                     "backoff_ms": {"type": "integer", "default": 200},
                 }),
                 json.dumps({
@@ -332,9 +334,9 @@ def initialize() -> None:
                     "amount_cents": 1900,
                     "fault": "payment_response_lost_after_commit",
                     "retries": 2,
-                    "assertion": "checkout_terminal_state",
+                    "assertion": "no_duplicate_charge",
                 }),
-                json.dumps(["rate_limit_activated", "backoff_adhered", "checkout_terminal_state"]),
+                json.dumps(["rate_limit_activated", "no_duplicate_charge", "checkout_terminal_state"]),
                 "Resets rate limit bucket counters.",
             ),
             (
@@ -362,7 +364,18 @@ def initialize() -> None:
         ]
         for t_id, name, cat, desc, p_schema, d_def, exp_inv, cleanup_strat in templates:
             db.execute(
-                "INSERT OR IGNORE INTO scenario_templates VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                """
+                INSERT INTO scenario_templates (id, name, category, description, parameters_schema_json, default_definition_json, expected_invariants_json, cleanup_strategy, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    category = excluded.category,
+                    description = excluded.description,
+                    parameters_schema_json = excluded.parameters_schema_json,
+                    default_definition_json = excluded.default_definition_json,
+                    expected_invariants_json = excluded.expected_invariants_json,
+                    cleanup_strategy = excluded.cleanup_strategy
+                """,
                 (t_id, name, cat, desc, p_schema, d_def, exp_inv, cleanup_strat, now()),
             )
 

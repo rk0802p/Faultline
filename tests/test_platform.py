@@ -100,6 +100,9 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertIn("data-scenario=\"partial-persistence-failure\"", html)
         self.assertIn("Critical Integrations Suite", html)
         self.assertIn("id=\"run-diff-card\"", html)
+        self.assertIn("id=\"coverage\"", html)
+        self.assertIn("id=\"annotation-form\"", html)
+        self.assertIn("id=\"task-form\"", html)
 
     def test_partial_persistence_failure_vulnerable_leaves_uncompensated_charge(self) -> None:
         run = self.launch_and_wait("vulnerable", "partial-persistence-failure")
@@ -353,6 +356,109 @@ class FaultlinePlatformTests(unittest.TestCase):
         # Non-existent run diff returns 404
         status, _ = self.request("GET", f"/api/runs/{vuln_run['id']}/diff/non-existent-id")
         self.assertEqual(status, 404)
+
+    def test_failure_coverage_matrix_api(self) -> None:
+        status, data = self.request("GET", "/api/coverage")
+        self.assertEqual(status, 200)
+        self.assertIn("workflow_steps", data)
+        self.assertIn("fault_classes", data)
+        self.assertIn("matrix", data)
+        self.assertIn("summary", data)
+
+        step_ids = [s["id"] for s in data["workflow_steps"]]
+        self.assertIn("initiate_checkout", step_ids)
+        self.assertIn("process_payment", step_ids)
+        self.assertIn("order_persistence", step_ids)
+
+        summary = data["summary"]
+        self.assertGreater(summary["total_applicable"], 0)
+        self.assertGreaterEqual(summary["coverage_percentage"], 0)
+
+    def test_run_annotations_lifecycle(self) -> None:
+        run = self.launch_and_wait("vulnerable", "payment-response-lost")
+        run_id = run["id"]
+
+        # Initially empty
+        status, initial = self.request("GET", f"/api/runs/{run_id}/annotations")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(initial["annotations"]), 0)
+
+        # Add annotation
+        note_payload = {
+            "author": "Alice",
+            "comment": "Observed connection close immediately after charge commit.",
+            "sequence_number": 3,
+        }
+        status, created = self.request("POST", f"/api/runs/{run_id}/annotations", note_payload)
+        self.assertEqual(status, 201)
+        ann = created["annotation"]
+        self.assertEqual(ann["author"], "Alice")
+        self.assertEqual(ann["comment"], note_payload["comment"])
+        self.assertEqual(ann["sequence_number"], 3)
+
+        # Retrieve and verify
+        status, fetched = self.request("GET", f"/api/runs/{run_id}/annotations")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(fetched["annotations"]), 1)
+        self.assertEqual(fetched["annotations"][0]["id"], ann["id"])
+
+    def test_defect_action_tasks_lifecycle(self) -> None:
+        run = self.launch_and_wait("vulnerable", "duplicate-payment-webhook")
+        run_id = run["id"]
+
+        # Create task linked to run
+        task_payload = {
+            "title": "Implement webhook idempotency key cache",
+            "description": "Fulfillments duplicate when network delivers webhook twice.",
+            "priority": "critical",
+            "assignee": "Bob",
+        }
+        status, created = self.request("POST", f"/api/runs/{run_id}/tasks", task_payload)
+        self.assertEqual(status, 201)
+        task = created["task"]
+        self.assertEqual(task["title"], task_payload["title"])
+        self.assertEqual(task["status"], "open")
+        self.assertEqual(task["priority"], "critical")
+        self.assertEqual(task["assignee"], "Bob")
+
+        task_id = task["id"]
+
+        # Verify task is returned under run tasks
+        status, run_tasks = self.request("GET", f"/api/runs/{run_id}/tasks")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(run_tasks["tasks"]), 1)
+        self.assertEqual(run_tasks["tasks"][0]["id"], task_id)
+
+        # Verify task is returned under project tasks
+        status, proj_tasks = self.request("GET", "/api/projects/faultline-demo/tasks")
+        self.assertEqual(status, 200)
+        self.assertTrue(any(t["id"] == task_id for t in proj_tasks["tasks"]))
+
+        # Update task status to resolved via PATCH
+        status, updated = self.request("PATCH", f"/api/tasks/{task_id}", {"status": "resolved"})
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["task"]["status"], "resolved")
+        self.assertIsNotNone(updated["task"]["resolved_at"])
+
+    def test_incident_to_scenario_importer(self) -> None:
+        incident_payload = {
+            "title": "Checkout double charge incident 2026-10",
+            "description": "Customer reported 2 charges after network dropped during checkout retry.",
+            "fault": "payment_response_lost_after_commit",
+            "order_id": "order-inc-99",
+            "amount_cents": 4900,
+            "retries": 1,
+        }
+        status, result = self.request("POST", "/api/scenarios/import-incident", incident_payload)
+        self.assertEqual(status, 201)
+        self.assertIn("scenario_id", result)
+        self.assertEqual(result["version"], 1)
+
+        # Verify imported scenario is now available in scenario list
+        status, scenarios_data = self.request("GET", "/api/scenarios")
+        self.assertEqual(status, 200)
+        scenario_ids = [s["id"] for s in scenarios_data["scenarios"]]
+        self.assertIn(result["scenario_id"], scenario_ids)
 
 
 if __name__ == "__main__":

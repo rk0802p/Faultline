@@ -20,6 +20,7 @@
       <nav class="side-nav" aria-label="Main navigation">
         <a class="nav-item active" href="#overview"><span class="nav-icon">◫</span>Overview</a>
         <a class="nav-item" href="#scenarios"><span class="nav-icon">◇</span>Scenarios<span class="nav-count" id="scenario-count">1</span></a>
+        <a class="nav-item" href="#coverage"><span class="nav-icon">▦</span>Coverage</a>
         <a class="nav-item" href="#runs"><span class="nav-icon">◷</span>Run history</a>
       </nav>
       <div class="sidebar-bottom">
@@ -111,7 +112,32 @@
         <div class="run-panel-header"><div><div class="eyebrow">RUN INSPECTOR</div><h2 id="run-title">Run details</h2></div><div class="run-header-actions"><button class="button button-secondary" id="cancel-run" hidden>Cancel run</button><div class="run-status-pill" id="run-status">QUEUED</div></div></div>
         <div class="run-overview" id="run-overview"></div>
         <div class="ledger-strip"><div class="ledger-heading"><span class="ledger-icon">$</span><div><strong id="ledger-label">Provider side-effect ledger</strong><small id="ledger-sub">Committed charges observed by the test provider</small></div></div><div class="charge-list" id="charge-list"></div></div>
-        <div class="run-detail-grid"><div class="detail-card"><div class="detail-title"><span class="detail-title-icon assertion-icon">✓</span><div><strong>Business invariants</strong><small>Evaluated against recorded evidence</small></div></div><div id="assertion-list" class="assertion-list"></div></div><div class="detail-card timeline-card"><div class="detail-title"><span class="detail-title-icon timeline-icon">◷</span><div><strong>Execution timeline & replay</strong><small>Interactive step-by-step playback</small></div></div><div class="replay-controls" id="replay-controls"><button class="replay-btn" id="replay-prev" title="Step backward">◀</button><button class="replay-btn" id="replay-play" title="Play / Pause">▶ Play</button><button class="replay-btn" id="replay-next" title="Step forward">▶</button><button class="replay-btn" id="replay-reset" title="Reset to start">⟲</button><input type="range" class="replay-slider" id="replay-slider" min="1" max="1" value="1"><span class="replay-step-label" id="replay-step-label">Event 1 of 1</span></div><ol id="event-list" class="event-list"></ol></div></div>
+        <div class="run-detail-grid"><div class="detail-card"><div class="detail-title"><span class="detail-title-icon assertion-icon">✓</span><div><strong>Business invariants</strong><small>Evaluated against recorded evidence</small></div></div><div id="assertion-list" class="assertion-list"></div></div><div class="detail-card timeline-card"><div class="detail-title"><span class="detail-title-icon timeline-icon">◷</span><div><strong>Execution timeline & replay</strong><small>Interactive step-by-step playback</small></div></div><div class="replay-controls" id="replay-controls"><button class="replay-btn" id="replay-prev" title="Step backward">◀</button><button class="replay-btn" id="replay-play" title="Play / Pause">▶ Play</button><button class="replay-btn" id="replay-next" title="Step forward">▶</button><button class="replay-btn" id="replay-reset" title="Reset to start">⟲</button><input type="range" class="replay-slider" id="replay-slider" min="1" max="1" value="1"><span class="replay-step-label" id="replay-step-label">Event 1 of 1</span></div><div class="timeline-filters"><button class="filter-chip active" data-filter="all">All</button><button class="filter-chip" data-filter="faults">Faults</button><button class="filter-chip" data-filter="side_effects">Side effects</button><button class="filter-chip" data-filter="lifecycle">Lifecycle</button><input type="text" id="event-search" placeholder="Search events..." class="timeline-search"></div><ol id="event-list" class="event-list"></ol></div></div>
+        <div class="run-collab-grid">
+          <div class="detail-card">
+            <div class="detail-title"><span class="detail-title-icon" style="background:#eaf5ea;color:#238c5b">✎</span><div><strong>Run annotations & notes</strong><small>Collaborative observations linked to this run</small></div></div>
+            <div id="annotation-list" class="annotation-list"></div>
+            <form id="annotation-form" class="inline-form">
+              <input type="text" id="annotation-author" placeholder="Author" value="Developer" style="width:85px">
+              <input type="text" id="annotation-text" placeholder="Add an observation or note..." style="flex:1" required>
+              <button type="submit" class="button button-secondary">Add note</button>
+            </form>
+          </div>
+          <div class="detail-card">
+            <div class="detail-title"><span class="detail-title-icon" style="background:#fff3e6;color:#d97706">☑</span><div><strong>Follow-up defect actions</strong><small>Track resolution tasks created from this run</small></div></div>
+            <div id="task-list" class="task-list"></div>
+            <form id="task-form" class="inline-form">
+              <input type="text" id="task-title" placeholder="Action item (e.g. Add idempotency check)..." style="flex:1" required>
+              <select id="task-priority" style="width:75px">
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+                <option value="critical">Critical</option>
+                <option value="low">Low</option>
+              </select>
+              <button type="submit" class="button button-primary">Create task</button>
+            </form>
+          </div>
+        </div>
         <div class="report-footer"><span><span class="report-lock">⌑</span> Evidence saved to local run history</span><div><button class="text-button" id="diff-toggle-btn">Compare with baseline ⇄</button> <a class="text-button" id="download-repro" href="#" download>Download reproduction</a> <button class="text-button" id="copy-run-id">Copy run ID</button></div></div>
         <div id="run-diff-card" class="detail-card diff-card" style="margin-top:14px" hidden>
           <div class="detail-title"><span class="detail-title-icon" style="background:#f0eaff;color:#7c52db">⇄</span><div><strong>Run comparison & divergence</strong><small id="diff-subtitle">Compare with another run to identify earliest behavioral divergence</small></div></div>
@@ -122,6 +148,24 @@
             <button class="button button-secondary" id="diff-execute-btn">Diff runs</button>
           </div>
           <div id="diff-content" class="diff-content"></div>
+        </div>
+      </section>
+
+      <section class="coverage-section" id="coverage">
+        <div class="section-heading"><div><div class="eyebrow">QUALITY & ASSURANCE</div><h2>Failure coverage matrix</h2></div><span class="section-subtitle">Integration steps tested across fault domains</span></div>
+        <div class="detail-card">
+          <div class="coverage-header">
+            <div class="coverage-stat"><span class="stat-num" id="coverage-pct">0%</span><span class="stat-label">Applicable coverage</span></div>
+            <div class="coverage-stat"><span class="stat-num" id="coverage-tested">0</span><span class="stat-label">Tested cells</span></div>
+            <div class="coverage-stat"><span class="stat-num text-green" id="coverage-passed">0</span><span class="stat-label">Passed</span></div>
+            <div class="coverage-stat"><span class="stat-num text-red" id="coverage-defects">0</span><span class="stat-label">Defects exposed</span></div>
+          </div>
+          <div class="coverage-table-wrap">
+            <table class="coverage-table" id="coverage-table">
+              <thead><tr><th>Workflow step</th><th>Lost Provider Response</th><th>Duplicate Webhook</th><th>Persistence Failure</th></tr></thead>
+              <tbody id="coverage-body"></tbody>
+            </table>
+          </div>
         </div>
       </section>
 

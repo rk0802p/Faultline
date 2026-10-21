@@ -75,6 +75,11 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             self.respond(200, {"status": "ok", "service": "faultline-control-plane"})
         elif path == "/api/projects":
             self.respond(200, {"projects": store.list_projects()})
+        elif path == "/api/coverage":
+            self.respond(200, store.get_coverage_matrix())
+        elif re.fullmatch(r"/api/projects/[^/]+/tasks", path):
+            project_id = path.split("/")[3]
+            self.respond(200, {"tasks": store.list_tasks(project_id=project_id)})
         elif path == "/api/suites":
             self.respond(200, {"suites": store.list_suites()})
         elif re.fullmatch(r"/api/suites/[^/]+", path):
@@ -92,7 +97,11 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
         elif path.startswith("/api/runs/"):
             parts = path.removeprefix("/api/runs/").split("/")
             run_id = parts[0]
-            if len(parts) == 3 and parts[1] == "diff":
+            if len(parts) == 2 and parts[1] == "annotations":
+                self.respond(200, {"annotations": store.list_annotations(run_id)})
+            elif len(parts) == 2 and parts[1] == "tasks":
+                self.respond(200, {"tasks": store.list_tasks(run_id=run_id)})
+            elif len(parts) == 3 and parts[1] == "diff":
                 diff = store.diff_runs(run_id, parts[2])
                 self.respond(200, {"diff": diff}) if diff else self.respond(404, {"error": "one or both runs not found"})
             elif len(parts) == 2 and parts[1] == "reproduce":
@@ -119,7 +128,13 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path not in {"/api/runs", "/api/scenarios", "/api/scenarios/validate", "/api/suites"} and not re.fullmatch(r"/api/scenarios/[^/]+/versions", path) and not re.fullmatch(r"/api/runs/[^/]+/cancel", path):
+        if (
+            path not in {"/api/runs", "/api/scenarios", "/api/scenarios/validate", "/api/suites", "/api/scenarios/import-incident"}
+            and not re.fullmatch(r"/api/scenarios/[^/]+/versions", path)
+            and not re.fullmatch(r"/api/runs/[^/]+/cancel", path)
+            and not re.fullmatch(r"/api/runs/[^/]+/annotations", path)
+            and not re.fullmatch(r"/api/runs/[^/]+/tasks", path)
+        ):
             self.respond(404, {"error": "not found"})
             return
         try:
@@ -137,6 +152,66 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 else:
                     run = store.get_run(run_id)
                     self.respond(409, {"error": "run is not cancellable", "status": run["status"] if run else "not_found"})
+                return
+            ann_match = re.fullmatch(r"/api/runs/([^/]+)/annotations", path)
+            if ann_match:
+                run_id = ann_match.group(1)
+                if not store.get_run(run_id):
+                    self.respond(404, {"error": "run not found"})
+                    return
+                author = payload.get("author", "Developer")
+                comment = payload.get("comment", "").strip()
+                if not comment:
+                    raise ValueError("comment is required")
+                seq = payload.get("sequence_number")
+                annotation = store.add_annotation(run_id, author, comment, seq)
+                self.respond(201, {"annotation": annotation})
+                return
+            task_match = re.fullmatch(r"/api/runs/([^/]+)/tasks", path)
+            if task_match:
+                run_id = task_match.group(1)
+                if not store.get_run(run_id):
+                    self.respond(404, {"error": "run not found"})
+                    return
+                title = payload.get("title", "").strip()
+                if not title:
+                    raise ValueError("task title is required")
+                description = payload.get("description", "")
+                priority = payload.get("priority", "medium")
+                assignee = payload.get("assignee", "Developer")
+                task = store.create_task("faultline-demo", run_id, title, description, priority, assignee)
+                self.respond(201, {"task": task})
+                return
+            if path == "/api/scenarios/import-incident":
+                title = payload.get("title", "").strip()
+                if not title:
+                    raise ValueError("incident title is required")
+                fault = payload.get("fault", "payment_response_lost_after_commit")
+                if fault not in SUPPORTED_FAULTS:
+                    raise ValueError("unsupported fault type")
+                order_id = payload.get("order_id") or f"order-inc-{uuid4().hex[:6]}"
+                amount_cents = int(payload.get("amount_cents", 2500))
+                retries = int(payload.get("retries", 1))
+                definition = {
+                    "scenario_version": 1,
+                    "name": title,
+                    "description": payload.get("description", f"Imported incident: {title}"),
+                    "order_id": order_id,
+                    "amount_cents": amount_cents,
+                    "fault": fault,
+                    "retries": retries,
+                    "assertion": SUPPORTED_FAULTS[fault]["primary_assertion"],
+                }
+                if fault == "duplicate_payment_webhook":
+                    definition["webhook_deliveries"] = int(payload.get("webhook_deliveries", 2))
+                    definition["delay_ms"] = int(payload.get("delay_ms", 100))
+                validate_scenario(definition)
+                scenario_id = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:64]
+                if any(item["id"] == scenario_id for item in store.list_scenarios()):
+                    scenario_id = f"{scenario_id}-{uuid4().hex[:4]}"
+                definition["name"] = scenario_id
+                store.create_scenario(scenario_id, "faultline-demo", definition)
+                self.respond(201, {"scenario_id": scenario_id, "version": 1, "definition": definition})
                 return
             if path == "/api/scenarios/validate":
                 definition = payload.get("definition", payload)
@@ -189,6 +264,31 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             logger.info("submitted run_id=%s scenario=%s implementation=%s", run_id, scenario_id, implementation)
             self.respond(202, {"run_id": run_id, "status": "queued"})
         except (ValueError, TypeError, AttributeError, json.JSONDecodeError) as exc:
+            self.respond(400, {"error": str(exc)})
+
+    def do_PATCH(self) -> None:
+        path = urlparse(self.path).path
+        task_match = re.fullmatch(r"/api/tasks/([^/]+)", path)
+        if not task_match:
+            self.respond(404, {"error": "not found"})
+            return
+        task_id = task_match.group(1)
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length))
+            if not isinstance(payload, dict):
+                raise ValueError("request body must be a JSON object")
+            updated = store.update_task(
+                task_id,
+                status=payload.get("status"),
+                assignee=payload.get("assignee"),
+                priority=payload.get("priority"),
+            )
+            if updated:
+                self.respond(200, {"task": updated})
+            else:
+                self.respond(404, {"error": "task not found"})
+        except (ValueError, json.JSONDecodeError) as exc:
             self.respond(400, {"error": str(exc)})
 
     def static_file(self, filename: str, content_type: str) -> None:

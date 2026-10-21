@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,6 +110,26 @@ def initialize() -> None:
                 scenario_id TEXT NOT NULL REFERENCES scenarios(id) ON DELETE CASCADE,
                 sequence INTEGER NOT NULL,
                 PRIMARY KEY(suite_id, scenario_id)
+            );
+            CREATE TABLE IF NOT EXISTS run_annotations (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                author TEXT NOT NULL,
+                comment TEXT NOT NULL,
+                sequence_number INTEGER,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS run_tasks (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id),
+                run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                priority TEXT NOT NULL DEFAULT 'medium',
+                assignee TEXT,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT
             );
             """
         )
@@ -417,3 +438,233 @@ def diff_runs(run_id_a: str, run_id_b: str) -> dict[str, Any] | None:
         "first_event_divergence": first_divergence,
         "event_counts": {"run_a": len(events_a), "run_b": len(events_b)},
     }
+
+
+def list_annotations(run_id: str) -> list[dict[str, Any]]:
+    with database() as db:
+        rows = db.execute(
+            "SELECT * FROM run_annotations WHERE run_id=? ORDER BY created_at ASC", (run_id,)
+        ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "run_id": row["run_id"],
+                "author": row["author"],
+                "comment": row["comment"],
+                "sequence_number": row["sequence_number"],
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+
+def add_annotation(run_id: str, author: str, comment: str, sequence_number: int | None = None) -> dict[str, Any]:
+    annotation_id = f"ann_{uuid4().hex[:10]}"
+    created_at = now()
+    with database() as db:
+        db.execute(
+            "INSERT INTO run_annotations VALUES (?, ?, ?, ?, ?, ?)",
+            (annotation_id, run_id, author, comment, sequence_number, created_at),
+        )
+    return {
+        "id": annotation_id,
+        "run_id": run_id,
+        "author": author,
+        "comment": comment,
+        "sequence_number": sequence_number,
+        "created_at": created_at,
+    }
+
+
+def list_tasks(project_id: str = "faultline-demo", run_id: str | None = None) -> list[dict[str, Any]]:
+    with database() as db:
+        if run_id:
+            rows = db.execute(
+                "SELECT * FROM run_tasks WHERE run_id=? ORDER BY created_at DESC", (run_id,)
+            ).fetchall()
+        else:
+            rows = db.execute(
+                "SELECT * FROM run_tasks WHERE project_id=? ORDER BY created_at DESC", (project_id,)
+            ).fetchall()
+        return [
+            {
+                "id": row["id"],
+                "project_id": row["project_id"],
+                "run_id": row["run_id"],
+                "title": row["title"],
+                "description": row["description"],
+                "status": row["status"],
+                "priority": row["priority"],
+                "assignee": row["assignee"],
+                "created_at": row["created_at"],
+                "resolved_at": row["resolved_at"],
+            }
+            for row in rows
+        ]
+
+
+def create_task(
+    project_id: str = "faultline-demo",
+    run_id: str | None = None,
+    title: str = "",
+    description: str = "",
+    priority: str = "medium",
+    assignee: str = "unassigned",
+) -> dict[str, Any]:
+    task_id = f"tsk_{uuid4().hex[:10]}"
+    created_at = now()
+    with database() as db:
+        db.execute(
+            "INSERT INTO run_tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (task_id, project_id, run_id, title, description, "open", priority, assignee, created_at, None),
+        )
+    return {
+        "id": task_id,
+        "project_id": project_id,
+        "run_id": run_id,
+        "title": title,
+        "description": description,
+        "status": "open",
+        "priority": priority,
+        "assignee": assignee,
+        "created_at": created_at,
+        "resolved_at": None,
+    }
+
+
+def update_task(
+    task_id: str,
+    status: str | None = None,
+    assignee: str | None = None,
+    priority: str | None = None,
+) -> dict[str, Any] | None:
+    with database() as db:
+        row = db.execute("SELECT * FROM run_tasks WHERE id=?", (task_id,)).fetchone()
+        if not row:
+            return None
+        new_status = status if status is not None else row["status"]
+        new_assignee = assignee if assignee is not None else row["assignee"]
+        new_priority = priority if priority is not None else row["priority"]
+        resolved_at = now() if new_status == "resolved" and row["status"] != "resolved" else (None if new_status != "resolved" else row["resolved_at"])
+        db.execute(
+            "UPDATE run_tasks SET status=?, assignee=?, priority=?, resolved_at=? WHERE id=?",
+            (new_status, new_assignee, new_priority, resolved_at, task_id),
+        )
+        return {
+            "id": task_id,
+            "project_id": row["project_id"],
+            "run_id": row["run_id"],
+            "title": row["title"],
+            "description": row["description"],
+            "status": new_status,
+            "priority": new_priority,
+            "assignee": new_assignee,
+            "created_at": row["created_at"],
+            "resolved_at": resolved_at,
+        }
+
+
+def get_coverage_matrix() -> dict[str, Any]:
+    workflow_steps = [
+        {"id": "initiate_checkout", "name": "Initiate checkout", "description": "Client creates order and requests checkout"},
+        {"id": "process_payment", "name": "Process payment", "description": "Checkout submits charge to payment provider"},
+        {"id": "order_persistence", "name": "Persist order", "description": "Checkout records completed order in database"},
+        {"id": "webhook_delivery", "name": "Deliver webhook", "description": "Payment provider notifies checkout of payment events"},
+        {"id": "reconciliation_refund", "name": "Reconciliation / Refund", "description": "Checkout compensates or reconciles aborted charges"},
+    ]
+
+    fault_classes = [
+        {"id": "payment_response_lost_after_commit", "name": "Lost Response", "scenario": "payment-response-lost"},
+        {"id": "duplicate_payment_webhook", "name": "Duplicate Webhook", "scenario": "duplicate-payment-webhook"},
+        {"id": "persistence_failure_after_payment", "name": "Persistence Failure", "scenario": "partial-persistence-failure"},
+    ]
+
+    applicable_map = {
+        ("initiate_checkout", "payment_response_lost_after_commit"): True,
+        ("initiate_checkout", "duplicate_payment_webhook"): False,
+        ("initiate_checkout", "persistence_failure_after_payment"): True,
+
+        ("process_payment", "payment_response_lost_after_commit"): True,
+        ("process_payment", "duplicate_payment_webhook"): False,
+        ("process_payment", "persistence_failure_after_payment"): True,
+
+        ("order_persistence", "payment_response_lost_after_commit"): True,
+        ("order_persistence", "duplicate_payment_webhook"): True,
+        ("order_persistence", "persistence_failure_after_payment"): True,
+
+        ("webhook_delivery", "payment_response_lost_after_commit"): False,
+        ("webhook_delivery", "duplicate_payment_webhook"): True,
+        ("webhook_delivery", "persistence_failure_after_payment"): False,
+
+        ("reconciliation_refund", "payment_response_lost_after_commit"): False,
+        ("reconciliation_refund", "duplicate_payment_webhook"): False,
+        ("reconciliation_refund", "persistence_failure_after_payment"): True,
+    }
+
+    with database() as db:
+        scenario_runs = {}
+        for fc in fault_classes:
+            sc_id = fc["scenario"]
+            rows = db.execute(
+                "SELECT verdict, status, implementation FROM runs WHERE scenario_id=? ORDER BY started_at DESC LIMIT 10",
+                (sc_id,)
+            ).fetchall()
+            scenario_runs[sc_id] = {
+                "total_runs": len(rows),
+                "has_passed": any(r["verdict"] == "passed" for r in rows),
+                "has_failed": any(r["verdict"] == "failed" for r in rows),
+                "latest_verdict": rows[0]["verdict"] if rows else None,
+            }
+
+    matrix = []
+    total_applicable = 0
+    tested_count = 0
+    passed_count = 0
+    failed_count = 0
+
+    for step in workflow_steps:
+        step_row = {"step": step, "cells": []}
+        for fault in fault_classes:
+            is_applicable = applicable_map.get((step["id"], fault["id"]), False)
+            if is_applicable:
+                total_applicable += 1
+                stats = scenario_runs.get(fault["scenario"], {})
+                if stats.get("total_runs", 0) > 0:
+                    tested_count += 1
+                    if stats.get("has_passed"):
+                        passed_count += 1
+                        cell_status = "passed"
+                    else:
+                        failed_count += 1
+                        cell_status = "defect_exposed"
+                else:
+                    cell_status = "untested"
+            else:
+                cell_status = "not_applicable"
+
+            step_row["cells"].append({
+                "fault_id": fault["id"],
+                "fault_name": fault["name"],
+                "scenario_id": fault["scenario"],
+                "applicable": is_applicable,
+                "status": cell_status,
+                "runs_count": scenario_runs.get(fault["scenario"], {}).get("total_runs", 0) if is_applicable else 0,
+                "latest_verdict": scenario_runs.get(fault["scenario"], {}).get("latest_verdict") if is_applicable else None,
+            })
+        matrix.append(step_row)
+
+    coverage_pct = round((tested_count / total_applicable * 100) if total_applicable else 0, 1)
+
+    return {
+        "workflow_steps": workflow_steps,
+        "fault_classes": fault_classes,
+        "matrix": matrix,
+        "summary": {
+            "total_applicable": total_applicable,
+            "tested_cells": tested_count,
+            "passed_cells": passed_count,
+            "defect_exposed_cells": failed_count,
+            "coverage_percentage": coverage_pct,
+        },
+    }
+

@@ -1,5 +1,15 @@
 const $ = (selector) => document.querySelector(selector);
-const state = { scenarios: [], runs: [], selectedRunId: null, pollTimer: null, replay: { currentStep: 0, timer: null, events: [] } };
+const state = {
+  scenarios: [],
+  runs: [],
+  selectedRunId: null,
+  pollTimer: null,
+  replay: { currentStep: 0, timer: null, events: [] },
+  timelineFilter: "all",
+  searchQuery: "",
+  annotations: [],
+  tasks: [],
+};
 
 async function request(path, options) {
   const response = await fetch(path, options);
@@ -96,12 +106,7 @@ function renderRun(run) {
       <div class="assertion-copy"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.observed)}</small><span>${evidenceEvents(item)}</span></div></div>`).join("")
     : '<div class="assertion-row"><span class="assertion-state">·</span><div class="assertion-copy"><strong>Waiting for evaluation</strong><small>Assertions appear when the run finishes.</small></div></div>';
 
-  $("#event-list").innerHTML = run.events.map((event) => {
-    const tone = event.type.includes("DROPPED") || event.type.includes("UNKNOWN") ? "fault" :
-      (event.type.includes("COMPLETED") || event.type.includes("COMMITTED") ? "good" : "");
-    const detail = Object.entries(event.payload || {}).map(([key, value]) => `${key}: ${value}`).join(" · ");
-    return `<li class="event-item ${tone}" id="event-${event.sequence}"><strong>${String(event.sequence).padStart(2, "0")} · ${escapeHtml(event.type.replaceAll("_", " "))}</strong><small>${escapeHtml(detail || formatTime(event.recorded_at))}</small></li>`;
-  }).join("") || '<li class="event-item"><strong>Waiting for events</strong><small>The runner is preparing the local test environment.</small></li>';
+  renderEventList(run.events);
   $("#copy-run-id").dataset.runId = run.id;
   $("#download-repro").href = `/api/runs/${encodeURIComponent(run.id)}/reproduce`;
   state.replay.events = run.events;
@@ -110,6 +115,36 @@ function renderRun(run) {
   $("#cancel-run").hidden = !["queued", "running"].includes(run.status);
   $("#cancel-run").dataset.runId = run.id;
   if (active) schedulePoll(run.id);
+}
+
+function renderEventList(events) {
+  const filtered = (events || []).filter((event) => {
+    const q = (state.searchQuery || "").toLowerCase();
+    if (q) {
+      const match = (event.type + " " + JSON.stringify(event.payload || {})).toLowerCase();
+      if (!match.includes(q)) return false;
+    }
+    const f = state.timelineFilter;
+    if (f === "faults") {
+      return event.type.includes("FAULT") || event.type.includes("DROPPED") || event.type.includes("UNKNOWN") || event.type.includes("FAILED");
+    }
+    if (f === "side_effects") {
+      return event.type.includes("COMMITTED") || event.type.includes("FULFILLMENT") || event.type.includes("REFUND") || event.type.includes("COMPENSATION");
+    }
+    if (f === "lifecycle") {
+      return event.type.includes("RUN_") || event.type.includes("CHECKOUT_STARTED") || event.type.includes("CHECKOUT_REACHED") || event.type.includes("ASSERTIONS");
+    }
+    return true;
+  });
+
+  const listEl = $("#event-list");
+  if (!listEl) return;
+  listEl.innerHTML = filtered.map((event) => {
+    const tone = event.type.includes("DROPPED") || event.type.includes("UNKNOWN") || event.type.includes("FAILED") ? "fault" :
+      (event.type.includes("COMPLETED") || event.type.includes("COMMITTED") ? "good" : "");
+    const detail = Object.entries(event.payload || {}).map(([key, value]) => `${key}: ${value}`).join(" · ");
+    return `<li class="event-item ${tone}" id="event-${event.sequence}"><strong>${String(event.sequence).padStart(2, "0")} · ${escapeHtml(event.type.replaceAll("_", " "))}</strong><small>${escapeHtml(detail || formatTime(event.recorded_at))}</small></li>`;
+  }).join("") || '<li class="event-item"><strong>No matching events</strong><small>The event stream or filter returned no matches.</small></li>';
 }
 
 function setReplayStep(step, scroll = true) {
@@ -168,6 +203,7 @@ async function openRun(runId) {
     if (!run) throw new Error("Run not found");
     state.selectedRunId = runId;
     renderRun(run);
+    await Promise.all([loadAnnotations(runId), loadTasks(runId)]);
     $("#active-run").scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) { toast(error.message); }
 }
@@ -188,6 +224,7 @@ async function refreshRuns() {
   const { runs } = await request("/api/runs");
   state.runs = runs;
   renderHistory();
+  await refreshCoverage();
 }
 
 async function launchRun(implementation, scenarioId) {
@@ -211,7 +248,7 @@ async function launchRun(implementation, scenarioId) {
 
 async function initialize() {
   try {
-    const [scenarioResponse] = await Promise.all([request("/api/scenarios"), refreshRuns()]);
+    const [scenarioResponse] = await Promise.all([request("/api/scenarios"), refreshRuns(), refreshCoverage()]);
     state.scenarios = scenarioResponse.scenarios;
     $("#scenario-count").textContent = String(state.scenarios.length);
     const select = $("#scenario-select");
@@ -436,5 +473,178 @@ $("#diff-toggle-btn")?.addEventListener("click", () => {
   }
 });
 $("#diff-execute-btn")?.addEventListener("click", executeRunDiff);
+
+async function loadAnnotations(runId) {
+  try {
+    const { annotations } = await request(`/api/runs/${encodeURIComponent(runId)}/annotations`);
+    state.annotations = annotations;
+    renderAnnotations();
+  } catch {}
+}
+
+function renderAnnotations() {
+  const list = $("#annotation-list");
+  if (!list) return;
+  if (!state.annotations.length) {
+    list.innerHTML = '<span class="empty-row" style="padding:10px;font-size:10px">No notes added yet. Record an observation below.</span>';
+    return;
+  }
+  list.innerHTML = state.annotations.map((a) => `
+    <div class="annotation-item">
+      <div class="annotation-meta"><span><strong>${escapeHtml(a.author)}</strong></span><span>${escapeHtml(formatTime(a.created_at))}</span></div>
+      <div>${escapeHtml(a.comment)}</div>
+    </div>
+  `).join("");
+}
+
+async function handleAddAnnotation(event) {
+  event.preventDefault();
+  if (!state.selectedRunId) return;
+  const authorInput = $("#annotation-author");
+  const textInput = $("#annotation-text");
+  const comment = textInput.value.trim();
+  if (!comment) return;
+  try {
+    const { annotation } = await request(`/api/runs/${encodeURIComponent(state.selectedRunId)}/annotations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ author: authorInput.value.trim() || "Developer", comment }),
+    });
+    state.annotations.push(annotation);
+    renderAnnotations();
+    textInput.value = "";
+    toast("Note added to run");
+  } catch (err) {
+    toast(`Error adding note: ${err.message}`);
+  }
+}
+
+async function loadTasks(runId) {
+  try {
+    const { tasks } = await request(`/api/runs/${encodeURIComponent(runId)}/tasks`);
+    state.tasks = tasks;
+    renderTasks();
+  } catch {}
+}
+
+function renderTasks() {
+  const list = $("#task-list");
+  if (!list) return;
+  if (!state.tasks.length) {
+    list.innerHTML = '<span class="empty-row" style="padding:10px;font-size:10px">No tasks created. Add an action item below.</span>';
+    return;
+  }
+  list.innerHTML = state.tasks.map((t) => `
+    <div class="task-item ${t.status === 'resolved' ? 'resolved' : ''}">
+      <input type="checkbox" ${t.status === 'resolved' ? 'checked' : ''} data-task-id="${escapeHtml(t.id)}">
+      <span class="task-badge ${escapeHtml(t.priority)}">${escapeHtml(t.priority)}</span>
+      <span style="flex:1"><strong>${escapeHtml(t.title)}</strong></span>
+      <small style="color:#8592a6">${escapeHtml(t.assignee)}</small>
+    </div>
+  `).join("");
+  list.querySelectorAll("input[type=checkbox]").forEach((cb) => {
+    cb.addEventListener("change", async (e) => {
+      const taskId = e.target.dataset.taskId;
+      const newStatus = e.target.checked ? "resolved" : "open";
+      try {
+        await request(`/api/tasks/${encodeURIComponent(taskId)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: newStatus }),
+        });
+        const task = state.tasks.find((t) => t.id === taskId);
+        if (task) task.status = newStatus;
+        renderTasks();
+        toast(`Task marked ${newStatus}`);
+      } catch (err) {
+        toast(`Error: ${err.message}`);
+      }
+    });
+  });
+}
+
+async function handleAddTask(event) {
+  event.preventDefault();
+  if (!state.selectedRunId) return;
+  const titleInput = $("#task-title");
+  const prioSelect = $("#task-priority");
+  const title = titleInput.value.trim();
+  if (!title) return;
+  try {
+    const { task } = await request(`/api/runs/${encodeURIComponent(state.selectedRunId)}/tasks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, priority: prioSelect.value, assignee: "Developer" }),
+    });
+    state.tasks.unshift(task);
+    renderTasks();
+    titleInput.value = "";
+    toast("Action item created");
+  } catch (err) {
+    toast(`Error: ${err.message}`);
+  }
+}
+
+async function refreshCoverage() {
+  try {
+    const data = await request("/api/coverage");
+    renderCoverage(data);
+  } catch {}
+}
+
+function renderCoverage(data) {
+  const pct = $("#coverage-pct");
+  const tested = $("#coverage-tested");
+  const passed = $("#coverage-passed");
+  const defects = $("#coverage-defects");
+  const tbody = $("#coverage-body");
+  if (!tbody || !data) return;
+
+  if (pct) pct.textContent = data.summary.coverage_percentage + "%";
+  if (tested) tested.textContent = data.summary.tested_cells;
+  if (passed) passed.textContent = data.summary.passed_cells;
+  if (defects) defects.textContent = data.summary.defect_exposed_cells;
+
+  tbody.innerHTML = data.matrix.map((row) => {
+    const cellsHtml = row.cells.map((c) => {
+      let label = "Untested";
+      let icon = "○";
+      if (!c.applicable) {
+        label = "N/A";
+        icon = "—";
+      } else if (c.status === "passed") {
+        label = `Passed (${c.runs_count})`;
+        icon = "✓";
+      } else if (c.status === "defect_exposed") {
+        label = `Exposed (${c.runs_count})`;
+        icon = "⌁";
+      }
+      return `<td><span class="cov-cell ${c.status}">${icon} ${escapeHtml(label)}</span></td>`;
+    }).join("");
+    return `
+      <tr>
+        <td><strong>${escapeHtml(row.step.name)}</strong><br><small style="color:#8592a6">${escapeHtml(row.step.description)}</small></td>
+        ${cellsHtml}
+      </tr>
+    `;
+  }).join("");
+}
+
+document.querySelectorAll(".filter-chip").forEach((chip) => {
+  chip.addEventListener("click", () => {
+    document.querySelectorAll(".filter-chip").forEach((c) => c.classList.remove("active"));
+    chip.classList.add("active");
+    state.timelineFilter = chip.dataset.filter;
+    renderEventList(state.replay.events);
+  });
+});
+
+$("#event-search")?.addEventListener("input", (e) => {
+  state.searchQuery = e.target.value.trim();
+  renderEventList(state.replay.events);
+});
+
+$("#annotation-form")?.addEventListener("submit", handleAddAnnotation);
+$("#task-form")?.addEventListener("submit", handleAddTask);
 
 initialize();

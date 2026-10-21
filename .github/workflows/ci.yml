@@ -25,7 +25,7 @@ jobs:
           node-version: "20"
 
       - name: Compile Python bytecode
-        run: python -m compileall -q faultline tests
+        run: python -m compileall -q faultline tests examples
 
       - name: Validate client JavaScript syntax
         run: node --check faultline/web/app.js
@@ -34,7 +34,7 @@ jobs:
         run: python -m unittest discover -s tests -v
 
   integration-resilience-suite:
-    name: Critical Integration Suite
+    name: Critical Integration Suite & Benchmarks
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -65,6 +65,18 @@ jobs:
             --implementation fixed \
             --report-format junit \
             --output test-results/critical-integrations-junit.xml
+
+      - name: Run Defect Detection Benchmark (100% Target)
+        run: python -m faultline.cli benchmark
+
+      - name: Verify Operational Metrics & Prometheus Export
+        run: python -m faultline.cli metrics
+
+      - name: Test Artifact Retention Pruning (Dry Run)
+        run: python -m faultline.cli prune --project faultline-demo --days 30 --dry-run
+
+      - name: Run Programmatic SDK Checkout Demo
+        run: python examples/checkout_demo.py
 
       - name: Upload Test Report Artifact
         if: always()

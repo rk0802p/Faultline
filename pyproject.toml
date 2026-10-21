@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "faultline"
+version = "0.1.0"
+description = "Integration failure testing platform for distributed recovery workflows"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Faultline Team" }
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Quality Assurance",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = []
+
+[project.scripts]
+faultline = "faultline.cli:main"
+faultline-server = "faultline.server:main"
+faultline-adapters = "faultline.adapters:main"
+
+[tool.setuptools.packages.find]
+include = ["faultline*"]
+
+[tool.setuptools.package-data]
+faultline = ["web/*", "scenarios/*"]

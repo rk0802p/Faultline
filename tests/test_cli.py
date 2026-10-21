@@ -166,6 +166,67 @@ class FaultlineCliTests(unittest.TestCase):
                 cli.main()
             self.assertEqual(cm.exception.code, 2)
 
+    def test_cli_report_command_outputs_report(self) -> None:
+        report_data = {
+            "report": {
+                "run_id": "run-rep-1",
+                "scenario_id": "payment-response-lost",
+                "scenario_name": "Payment response lost",
+                "implementation": "fixed",
+                "verdict": "passed",
+                "duration_seconds": 1.25,
+                "fault_analysis": {"fault_type": "payment_response_lost_after_commit", "activated": True, "time_to_fault_ms": 200},
+                "recovery_analysis": {"recovered": True, "time_to_recovery_ms": 400},
+                "invariants": [{"name": "no_duplicate_charge", "status": "passed", "expected": "1 charge", "observed": "1 charge"}],
+                "recommendation": "System demonstrated resilient behavior.",
+            }
+        }
+        stdout, stderr = io.StringIO(), io.StringIO()
+        args = ["faultline.cli", "report", "--run-id", "run-rep-1", "--report-format", "json"]
+        with patch.object(sys, "argv", args), patch("faultline.cli.api_json", return_value=report_data), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 0)
+        self.assertIn("run-rep-1", stdout.getvalue())
+        self.assertIn('"verdict": "passed"', stdout.getvalue())
+
+        # Markdown format
+        stdout_md = io.StringIO()
+        args_md = ["faultline.cli", "report", "--run-id", "run-rep-1", "--report-format", "markdown"]
+        with patch.object(sys, "argv", args_md), patch("faultline.cli.api_json", return_value=report_data), \
+                contextlib.redirect_stdout(stdout_md), contextlib.redirect_stderr(io.StringIO()):
+            code = cli.main()
+        self.assertEqual(code, 0)
+        self.assertIn("# Faultline Retrospective Report", stdout_md.getvalue())
+        self.assertIn("Recommendation", stdout_md.getvalue())
+
+    def test_cli_benchmark_command_executes_suite_and_reports_metrics(self) -> None:
+        scenarios_response = {
+            "scenarios": [
+                {"id": "sc-1", "definition": {"fault": "payment_response_lost_after_commit"}}
+            ]
+        }
+        run_v_res = {"run": {"verdict": "failed"}}
+        run_f_res = {"run": {"verdict": "passed"}}
+        api_responses = [
+            scenarios_response,
+            {"run_id": "r-v"},
+            {"run_id": "r-f"},
+        ]
+        poll_responses = [run_v_res["run"], run_f_res["run"]]
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        args = ["faultline.cli", "benchmark"]
+        with patch.object(sys, "argv", args), \
+                patch("faultline.cli.api_json", side_effect=api_responses), \
+                patch("faultline.cli.poll_run", side_effect=poll_responses), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 0)
+        self.assertIn("Faultline Integration Reliability Benchmark", stdout.getvalue())
+        self.assertIn("Defect Detection Rate:   100.0%", stdout.getvalue())
+        self.assertIn("Benchmark PASSED", stdout.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

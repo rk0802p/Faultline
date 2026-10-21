@@ -101,6 +101,19 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 self.respond(200, {"annotations": store.list_annotations(run_id)})
             elif len(parts) == 2 and parts[1] == "tasks":
                 self.respond(200, {"tasks": store.list_tasks(run_id=run_id)})
+            elif len(parts) == 2 and parts[1] == "report":
+                report = store.generate_run_report(run_id)
+                if not report:
+                    self.respond(404, {"error": "run not found"})
+                elif "format=markdown" in self.path or "text/markdown" in self.headers.get("Accept", ""):
+                    md = store.generate_markdown_report(report).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/markdown; charset=utf-8")
+                    self.send_header("Content-Length", str(len(md)))
+                    self.end_headers()
+                    self.wfile.write(md)
+                else:
+                    self.respond(200, {"report": report})
             elif len(parts) == 3 and parts[1] == "diff":
                 diff = store.diff_runs(run_id, parts[2])
                 self.respond(200, {"diff": diff}) if diff else self.respond(404, {"error": "one or both runs not found"})

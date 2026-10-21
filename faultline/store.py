@@ -668,3 +668,146 @@ def get_coverage_matrix() -> dict[str, Any]:
         },
     }
 
+
+def generate_run_report(run_id: str) -> dict[str, Any] | None:
+    run = get_run(run_id)
+    if not run:
+        return None
+
+    events = run["events"]
+    assertions = run["assertions"]
+    summary = run["summary"]
+    annotations = list_annotations(run_id)
+    tasks = list_tasks(run_id=run_id)
+
+    duration_s = 0.0
+    if run.get("started_at") and run.get("finished_at"):
+        try:
+            start_dt = datetime.fromisoformat(run["started_at"].replace("Z", "+00:00"))
+            finish_dt = datetime.fromisoformat(run["finished_at"].replace("Z", "+00:00"))
+            duration_s = max(0.0, (finish_dt - start_dt).total_seconds())
+        except Exception:
+            pass
+
+    fault_event = next((e for e in events if "FAULT_" in e["type"] or e["type"] in {"DROPPED", "UNKNOWN"}), None)
+    time_to_fault_ms = None
+    time_to_recovery_ms = None
+    if fault_event and run.get("started_at") and fault_event.get("recorded_at"):
+        try:
+            start_dt = datetime.fromisoformat(run["started_at"].replace("Z", "+00:00"))
+            fault_dt = datetime.fromisoformat(fault_event["recorded_at"].replace("Z", "+00:00"))
+            time_to_fault_ms = max(0, int((fault_dt - start_dt).total_seconds() * 1000))
+            if run.get("finished_at"):
+                finish_dt = datetime.fromisoformat(run["finished_at"].replace("Z", "+00:00"))
+                time_to_recovery_ms = max(0, int((finish_dt - fault_dt).total_seconds() * 1000))
+        except Exception:
+            pass
+
+    failed_assertions = [a for a in assertions if a["status"] != "passed"]
+    failed_names = {a["name"] for a in failed_assertions}
+    if not failed_assertions and run["verdict"] == "passed":
+        recommendation = "System demonstrated resilient integration behavior. All evaluated invariants held under fault injection."
+    elif "no_duplicate_charge" in failed_names:
+        recommendation = "Deduplication failure: upstream checkout retried after dropped response without supplying an idempotency key."
+    elif "idempotent_webhook_processing" in failed_names:
+        recommendation = "Webhook redelivery failure: fulfillment service committed duplicate order actions without deduplication ledger."
+    elif "charge_compensated_on_failure" in failed_names or "no_orphaned_charge" in failed_names:
+        recommendation = "Persistence failure: checkout committed payment but failed order write without issuing a compensating refund."
+    else:
+        recommendation = "One or more business invariants failed during fault evaluation. Review assertion evidence below."
+
+    report = {
+        "run_id": run_id,
+        "scenario_id": run["scenario_id"],
+        "scenario_name": run["scenario"]["name"] if isinstance(run.get("scenario"), dict) else run.get("scenario", run["scenario_id"]),
+        "implementation": run["implementation"],
+        "status": run["status"],
+        "verdict": run["verdict"],
+        "started_at": run.get("started_at"),
+        "finished_at": run.get("finished_at"),
+        "duration_seconds": round(duration_s, 3),
+        "fault_analysis": {
+            "fault_type": run["scenario"].get("fault") if isinstance(run.get("scenario"), dict) else "unknown",
+            "activated": fault_event is not None,
+            "activation_event": fault_event["type"] if fault_event else None,
+            "time_to_fault_ms": time_to_fault_ms,
+        },
+        "recovery_analysis": {
+            "recovered": run["verdict"] == "passed",
+            "time_to_recovery_ms": time_to_recovery_ms,
+            "side_effects": summary,
+        },
+        "invariants": assertions,
+        "annotations": annotations,
+        "tasks": tasks,
+        "recommendation": recommendation,
+    }
+    return report
+
+
+def generate_markdown_report(report: dict[str, Any]) -> str:
+    verdict_badge = "PASSED" if report["verdict"] == "passed" else ("FAILED" if report["verdict"] == "failed" else report["verdict"].upper())
+    fault_status = "Observed" if report["fault_analysis"]["activated"] else "Not Activated"
+
+    lines = [
+        f"# Faultline Retrospective Report — {report['scenario_name']}",
+        "",
+        f"> **Run ID:** `{report['run_id']}`  ",
+        f"> **Verdict:** **{verdict_badge}**  ",
+        f"> **Implementation:** `{report['implementation']}`  ",
+        f"> **Duration:** `{report['duration_seconds']}s`",
+        "",
+        "## Executive Summary",
+        "",
+        f"- **Scenario:** `{report['scenario_id']}`",
+        f"- **Fault Class:** `{report['fault_analysis']['fault_type']}` ({fault_status})",
+    ]
+
+    if report["fault_analysis"]["time_to_fault_ms"] is not None:
+        lines.append(f"- **Time to Fault Activation:** `{report['fault_analysis']['time_to_fault_ms']} ms`")
+    if report["recovery_analysis"]["time_to_recovery_ms"] is not None:
+        lines.append(f"- **Time to Mitigation / Terminal State:** `{report['recovery_analysis']['time_to_recovery_ms']} ms`")
+
+    lines.extend([
+        "",
+        "### Recommendation",
+        f"> {report['recommendation']}",
+        "",
+        "## Invariant Evaluation",
+        "",
+        "| Invariant | Status | Expected | Observed |",
+        "| :--- | :---: | :--- | :--- |",
+    ])
+
+    for inv in report["invariants"]:
+        icon = "Passed" if inv["status"] == "passed" else "Failed"
+        lines.append(f"| `{inv['name']}` | {icon} | {inv['expected']} | {inv['observed']} |")
+
+    if report.get("annotations"):
+        lines.extend([
+            "",
+            "## Team Observations & Annotations",
+            "",
+        ])
+        for a in report["annotations"]:
+            seq_info = f" (at step #{a['sequence_number']})" if a.get("sequence_number") else ""
+            lines.append(f"- **{a['author']}**{seq_info}: {a['comment']}")
+
+    if report.get("tasks"):
+        lines.extend([
+            "",
+            "## Follow-up Action Items",
+            "",
+        ])
+        for t in report["tasks"]:
+            box = "[x]" if t["status"] == "resolved" else "[ ]"
+            lines.append(f"- {box} **[{t['priority'].upper()}]** {t['title']} (`{t['assignee']}`)")
+
+    lines.extend([
+        "",
+        "---",
+        f"*Generated by Faultline Integration Failure Lab · {now()}*",
+    ])
+    return "\n".join(lines)
+
+

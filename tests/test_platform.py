@@ -460,6 +460,30 @@ class FaultlinePlatformTests(unittest.TestCase):
         scenario_ids = [s["id"] for s in scenarios_data["scenarios"]]
         self.assertIn(result["scenario_id"], scenario_ids)
 
+    def test_retrospective_report_endpoint(self) -> None:
+        run = self.launch_and_wait("fixed", "payment-response-lost")
+        run_id = run["id"]
+
+        status, report_data = self.request("GET", f"/api/runs/{run_id}/report")
+        self.assertEqual(status, 200)
+        rep = report_data["report"]
+        self.assertEqual(rep["run_id"], run_id)
+        self.assertEqual(rep["verdict"], "passed")
+        self.assertTrue(rep["fault_analysis"]["activated"])
+        self.assertTrue(rep["recovery_analysis"]["recovered"])
+        self.assertIn("resilient", rep["recommendation"].lower())
+
+        # Markdown format
+        connection = http.client.HTTPConnection("127.0.0.1", self.api_port, timeout=4)
+        connection.request("GET", f"/api/runs/{run_id}/report?format=markdown")
+        response = connection.getresponse()
+        md = response.read().decode("utf-8")
+        connection.close()
+        self.assertEqual(response.status, 200)
+        self.assertIn("# Faultline Retrospective Report", md)
+        self.assertIn("Executive Summary", md)
+        self.assertIn("Invariant Evaluation", md)
+
 
 if __name__ == "__main__":
     unittest.main()

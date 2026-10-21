@@ -23,6 +23,7 @@ logger = logging.getLogger("faultline.control")
 SUPPORTED_FAULTS = {
     "payment_response_lost_after_commit": {"primary_assertion": "no_duplicate_charge"},
     "duplicate_payment_webhook": {"primary_assertion": "idempotent_webhook_processing"},
+    "persistence_failure_after_payment": {"primary_assertion": "charge_compensated_on_failure"},
 }
 
 
@@ -41,7 +42,7 @@ def validate_scenario(definition: dict[str, Any]) -> None:
         raise ValueError("order_id is required")
     if type(definition.get("amount_cents")) is not int or definition["amount_cents"] < 1:
         raise ValueError("amount_cents must be a positive integer")
-    if fault == "payment_response_lost_after_commit":
+    if fault in {"payment_response_lost_after_commit", "persistence_failure_after_payment"}:
         if type(definition.get("retries")) is not int or not 0 <= definition["retries"] <= 3:
             raise ValueError("retries must be between zero and three")
     elif fault == "duplicate_payment_webhook":

@@ -26,6 +26,7 @@ class TestPaymentProvider:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.charges: dict[str, list[dict[str, Any]]] = {}
+        self.refunds: dict[str, list[dict[str, Any]]] = {}
         self.idempotency: dict[tuple[str, str], dict[str, Any]] = {}
         self.faulted_runs: set[str] = set()
 
@@ -56,13 +57,38 @@ class TestPaymentProvider:
                 store.record_event(run_id, "FAULT_RESPONSE_DROPPED", {"adapter": "local-http", "after_commit": True})
             return result, should_lose
 
+    def refund(self, payload: dict[str, Any]) -> dict[str, Any]:
+        run_id = payload["run_id"]
+        charge_id = payload["charge_id"]
+        with self.lock:
+            refund_id = f"ref_{len(self.refunds.get(run_id, [])) + 1}"
+            result = {
+                "id": refund_id,
+                "charge_id": charge_id,
+                "amount_cents": payload.get("amount_cents", 0),
+                "status": "refunded",
+            }
+            self.refunds.setdefault(run_id, []).append(result)
+            logger.debug("refund committed run_id=%s refund_id=%s charge_id=%s", run_id, refund_id, charge_id)
+            store.record_event(run_id, "PROVIDER_REFUND_COMMITTED", {
+                "refund_id": refund_id,
+                "charge_id": charge_id,
+                "amount_cents": result["amount_cents"],
+            })
+            return result
+
     def ledger(self, run_id: str) -> list[dict[str, Any]]:
         with self.lock:
             return list(self.charges.get(run_id, []))
 
+    def refund_ledger(self, run_id: str) -> list[dict[str, Any]]:
+        with self.lock:
+            return list(self.refunds.get(run_id, []))
+
     def cleanup(self, run_id: str) -> None:
         with self.lock:
             self.charges.pop(run_id, None)
+            self.refunds.pop(run_id, None)
             self.faulted_runs.discard(run_id)
             for key in [key for key in self.idempotency if key[0] == run_id]:
                 self.idempotency.pop(key, None)
@@ -147,6 +173,18 @@ def json_reply(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> No
 
 class ProviderHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
+        if self.path == "/v1/refunds":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length))
+                if not payload.get("run_id") or not payload.get("charge_id"):
+                    raise ValueError("run_id and charge_id are required")
+                result = provider.refund(payload)
+                json_reply(self, 200, result)
+            except (ValueError, json.JSONDecodeError) as exc:
+                json_reply(self, 400, {"error": str(exc)})
+            return
+
         if self.path != "/v1/charges":
             json_reply(self, 404, {"error": "not found"})
             return
@@ -173,6 +211,10 @@ class ProviderHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/v1/refunds":
+            run_id = parse_qs(parsed.query).get("run_id", [""])[0]
+            json_reply(self, 200, {"refunds": provider.refund_ledger(run_id)})
+            return
         if parsed.path != "/v1/ledger":
             json_reply(self, 404, {"error": "not found"})
             return
@@ -255,6 +297,66 @@ class CheckoutHandler(BaseHTTPRequestHandler):
                         store.record_event(run_id, "CHECKOUT_RETRY_SCHEDULED", {"attempt": attempt + 1})
                 finally:
                     connection.close()
+
+            if charge and payload.get("fault") == "persistence_failure_after_payment":
+                store.record_event(run_id, "ORDER_PERSISTENCE_STARTED", {"order_id": order_id})
+                store.record_event(run_id, "FAULT_PERSISTENCE_FAILED", {
+                    "adapter": "local-db",
+                    "stage": "order_persistence",
+                    "order_id": order_id,
+                })
+                if fixed:
+                    store.record_event(run_id, "COMPENSATION_INITIATED", {
+                        "order_id": order_id,
+                        "charge_id": charge["id"],
+                    })
+                    refund_conn = HTTPConnection("127.0.0.1", PAYMENT_PORT, timeout=min(3, max(1, remaining)))
+                    try:
+                        refund_body = json.dumps({
+                            "run_id": run_id,
+                            "charge_id": charge["id"],
+                            "amount_cents": amount_cents,
+                        })
+                        refund_conn.request("POST", "/v1/refunds", refund_body, {"Content-Type": "application/json"})
+                        refund_resp = refund_conn.getresponse()
+                        refund_result = json.loads(refund_resp.read())
+                        store.record_event(run_id, "COMPENSATION_COMPLETED", {
+                            "order_id": order_id,
+                            "charge_id": charge["id"],
+                            "refund_id": refund_result["id"],
+                        })
+                    finally:
+                        refund_conn.close()
+                    status = "cancelled_and_refunded"
+                    store.record_event(run_id, "CHECKOUT_REACHED_TERMINAL_STATE", {
+                        "order_id": order_id,
+                        "status": status,
+                        "attempts": attempts,
+                    })
+                    json_reply(self, 200, {
+                        "order_id": order_id,
+                        "status": status,
+                        "attempts": attempts,
+                        "charge": charge,
+                        "compensated": True,
+                    })
+                    return
+                else:
+                    status = "persistence_failed"
+                    store.record_event(run_id, "CHECKOUT_REACHED_TERMINAL_STATE", {
+                        "order_id": order_id,
+                        "status": status,
+                        "attempts": attempts,
+                    })
+                    json_reply(self, 200, {
+                        "order_id": order_id,
+                        "status": status,
+                        "attempts": attempts,
+                        "charge": charge,
+                        "compensated": False,
+                    })
+                    return
+
             status = "paid" if charge else "payment_unknown"
             store.record_event(run_id, "CHECKOUT_REACHED_TERMINAL_STATE", {"order_id": order_id, "status": status, "attempts": attempts})
             json_reply(self, 200, {"order_id": order_id, "status": status, "attempts": attempts, "charge": charge})

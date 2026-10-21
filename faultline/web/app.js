@@ -1,5 +1,5 @@
 const $ = (selector) => document.querySelector(selector);
-const state = { scenarios: [], runs: [], selectedRunId: null, pollTimer: null };
+const state = { scenarios: [], runs: [], selectedRunId: null, pollTimer: null, replay: { currentStep: 0, timer: null, events: [] } };
 
 async function request(path, options) {
   const response = await fetch(path, options);
@@ -65,6 +65,7 @@ function renderRun(run) {
 
   const charges = summary.charges || [];
   const fulfillments = summary.fulfillments || [];
+  const refunds = summary.refunds || [];
   const ledgerLabel = $("#ledger-label");
   const ledgerSub = $("#ledger-sub");
   if (isWebhook) {
@@ -75,15 +76,18 @@ function renderRun(run) {
       : '<span class="ledger-empty">No fulfillment recorded yet.</span>';
   } else {
     if (ledgerLabel) ledgerLabel.textContent = "Provider side-effect ledger";
-    if (ledgerSub) ledgerSub.textContent = "Committed charges observed by the test provider";
-    $("#charge-list").innerHTML = charges.length ? charges.map((charge) => `
-      <span class="charge-chip"><i></i><strong>${escapeHtml(charge.id)}</strong><span>${escapeHtml((charge.amount_cents / 100).toLocaleString(undefined, { style: "currency", currency: "USD" }))}</span><small>${escapeHtml(charge.status)}</small></span>`).join("")
-      : '<span class="ledger-empty">No committed charge recorded yet.</span>';
+    if (ledgerSub) ledgerSub.textContent = "Committed charges and refunds observed by the test provider";
+    const chargeItems = charges.map((charge) => `
+      <span class="charge-chip"><i></i><strong>${escapeHtml(charge.id)}</strong><span>${escapeHtml((charge.amount_cents / 100).toLocaleString(undefined, { style: "currency", currency: "USD" }))}</span><small>${escapeHtml(charge.status)}</small></span>`).join("");
+    const refundItems = refunds.map((ref) => `
+      <span class="charge-chip refund-chip"><i class="refund-dot"></i><strong>${escapeHtml(ref.id)}</strong><span>${escapeHtml(ref.charge_id)}</span><small>refunded</small></span>`).join("");
+    $("#charge-list").innerHTML = (chargeItems + refundItems) || '<span class="ledger-empty">No committed charge recorded yet.</span>';
   }
 
   const evidenceEvents = (item) => item.evidence.map((evidence) => {
     const event = run.events.find((candidate) => candidate.type === evidence ||
       (evidence.startsWith("charge:") && candidate.type === "PROVIDER_CHARGE_COMMITTED" && candidate.payload.charge_id === evidence.slice(7)) ||
+      (evidence.startsWith("refund:") && candidate.type === "PROVIDER_REFUND_COMMITTED" && candidate.payload.refund_id === evidence.slice(7)) ||
       (evidence.startsWith("fulfillment:") && candidate.type === "ORDER_FULFILLMENT_COMMITTED" && candidate.payload.fulfillment_id === evidence.slice(12)));
     return event ? `<a class="evidence-link" href="#event-${event.sequence}">View event ${event.sequence}</a>` : "";
   }).filter(Boolean).join(" ");
@@ -100,10 +104,62 @@ function renderRun(run) {
   }).join("") || '<li class="event-item"><strong>Waiting for events</strong><small>The runner is preparing the local test environment.</small></li>';
   $("#copy-run-id").dataset.runId = run.id;
   $("#download-repro").href = `/api/runs/${encodeURIComponent(run.id)}/reproduce`;
+  state.replay.events = run.events;
+  setReplayStep(run.events.length, false);
   const active = ["queued", "running", "cancel_requested"].includes(run.status);
   $("#cancel-run").hidden = !["queued", "running"].includes(run.status);
   $("#cancel-run").dataset.runId = run.id;
   if (active) schedulePoll(run.id);
+}
+
+function setReplayStep(step, scroll = true) {
+  const count = state.replay.events.length;
+  if (!count) {
+    const label = $("#replay-step-label");
+    if (label) label.textContent = "No events";
+    return;
+  }
+  const clamped = Math.max(1, Math.min(step, count));
+  state.replay.currentStep = clamped;
+  const slider = $("#replay-slider");
+  if (slider) {
+    slider.max = count;
+    slider.value = clamped;
+  }
+  const label = $("#replay-step-label");
+  if (label) label.textContent = `Event ${clamped} of ${count}`;
+
+  document.querySelectorAll(".event-item").forEach((item, idx) => {
+    const seq = idx + 1;
+    item.classList.toggle("dimmed", seq > clamped);
+    item.classList.toggle("active-step", seq === clamped);
+    if (seq === clamped && scroll) {
+      item.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  });
+}
+
+function toggleReplayPlay() {
+  const btn = $("#replay-play");
+  if (state.replay.timer) {
+    window.clearInterval(state.replay.timer);
+    state.replay.timer = null;
+    if (btn) btn.textContent = "▶ Play";
+    return;
+  }
+  if (state.replay.currentStep >= state.replay.events.length) {
+    setReplayStep(1, false);
+  }
+  if (btn) btn.textContent = "❚❚ Pause";
+  state.replay.timer = window.setInterval(() => {
+    if (state.replay.currentStep < state.replay.events.length) {
+      setReplayStep(state.replay.currentStep + 1);
+    } else {
+      window.clearInterval(state.replay.timer);
+      state.replay.timer = null;
+      if (btn) btn.textContent = "▶ Play";
+    }
+  }, 750);
 }
 
 async function openRun(runId) {
@@ -176,6 +232,14 @@ function updateWorkflowCanvas(fault) {
       <li class="workflow-fault"><span>3</span><div><strong>Duplicate webhook redelivery</strong><small>Simulates network redelivery of same event</small></div></li>
       <li><span>4</span><div><strong>Checkout verifies deduplication</strong><small>Idempotently ignores duplicate event</small></div></li>
       <li><span>5</span><div><strong>Evaluate invariants</strong><small>Checks single fulfillment & terminal state</small></div></li>
+    `;
+  } else if (fault === "persistence_failure_after_payment") {
+    canvas.innerHTML = `
+      <li><span>1</span><div><strong>Checkout starts payment</strong><small>Sends charge request to provider</small></div></li>
+      <li><span>2</span><div><strong>Provider commits charge</strong><small>Payment provider ledger records $42.00</small></div></li>
+      <li class="workflow-fault"><span>3</span><div><strong>Database persistence fails</strong><small>Simulates checkout DB commit failure</small></div></li>
+      <li><span>4</span><div><strong>Checkout runs compensation</strong><small>Issues compensating refund to provider</small></div></li>
+      <li><span>5</span><div><strong>Evaluate invariants</strong><small>Checks zero orphaned charges & terminal state</small></div></li>
     `;
   } else {
     canvas.innerHTML = `
@@ -252,6 +316,24 @@ $("#cancel-run").addEventListener("click", async (event) => {
     toast("Cancellation requested");
     await openRun(runId);
   } catch (error) { toast(error.message); }
+});
+
+$("#replay-prev")?.addEventListener("click", () => {
+  if (state.replay.timer) toggleReplayPlay();
+  setReplayStep(state.replay.currentStep - 1);
+});
+$("#replay-next")?.addEventListener("click", () => {
+  if (state.replay.timer) toggleReplayPlay();
+  setReplayStep(state.replay.currentStep + 1);
+});
+$("#replay-reset")?.addEventListener("click", () => {
+  if (state.replay.timer) toggleReplayPlay();
+  setReplayStep(1);
+});
+$("#replay-play")?.addEventListener("click", toggleReplayPlay);
+$("#replay-slider")?.addEventListener("input", (e) => {
+  if (state.replay.timer) toggleReplayPlay();
+  setReplayStep(Number(e.target.value));
 });
 
 initialize();

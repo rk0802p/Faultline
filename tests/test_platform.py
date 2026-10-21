@@ -42,6 +42,7 @@ class FaultlinePlatformTests(unittest.TestCase):
             service.shutdown()
             service.server_close()
         provider.charges.clear()
+        provider.refunds.clear()
         provider.idempotency.clear()
         provider.faulted_runs.clear()
         adapters.checkout_service.fulfillments.clear()
@@ -84,6 +85,7 @@ class FaultlinePlatformTests(unittest.TestCase):
         scenario_ids = [s["id"] for s in scenarios["scenarios"]]
         self.assertIn("payment-response-lost", scenario_ids)
         self.assertIn("duplicate-payment-webhook", scenario_ids)
+        self.assertIn("partial-persistence-failure", scenario_ids)
         connection = http.client.HTTPConnection("127.0.0.1", self.api_port, timeout=4)
         connection.request("GET", "/")
         response = connection.getresponse()
@@ -93,6 +95,46 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertIn("Integration failure lab", html)
         self.assertIn("Visual scenario designer", html)
         self.assertIn("data-field=\"timeout_seconds\"", html)
+        self.assertIn("Execution timeline & replay", html)
+        self.assertIn("id=\"replay-controls\"", html)
+        self.assertIn("data-scenario=\"partial-persistence-failure\"", html)
+
+    def test_partial_persistence_failure_vulnerable_leaves_uncompensated_charge(self) -> None:
+        run = self.launch_and_wait("vulnerable", "partial-persistence-failure")
+
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["verdict"], "failed")
+        self.assertEqual(run["summary"]["charge_count"], 1)
+        self.assertEqual(run["summary"]["refund_count"], 0)
+        self.assertEqual(run["summary"]["compensated"], False)
+        self.assertEqual(len(run["assertions"]), 4)
+        self.assertEqual(
+            next(item["status"] for item in run["assertions"] if item["name"] == "charge_compensated_on_failure"),
+            "failed",
+        )
+        self.assertEqual(
+            next(item["status"] for item in run["assertions"] if item["name"] == "no_orphaned_charge"),
+            "failed",
+        )
+        self.assertEqual(
+            next(item["status"] for item in run["assertions"] if item["name"] == "fault_activation_confirmed"),
+            "passed",
+        )
+        event_types = [event["type"] for event in run["events"]]
+        self.assertIn("FAULT_PERSISTENCE_FAILED", event_types)
+
+    def test_partial_persistence_failure_fixed_compensates_charge_with_refund(self) -> None:
+        run = self.launch_and_wait("fixed", "partial-persistence-failure")
+
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["verdict"], "passed")
+        self.assertEqual(run["summary"]["charge_count"], 1)
+        self.assertEqual(run["summary"]["refund_count"], 1)
+        self.assertEqual(run["summary"]["compensated"], True)
+        self.assertTrue(all(item["status"] == "passed" for item in run["assertions"]))
+        event_types = [event["type"] for event in run["events"]]
+        self.assertIn("COMPENSATION_COMPLETED", event_types)
+        self.assertIn("PROVIDER_REFUND_COMMITTED", event_types)
 
     def test_duplicate_webhook_vulnerable_creates_multiple_fulfillments_and_fails_invariants(self) -> None:
         run = self.launch_and_wait("vulnerable", "duplicate-payment-webhook")

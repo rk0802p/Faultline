@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  faultline:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: faultline-app
+    ports:
+      - "8000:8000"
+      - "8766:8766"
+      - "8767:8767"
+    volumes:
+      - ../data:/app/data
+    environment:
+      - FAULTLINE_DATA_DIR=/app/data
+    restart: unless-stopped

@@ -68,11 +68,14 @@ Delivered:
 
 ## Phase 3 — Integration depth
 
-**Status: In progress.**
+**Status: Core failure scenarios complete.**
 
 - [x] Add duplicate payment webhook scenario and test harness (`duplicate-payment-webhook`).
 - [x] Detect duplicate fulfillment side effects on redelivery (vulnerable fails, fixed deduplicates).
-- [ ] Add persistence failure scenario after side effect.
+- [x] Add persistence failure scenario after side effect (`partial-persistence-failure`).
+- [x] Verify compensating refunds reconcile charges when order persistence fails.
+- [x] Add interactive step-by-step playback and seek controls to the execution timeline.
+- [x] Provide Dockerfile and Docker Compose infrastructure configurations.
 - [ ] Add failure coverage matrix and reusable scenario templates.
 - [ ] Report cleanup ownership and failures separately from scenario verdicts.
 

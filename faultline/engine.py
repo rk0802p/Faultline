@@ -250,6 +250,104 @@ def _execute_duplicate_webhook(
     return assertions, summary
 
 
+def _execute_persistence_failure(
+    run_id: str,
+    scenario: dict[str, Any],
+    implementation: str,
+    signal: threading.Event,
+    timeout_seconds: int,
+    started: float,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    body = json.dumps({
+        "run_id": run_id,
+        "order_id": scenario["order_id"],
+        "amount_cents": scenario["amount_cents"],
+        "fault": scenario["fault"],
+        "retries": scenario.get("retries", 0),
+        "implementation": implementation,
+        "timeout_seconds": timeout_seconds,
+    })
+    store.record_event(run_id, "CHECKOUT_HTTP_REQUEST", {"method": "POST", "path": "/v1/checkout", "body": json.loads(body)})
+    if signal.is_set():
+        raise RunCancelled()
+    connection = HTTPConnection("127.0.0.1", adapters.CHECKOUT_PORT, timeout=timeout_seconds + 2)
+    with _active_lock:
+        _active_connections[run_id] = connection
+    try:
+        if signal.is_set():
+            raise RunCancelled()
+        connection.request("POST", "/v1/checkout", body, {"Content-Type": "application/json"})
+        response = connection.getresponse()
+        checkout_result = json.loads(response.read())
+        store.record_event(run_id, "CHECKOUT_HTTP_RESPONSE", {"status": response.status, "body": checkout_result})
+    finally:
+        connection.close()
+        with _active_lock:
+            _active_connections.pop(run_id, None)
+
+    if signal.is_set() or store.run_status(run_id) == "cancel_requested":
+        raise RunCancelled()
+    if time.monotonic() - started > timeout_seconds:
+        raise RunTimedOut()
+    if response.status == 408:
+        raise RunTimedOut(checkout_result.get("error", "scenario execution timed out"))
+    if response.status != 200:
+        raise RuntimeError(checkout_result.get("error", f"checkout returned HTTP {response.status}"))
+
+    provider_charges = provider.ledger(run_id)
+    provider_refunds = provider.refund_ledger(run_id)
+    events = store.get_run(run_id)["events"]
+    event_types = [event["type"] for event in events]
+
+    has_charge = len(provider_charges) > 0
+    has_refund = len(provider_refunds) > 0 and any(r["charge_id"] == c["id"] for r in provider_refunds for c in provider_charges)
+    compensated = checkout_result.get("compensated") is True or has_refund
+
+    assertions = [
+        {
+            "name": "fault_activation_confirmed",
+            "status": "passed" if "FAULT_PERSISTENCE_FAILED" in event_types else "failed",
+            "expected": "checkout order persistence failed after charge",
+            "observed": "confirmed" if "FAULT_PERSISTENCE_FAILED" in event_types else "not observed",
+            "evidence": ["FAULT_PERSISTENCE_FAILED"],
+        },
+        {
+            "name": "charge_compensated_on_failure",
+            "status": "passed" if (has_charge and compensated) else "failed",
+            "expected": "committed charge is refunded on persistence failure",
+            "observed": f"{len(provider_refunds)} refund(s) for {len(provider_charges)} charge(s)",
+            "evidence": [f"refund:{item['id']}" for item in provider_refunds] if provider_refunds else ["NO_COMPENSATION_ISSUED"],
+        },
+        {
+            "name": "no_orphaned_charge",
+            "status": "passed" if len(provider_charges) == len(provider_refunds) else "failed",
+            "expected": "no uncompensated charges remaining",
+            "observed": f"{len(provider_charges) - len(provider_refunds)} uncompensated charge(s)",
+            "evidence": [f"charge:{item['id']}" for item in provider_charges],
+        },
+        {
+            "name": "checkout_terminal_state",
+            "status": "passed" if checkout_result.get("status") in {"cancelled_and_refunded", "reconciled"} else "failed",
+            "expected": "checkout reaches safe reconciled terminal state",
+            "observed": checkout_result.get("status", "unknown"),
+            "evidence": ["CHECKOUT_REACHED_TERMINAL_STATE"],
+        },
+    ]
+
+    summary = {
+        "order_id": checkout_result["order_id"],
+        "checkout_status": checkout_result["status"],
+        "attempts": checkout_result["attempts"],
+        "charge_count": len(provider_charges),
+        "charges": provider_charges,
+        "refund_count": len(provider_refunds),
+        "refunds": provider_refunds,
+        "compensated": checkout_result.get("compensated", False),
+        "failed_assertions": [item["name"] for item in assertions if item["status"] == "failed"],
+    }
+    return assertions, summary
+
+
 def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> None:
     logger.debug("run starting run_id=%s scenario=%s implementation=%s", run_id, scenario["name"], implementation)
     signal = threading.Event()
@@ -275,6 +373,11 @@ def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> N
                 run_id, scenario, implementation, signal, timeout_seconds, started
             )
             clean_targets = ["checkout-webhook"]
+        elif fault == "persistence_failure_after_payment":
+            assertions, summary = _execute_persistence_failure(
+                run_id, scenario, implementation, signal, timeout_seconds, started
+            )
+            clean_targets = ["checkout", "payment-provider", "local-db"]
         else:
             assertions, summary = _execute_payment_response_lost(
                 run_id, scenario, implementation, signal, timeout_seconds, started

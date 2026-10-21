@@ -1,0 +1,10 @@
+{
+  "scenario_version": 1,
+  "name": "partial-persistence-failure",
+  "description": "Payment provider succeeds, but checkout database persistence fails. Verify charge is compensated.",
+  "order_id": "order-persist-001",
+  "amount_cents": 4200,
+  "fault": "persistence_failure_after_payment",
+  "retries": 0,
+  "assertion": "charge_compensated_on_failure"
+}

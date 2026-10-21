@@ -41,6 +41,7 @@ The fault is local and deterministic. It makes no calls to external services and
 ```sh
 python -m unittest discover -s tests -v
 python -m faultline.cli run --scenario payment-response-lost --implementation fixed
+python -m faultline.cli run --scenario duplicate-payment-webhook --implementation fixed
 ```
 
 The CLI exits `0` for a passing run, `1` for an invariant failure, `2` for an execution failure, `3` for a timeout, and `4` for cancellation.

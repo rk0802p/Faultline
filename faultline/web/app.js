@@ -55,18 +55,36 @@ function renderRun(run) {
   status.textContent = run.status === "completed" ? run.verdict.toUpperCase() : run.status.toUpperCase();
   status.className = `run-status-pill ${run.status === "completed" ? run.verdict : run.status}`;
   const summary = run.summary || {};
+  const isWebhook = run.scenario.fault === "duplicate_payment_webhook";
   $("#run-overview").innerHTML = [
-    ["Run", run.id], ["Order", summary.order_id || run.scenario.order_id],
-    ["Attempts", summary.attempts ?? "—"], ["Charges", summary.charge_count ?? "—"],
+    ["Run", run.id],
+    ["Order", summary.order_id || run.scenario.order_id],
+    [isWebhook ? "Deliveries" : "Attempts", isWebhook ? (summary.deliveries ?? "—") : (summary.attempts ?? "—")],
+    [isWebhook ? "Fulfillments" : "Charges", isWebhook ? (summary.fulfillment_count ?? "—") : (summary.charge_count ?? "—")],
   ].map(([label, value]) => `<span class="overview-chip">${escapeHtml(label)}<strong>${escapeHtml(value)}</strong></span>`).join("");
+
   const charges = summary.charges || [];
-  $("#charge-list").innerHTML = charges.length ? charges.map((charge) => `
-    <span class="charge-chip"><i></i><strong>${escapeHtml(charge.id)}</strong><span>${escapeHtml((charge.amount_cents / 100).toLocaleString(undefined, { style: "currency", currency: "USD" }))}</span><small>${escapeHtml(charge.status)}</small></span>`).join("")
-    : '<span class="ledger-empty">No committed charge recorded yet.</span>';
+  const fulfillments = summary.fulfillments || [];
+  const ledgerLabel = $("#ledger-label");
+  const ledgerSub = $("#ledger-sub");
+  if (isWebhook) {
+    if (ledgerLabel) ledgerLabel.textContent = "Fulfillment side-effect ledger";
+    if (ledgerSub) ledgerSub.textContent = "Order fulfillment side effects recorded by the checkout service";
+    $("#charge-list").innerHTML = fulfillments.length ? fulfillments.map((ful) => `
+      <span class="charge-chip"><i></i><strong>${escapeHtml(ful.id)}</strong><span>${escapeHtml(ful.order_id)}</span><small>${escapeHtml(ful.status)}</small></span>`).join("")
+      : '<span class="ledger-empty">No fulfillment recorded yet.</span>';
+  } else {
+    if (ledgerLabel) ledgerLabel.textContent = "Provider side-effect ledger";
+    if (ledgerSub) ledgerSub.textContent = "Committed charges observed by the test provider";
+    $("#charge-list").innerHTML = charges.length ? charges.map((charge) => `
+      <span class="charge-chip"><i></i><strong>${escapeHtml(charge.id)}</strong><span>${escapeHtml((charge.amount_cents / 100).toLocaleString(undefined, { style: "currency", currency: "USD" }))}</span><small>${escapeHtml(charge.status)}</small></span>`).join("")
+      : '<span class="ledger-empty">No committed charge recorded yet.</span>';
+  }
 
   const evidenceEvents = (item) => item.evidence.map((evidence) => {
     const event = run.events.find((candidate) => candidate.type === evidence ||
-      (evidence.startsWith("charge:") && candidate.type === "PROVIDER_CHARGE_COMMITTED" && candidate.payload.charge_id === evidence.slice(7)));
+      (evidence.startsWith("charge:") && candidate.type === "PROVIDER_CHARGE_COMMITTED" && candidate.payload.charge_id === evidence.slice(7)) ||
+      (evidence.startsWith("fulfillment:") && candidate.type === "ORDER_FULFILLMENT_COMMITTED" && candidate.payload.fulfillment_id === evidence.slice(12)));
     return event ? `<a class="evidence-link" href="#event-${event.sequence}">View event ${event.sequence}</a>` : "";
   }).filter(Boolean).join(" ");
   $("#assertion-list").innerHTML = run.assertions.length ? run.assertions.map((item) => `
@@ -116,11 +134,12 @@ async function refreshRuns() {
   renderHistory();
 }
 
-async function launchRun(implementation) {
+async function launchRun(implementation, scenarioId) {
   const buttons = [...document.querySelectorAll(".run-button")];
   buttons.forEach((button) => { button.disabled = true; });
   try {
-    const scenario = state.scenarios.find((item) => item.id === $("#scenario-select").value) || state.scenarios[0];
+    const targetId = scenarioId || $("#scenario-select").value;
+    const scenario = state.scenarios.find((item) => item.id === targetId) || state.scenarios[0];
     if (!scenario) throw new Error("No runnable scenario is available");
     const { run_id: runId } = await request("/api/runs", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -129,7 +148,7 @@ async function launchRun(implementation) {
     state.selectedRunId = runId;
     await refreshRuns();
     await openRun(runId);
-    toast(`${implementation} run started`);
+    toast(`${scenario.name} (${implementation}) run started`);
   } catch (error) { toast(error.message); }
   finally { buttons.forEach((button) => { button.disabled = false; }); }
 }
@@ -147,6 +166,28 @@ async function initialize() {
   } catch (error) { toast(`Faultline could not load: ${error.message}`); }
 }
 
+function updateWorkflowCanvas(fault) {
+  const canvas = $("#workflow-canvas");
+  if (!canvas) return;
+  if (fault === "duplicate_payment_webhook") {
+    canvas.innerHTML = `
+      <li><span>1</span><div><strong>Webhook delivers payment event</strong><small>Sends payment.succeeded webhook</small></div></li>
+      <li><span>2</span><div><strong>Checkout starts fulfillment</strong><small>Records order fulfillment side effect</small></div></li>
+      <li class="workflow-fault"><span>3</span><div><strong>Duplicate webhook redelivery</strong><small>Simulates network redelivery of same event</small></div></li>
+      <li><span>4</span><div><strong>Checkout verifies deduplication</strong><small>Idempotently ignores duplicate event</small></div></li>
+      <li><span>5</span><div><strong>Evaluate invariants</strong><small>Checks single fulfillment & terminal state</small></div></li>
+    `;
+  } else {
+    canvas.innerHTML = `
+      <li><span>1</span><div><strong>Checkout starts payment</strong><small>Uses the order and amount above</small></div></li>
+      <li><span>2</span><div><strong>Provider commits charge</strong><small>Local test provider records the side effect</small></div></li>
+      <li class="workflow-fault"><span>3</span><div><strong>Drop provider response</strong><small>Simulates an unknown payment outcome</small></div></li>
+      <li><span>4</span><div><strong>Checkout retries</strong><small>Runs the configured retry count</small></div></li>
+      <li><span>5</span><div><strong>Evaluate invariants</strong><small>Checks duplicate charges and terminal state</small></div></li>
+    `;
+  }
+}
+
 function setScenarioEditor() {
   const selected = state.scenarios.find((item) => item.id === $("#scenario-select").value);
   const definition = selected?.definition || { scenario_version: 1, name: "new-payment-scenario", description: "", order_id: "order-new", amount_cents: 2500, fault: "payment_response_lost_after_commit", retries: 1, assertion: "no_duplicate_charge" };
@@ -155,6 +196,7 @@ function setScenarioEditor() {
     const field = input.dataset.field;
     input.value = definition[field] ?? (field === "timeout_seconds" ? 15 : "");
   });
+  updateWorkflowCanvas(definition.fault);
   updateScenarioPreview();
   $("#save-scenario").textContent = selected ? "Save new version" : "Create scenario";
 }
@@ -190,7 +232,7 @@ async function submitScenario(save) {
   } catch (error) { feedback.textContent = error.message; }
 }
 
-document.querySelectorAll(".run-button").forEach((button) => button.addEventListener("click", () => launchRun(button.dataset.implementation)));
+document.querySelectorAll(".run-button").forEach((button) => button.addEventListener("click", () => launchRun(button.dataset.implementation, button.dataset.scenario)));
 $("#refresh-button").addEventListener("click", () => initialize());
 $("#history-refresh").addEventListener("click", () => refreshRuns().catch((error) => toast(error.message)));
 $("#copy-run-id").addEventListener("click", async (event) => {

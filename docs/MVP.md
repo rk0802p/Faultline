@@ -68,10 +68,13 @@ Delivered:
 
 ## Phase 3 — Integration depth
 
-- Add duplicate/delayed webhook and persistence failure scenarios.
-- Add disposable database/provider adapters and asynchronous assertions.
-- Add failure coverage views and reusable scenario templates.
-- Report cleanup ownership and failures separately from scenario verdicts.
+**Status: In progress.**
+
+- [x] Add duplicate payment webhook scenario and test harness (`duplicate-payment-webhook`).
+- [x] Detect duplicate fulfillment side effects on redelivery (vulnerable fails, fixed deduplicates).
+- [ ] Add persistence failure scenario after side effect.
+- [ ] Add failure coverage matrix and reusable scenario templates.
+- [ ] Report cleanup ownership and failures separately from scenario verdicts.
 
 **Exit:** multiple failure classes expose cross-service correctness defects with recorded evidence.
 

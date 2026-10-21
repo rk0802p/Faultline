@@ -44,6 +44,8 @@ class FaultlinePlatformTests(unittest.TestCase):
         provider.charges.clear()
         provider.idempotency.clear()
         provider.faulted_runs.clear()
+        adapters.checkout_service.fulfillments.clear()
+        adapters.checkout_service.processed_events.clear()
         store.DATA_DIR, store.DB_PATH = cls.old_data_dir, cls.old_db_path
         adapters.CHECKOUT_PORT, adapters.PAYMENT_PORT = cls.old_checkout_port, cls.old_payment_port
         cls.temp_dir.cleanup()
@@ -79,7 +81,9 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertEqual(projects["projects"][0]["id"], "faultline-demo")
         status, scenarios = self.request("GET", "/api/scenarios")
         self.assertEqual(status, 200)
-        self.assertEqual(scenarios["scenarios"][0]["id"], "payment-response-lost")
+        scenario_ids = [s["id"] for s in scenarios["scenarios"]]
+        self.assertIn("payment-response-lost", scenario_ids)
+        self.assertIn("duplicate-payment-webhook", scenario_ids)
         connection = http.client.HTTPConnection("127.0.0.1", self.api_port, timeout=4)
         connection.request("GET", "/")
         response = connection.getresponse()
@@ -89,6 +93,34 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertIn("Integration failure lab", html)
         self.assertIn("Visual scenario designer", html)
         self.assertIn("data-field=\"timeout_seconds\"", html)
+
+    def test_duplicate_webhook_vulnerable_creates_multiple_fulfillments_and_fails_invariants(self) -> None:
+        run = self.launch_and_wait("vulnerable", "duplicate-payment-webhook")
+
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["verdict"], "failed")
+        self.assertEqual(run["summary"]["fulfillment_count"], 2)
+        self.assertEqual(len(run["assertions"]), 4)
+        self.assertEqual(
+            next(item["status"] for item in run["assertions"] if item["name"] == "idempotent_webhook_processing"),
+            "failed",
+        )
+        self.assertEqual(
+            next(item["status"] for item in run["assertions"] if item["name"] == "fault_activation_confirmed"),
+            "passed",
+        )
+        event_types = [event["type"] for event in run["events"]]
+        self.assertIn("FAULT_DUPLICATE_WEBHOOK_DELIVERED", event_types)
+        self.assertIn("ORDER_FULFILLMENT_COMMITTED", event_types)
+
+    def test_duplicate_webhook_fixed_deduplicates_and_passes_invariants(self) -> None:
+        run = self.launch_and_wait("fixed", "duplicate-payment-webhook")
+
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["verdict"], "passed")
+        self.assertEqual(run["summary"]["fulfillment_count"], 1)
+        self.assertIn("WEBHOOK_DUPLICATE_IGNORED", [event["type"] for event in run["events"]])
+        self.assertTrue(all(item["status"] == "passed" for item in run["assertions"]))
 
     def test_real_http_fault_detects_duplicate_charge_and_persists_evidence(self) -> None:
         run = self.launch_and_wait("vulnerable")
@@ -138,14 +170,16 @@ class FaultlinePlatformTests(unittest.TestCase):
         status, result = self.request("POST", "/api/scenarios/validate", {"definition": {"name": "broken"}})
         self.assertEqual(status, 400)
         self.assertIn("unsupported scenario_version", result["error"])
-        definition = self.request("GET", "/api/scenarios")[1]["scenarios"][0]["definition"]
+        scenarios = self.request("GET", "/api/scenarios")[1]["scenarios"]
+        definition = next(s for s in scenarios if s["id"] == "payment-response-lost")["definition"]
         definition["timeout_seconds"] = 61
         status, result = self.request("POST", "/api/scenarios/validate", {"definition": definition})
         self.assertEqual(status, 400)
         self.assertIn("timeout_seconds", result["error"])
 
     def test_new_scenario_can_be_created_from_a_valid_visual_editor_definition(self) -> None:
-        definition = dict(self.request("GET", "/api/scenarios")[1]["scenarios"][0]["definition"])
+        scenarios = self.request("GET", "/api/scenarios")[1]["scenarios"]
+        definition = dict(next(s for s in scenarios if s["id"] == "payment-response-lost")["definition"])
         definition.update({"name": "custom-payment-check", "order_id": "order-custom", "timeout_seconds": 12})
         status, created = self.request("POST", "/api/scenarios", {"definition": definition})
         self.assertEqual(status, 201)

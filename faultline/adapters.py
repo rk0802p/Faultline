@@ -71,6 +71,71 @@ class TestPaymentProvider:
 provider = TestPaymentProvider()
 
 
+class TestCheckoutService:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.fulfillments: dict[str, list[dict[str, Any]]] = {}
+        self.processed_events: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def process_webhook(self, payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        run_id = payload["run_id"]
+        event_id = payload.get("event_id", "")
+        order_id = payload["order_id"]
+        fixed = payload.get("implementation") == "fixed"
+
+        with self.lock:
+            if fixed and (run_id, event_id) in self.processed_events:
+                existing = self.processed_events[(run_id, event_id)]
+                logger.debug("duplicate webhook ignored run_id=%s event_id=%s", run_id, event_id)
+                store.record_event(run_id, "WEBHOOK_DUPLICATE_IGNORED", {
+                    "event_id": event_id,
+                    "order_id": order_id,
+                    "fulfillment_id": existing["id"],
+                })
+                return {
+                    "status": "already_processed",
+                    "fulfillment_id": existing["id"],
+                    "order_id": order_id,
+                    "event_id": event_id,
+                }, True
+
+            fulfillment = {
+                "id": f"ful_{len(self.fulfillments.get(run_id, [])) + 1}",
+                "order_id": order_id,
+                "event_id": event_id,
+                "amount_cents": payload.get("amount_cents", 0),
+                "status": "fulfilled",
+            }
+            self.fulfillments.setdefault(run_id, []).append(fulfillment)
+            if fixed and event_id:
+                self.processed_events[(run_id, event_id)] = fulfillment
+
+            store.record_event(run_id, "ORDER_FULFILLMENT_COMMITTED", {
+                "fulfillment_id": fulfillment["id"],
+                "order_id": order_id,
+                "event_id": event_id,
+            })
+            return {
+                "status": "fulfilled",
+                "fulfillment_id": fulfillment["id"],
+                "order_id": order_id,
+                "event_id": event_id,
+            }, False
+
+    def ledger(self, run_id: str) -> list[dict[str, Any]]:
+        with self.lock:
+            return list(self.fulfillments.get(run_id, []))
+
+    def cleanup(self, run_id: str) -> None:
+        with self.lock:
+            self.fulfillments.pop(run_id, None)
+            for key in [k for k in self.processed_events if k[0] == run_id]:
+                self.processed_events.pop(key, None)
+
+
+checkout_service = TestCheckoutService()
+
+
 def json_reply(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> None:
     raw = json.dumps(payload).encode("utf-8")
     handler.send_response(status)
@@ -120,6 +185,23 @@ class ProviderHandler(BaseHTTPRequestHandler):
 
 class CheckoutHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
+        if self.path == "/v1/webhooks/payment":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length))
+                run_id = payload.get("run_id")
+                order_id = payload.get("order_id")
+                if not run_id or not order_id:
+                    raise ValueError("run_id and order_id are required")
+                result, _ = checkout_service.process_webhook(payload)
+                json_reply(self, 200, result)
+            except (ValueError, KeyError, json.JSONDecodeError) as exc:
+                json_reply(self, 400, {"error": str(exc)})
+            except Exception as exc:
+                logger.exception("webhook processing failed")
+                json_reply(self, 500, {"error": str(exc)})
+            return
+
         if self.path != "/v1/checkout":
             json_reply(self, 404, {"error": "not found"})
             return
@@ -183,6 +265,14 @@ class CheckoutHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             logger.exception("checkout request failed run_id=%s", payload.get("run_id", "unknown") if "payload" in locals() else "unknown")
             json_reply(self, 500, {"error": str(exc)})
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/v1/fulfillments":
+            run_id = parse_qs(parsed.query).get("run_id", [""])[0]
+            json_reply(self, 200, {"fulfillments": checkout_service.ledger(run_id)})
+            return
+        json_reply(self, 404, {"error": "not found"})
 
     def log_message(self, format: str, *args: Any) -> None:
         return

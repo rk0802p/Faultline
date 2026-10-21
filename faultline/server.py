@@ -20,12 +20,20 @@ WEB_ROOT = Path(__file__).resolve().parent / "web"
 logger = logging.getLogger("faultline.control")
 
 
+SUPPORTED_FAULTS = {
+    "payment_response_lost_after_commit": {"primary_assertion": "no_duplicate_charge"},
+    "duplicate_payment_webhook": {"primary_assertion": "idempotent_webhook_processing"},
+}
+
+
 def validate_scenario(definition: dict[str, Any]) -> None:
     if type(definition.get("scenario_version")) is not int or definition["scenario_version"] != 1:
         raise ValueError("unsupported scenario_version")
-    if definition.get("fault") != "payment_response_lost_after_commit":
+    fault = definition.get("fault")
+    if fault not in SUPPORTED_FAULTS:
         raise ValueError("unsupported fault type")
-    if definition.get("assertion") != "no_duplicate_charge":
+    expected_assertion = SUPPORTED_FAULTS[fault]["primary_assertion"]
+    if definition.get("assertion") != expected_assertion:
         raise ValueError("unsupported primary assertion")
     if not isinstance(definition.get("name"), str) or not definition["name"]:
         raise ValueError("scenario name is required")
@@ -33,8 +41,16 @@ def validate_scenario(definition: dict[str, Any]) -> None:
         raise ValueError("order_id is required")
     if type(definition.get("amount_cents")) is not int or definition["amount_cents"] < 1:
         raise ValueError("amount_cents must be a positive integer")
-    if type(definition.get("retries")) is not int or not 0 <= definition["retries"] <= 3:
-        raise ValueError("retries must be between zero and three")
+    if fault == "payment_response_lost_after_commit":
+        if type(definition.get("retries")) is not int or not 0 <= definition["retries"] <= 3:
+            raise ValueError("retries must be between zero and three")
+    elif fault == "duplicate_payment_webhook":
+        deliveries = definition.get("webhook_deliveries", 2)
+        if type(deliveries) is not int or not 2 <= deliveries <= 5:
+            raise ValueError("webhook_deliveries must be between two and five")
+        delay = definition.get("delay_ms", 100)
+        if type(delay) is not int or not 0 <= delay <= 5000:
+            raise ValueError("delay_ms must be between 0 and 5000")
     timeout = definition.get("timeout_seconds", 15)
     if type(timeout) is not int or not 2 <= timeout <= 60:
         raise ValueError("timeout_seconds must be between two and sixty")

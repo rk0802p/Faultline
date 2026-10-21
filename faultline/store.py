@@ -42,8 +42,7 @@ def database() -> Any:
 
 
 def initialize() -> None:
-    scenario_path = ROOT / "scenarios" / "payment-response-lost.json"
-    definition = json.loads(scenario_path.read_text(encoding="utf-8"))
+    scenario_files = sorted((ROOT / "scenarios").glob("*.json"))
     with database() as db:
         db.executescript(
             """
@@ -107,13 +106,16 @@ def initialize() -> None:
             "INSERT OR IGNORE INTO projects VALUES (?, ?, ?, ?)",
             ("faultline-demo", "Checkout reliability lab", "Local, isolated checkout integration environment.", now()),
         )
-        db.execute(
-            "INSERT OR IGNORE INTO scenarios VALUES (?, ?, ?, ?, ?)",
-            (definition["name"], "faultline-demo", definition["name"], json.dumps(definition), now()),
-        )
-        existing = db.execute("SELECT 1 FROM scenario_versions WHERE scenario_id=?", (definition["name"],)).fetchone()
-        if not existing:
-            _insert_scenario_version(db, definition["name"], 1, definition)
+        for scenario_file in scenario_files:
+            definition = json.loads(scenario_file.read_text(encoding="utf-8"))
+            scenario_id = definition["name"]
+            db.execute(
+                "INSERT OR IGNORE INTO scenarios VALUES (?, ?, ?, ?, ?)",
+                (scenario_id, "faultline-demo", scenario_id, json.dumps(definition), now()),
+            )
+            existing = db.execute("SELECT 1 FROM scenario_versions WHERE scenario_id=?", (scenario_id,)).fetchone()
+            if not existing:
+                _insert_scenario_version(db, scenario_id, 1, definition)
 
 
 def _insert_scenario_version(db: sqlite3.Connection, scenario_id: str, version: int, definition: dict[str, Any]) -> None:

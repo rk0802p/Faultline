@@ -57,7 +57,7 @@
             <label>Retry attempts<input data-field="retries" type="number" min="0" max="3" step="1"></label>
             <label>Run timeout (seconds)<input data-field="timeout_seconds" type="number" min="2" max="60" step="1"></label>
           </div>
-          <ol class="workflow-canvas" aria-label="Scenario workflow">
+          <ol class="workflow-canvas" id="workflow-canvas" aria-label="Scenario workflow">
             <li><span>1</span><div><strong>Checkout starts payment</strong><small>Uses the order and amount above</small></div></li>
             <li><span>2</span><div><strong>Provider commits charge</strong><small>Local test provider records the side effect</small></div></li>
             <li class="workflow-fault"><span>3</span><div><strong>Drop provider response</strong><small>Simulates an unknown payment outcome</small></div></li>
@@ -74,7 +74,14 @@
           <h3>Payment response lost</h3><p class="scenario-description">The provider commits a charge, then the response is dropped. Checkout retries with an uncertain outcome.</p>
           <div class="scenario-flow"><span>Checkout</span><i>→</i><span class="flow-fault">Response timeout <b>×</b></span><i>→</i><span>Retry</span></div>
           <div class="scenario-meta"><span><i class="meta-dot"></i> Deterministic</span><span>4 invariants</span></div>
-          <div class="scenario-actions"><button class="button button-primary run-button" data-implementation="vulnerable"><span>▶</span> Run vulnerable</button><button class="button button-secondary run-button" data-implementation="fixed">Run fixed <span>↗</span></button></div>
+          <div class="scenario-actions"><button class="button button-primary run-button" data-scenario="payment-response-lost" data-implementation="vulnerable"><span>▶</span> Run vulnerable</button><button class="button button-secondary run-button" data-scenario="payment-response-lost" data-implementation="fixed">Run fixed <span>↗</span></button></div>
+        </article>
+        <article class="scenario-card">
+          <div class="scenario-card-top"><span class="scenario-symbol">↻</span><span class="scenario-tag">WEBHOOKS</span><button class="kebab" aria-label="Scenario options">···</button></div>
+          <h3>Duplicate payment webhook</h3><p class="scenario-description">A payment event is redelivered. Verify checkout fulfillment is idempotent and does not duplicate side effects.</p>
+          <div class="scenario-flow"><span>Webhook</span><i>→</i><span class="flow-fault">Redelivery <b>↻</b></span><i>→</i><span>Deduplication</span></div>
+          <div class="scenario-meta"><span><i class="meta-dot"></i> Deterministic</span><span>4 invariants</span></div>
+          <div class="scenario-actions"><button class="button button-primary run-button" data-scenario="duplicate-payment-webhook" data-implementation="vulnerable"><span>▶</span> Run vulnerable</button><button class="button button-secondary run-button" data-scenario="duplicate-payment-webhook" data-implementation="fixed">Run fixed <span>↗</span></button></div>
         </article>
         <aside class="how-card"><div class="how-icon">✳</div><div class="eyebrow">THE FAULTLINE LOOP</div><h3>Make the invisible visible.</h3><p>Faultline records what happened across the workflow, then checks the business rules that matter.</p><ol><li><span>01</span> Inject a controlled fault</li><li><span>02</span> Capture events and side effects</li><li><span>03</span> Evaluate business invariants</li></ol><div class="safe-note"><span>⌑</span> Runs stay inside this local lab.</div></aside>
       </section>
@@ -82,7 +89,7 @@
       <section class="run-panel" id="active-run" hidden>
         <div class="run-panel-header"><div><div class="eyebrow">RUN INSPECTOR</div><h2 id="run-title">Run details</h2></div><div class="run-header-actions"><button class="button button-secondary" id="cancel-run" hidden>Cancel run</button><div class="run-status-pill" id="run-status">QUEUED</div></div></div>
         <div class="run-overview" id="run-overview"></div>
-        <div class="ledger-strip"><div class="ledger-heading"><span class="ledger-icon">$</span><div><strong>Provider side-effect ledger</strong><small>Committed charges observed by the test provider</small></div></div><div class="charge-list" id="charge-list"></div></div>
+        <div class="ledger-strip"><div class="ledger-heading"><span class="ledger-icon">$</span><div><strong id="ledger-label">Provider side-effect ledger</strong><small id="ledger-sub">Committed charges observed by the test provider</small></div></div><div class="charge-list" id="charge-list"></div></div>
         <div class="run-detail-grid"><div class="detail-card"><div class="detail-title"><span class="detail-title-icon assertion-icon">✓</span><div><strong>Business invariants</strong><small>Evaluated against recorded evidence</small></div></div><div id="assertion-list" class="assertion-list"></div></div><div class="detail-card timeline-card"><div class="detail-title"><span class="detail-title-icon timeline-icon">◷</span><div><strong>Execution timeline</strong><small>Persisted events in order</small></div></div><ol id="event-list" class="event-list"></ol></div></div>
         <div class="report-footer"><span><span class="report-lock">⌑</span> Evidence saved to local run history</span><div><a class="text-button" id="download-repro" href="#" download>Download reproduction</a> <button class="text-button" id="copy-run-id">Copy run ID</button></div></div>
       </section>

@@ -22,11 +22,31 @@
       "justMyCode": false
     },
     {
-      "name": "Faultline: Debug CLI scenario",
+      "name": "Faultline: Debug CLI scenario (fixed)",
       "type": "debugpy",
       "request": "launch",
       "module": "faultline.cli",
-      "args": ["run", "--scenario", "payment-response-lost", "--implementation", "fixed"],
+      "args": ["run", "--scenario", "payment-response-lost", "--implementation", "fixed", "--debug"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Faultline: Debug CLI scenario (vulnerable)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "faultline.cli",
+      "args": ["run", "--scenario", "payment-response-lost", "--implementation", "vulnerable", "--debug"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Faultline: Debug current test file",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "unittest",
+      "args": ["discover", "-s", "tests", "-p", "${fileBasename}", "-v"],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "justMyCode": false

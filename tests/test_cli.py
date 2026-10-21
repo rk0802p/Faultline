@@ -46,6 +46,18 @@ class FaultlineCliTests(unittest.TestCase):
         self.assertEqual(code, 3)
         self.assertIn("Faultline API error", error_output.getvalue())
 
+    def test_cli_debug_flag_outputs_diagnostic_logs(self) -> None:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        args = ["faultline.cli", "run", "--scenario", "sample", "--implementation", "fixed",
+                "--base-url", "http://faultline.test", "--debug"]
+        responses = [{"run_id": "run-debug"}, {"run": {"status": "completed", "verdict": "passed"}}]
+        with patch.object(sys, "argv", args), patch("faultline.cli.api_json", side_effect=responses), \
+                patch("faultline.cli.time.sleep"), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 0)
+        self.assertIn("[debug] Submitting run:", stderr.getvalue())
+        self.assertIn("[debug] Poll #1: status=completed", stderr.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,12 +3,14 @@ const state = {
   scenarios: [],
   runs: [],
   selectedRunId: null,
+  currentRun: null,
   pollTimer: null,
   replay: { currentStep: 0, timer: null, events: [] },
   timelineFilter: "all",
   searchQuery: "",
   annotations: [],
   tasks: [],
+  selectedForCompare: new Set(),
 };
 
 async function request(path, options) {
@@ -37,13 +39,24 @@ function formatTime(value) {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);
 }
 
+function updateCompareButton() {
+  const btn = $("#history-compare-btn");
+  if (!btn) return;
+  const count = state.selectedForCompare.size;
+  btn.textContent = `Compare selected (${count}/2)`;
+  btn.disabled = count !== 2;
+}
+
 function renderHistory() {
   const body = $("#history-body");
   if (!state.runs.length) {
-    body.innerHTML = '<tr><td colspan="6" class="empty-row">No runs yet. Launch a scenario to see its evidence here.</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="empty-row">No runs yet. Launch a scenario to see its evidence here.</td></tr>';
   } else {
     body.innerHTML = state.runs.map((run) => `
       <tr data-run-id="${escapeHtml(run.id)}">
+        <td style="text-align:center" onclick="event.stopPropagation()">
+          <input type="checkbox" class="run-compare-checkbox" data-compare-id="${escapeHtml(run.id)}" ${state.selectedForCompare.has(run.id) ? "checked" : ""}>
+        </td>
         <td class="history-name">${escapeHtml(run.scenario)}</td>
         <td><span class="impl-badge">${escapeHtml(run.implementation)}</span></td>
         <td>${escapeHtml(run.status)}</td>
@@ -52,13 +65,33 @@ function renderHistory() {
         <td class="run-id-short">${escapeHtml(run.id.slice(0, 8))}</td>
       </tr>`).join("");
     body.querySelectorAll("[data-run-id]").forEach((row) => row.addEventListener("click", () => openRun(row.dataset.runId)));
+    body.querySelectorAll(".run-compare-checkbox").forEach((cb) => {
+      cb.addEventListener("click", (e) => e.stopPropagation());
+      cb.addEventListener("change", () => {
+        const id = cb.dataset.compareId;
+        if (cb.checked) {
+          if (state.selectedForCompare.size >= 2) {
+            const oldest = state.selectedForCompare.values().next().value;
+            state.selectedForCompare.delete(oldest);
+            const oldCb = body.querySelector(`.run-compare-checkbox[data-compare-id="${oldest}"]`);
+            if (oldCb) oldCb.checked = false;
+          }
+          state.selectedForCompare.add(id);
+        } else {
+          state.selectedForCompare.delete(id);
+        }
+        updateCompareButton();
+      });
+    });
   }
+  updateCompareButton();
   $("#metric-runs").textContent = String(state.runs.length);
   $("#metric-failures").textContent = String(state.runs.filter((run) => run.verdict === "failed").length);
   $("#metric-passes").textContent = String(state.runs.filter((run) => run.verdict === "passed").length);
 }
 
 function renderRun(run) {
+  state.currentRun = run;
   $("#active-run").hidden = false;
   $("#run-title").textContent = `${run.scenario.name} · ${run.implementation}`;
   const status = $("#run-status");
@@ -798,6 +831,90 @@ $("#replay-play")?.addEventListener("click", toggleReplayPlay);
 $("#replay-slider")?.addEventListener("input", (e) => {
   if (state.replay.timer) toggleReplayPlay();
   setReplayStep(Number(e.target.value));
+});
+
+function jumpToFirstFault() {
+  const events = state.replay.events || [];
+  const ev = events.find((e) =>
+    e.type.includes("FAULT") || e.type.includes("DROPPED") || e.type.includes("UNKNOWN") || e.type.includes("FAILED")
+  );
+  if (ev) {
+    if (state.replay.timer) toggleReplayPlay();
+    setReplayStep(ev.sequence);
+    toast(`Jumped to fault event #${ev.sequence}`);
+  } else {
+    toast("No fault events found in this run");
+  }
+}
+
+function jumpToFirstRetry() {
+  const events = state.replay.events || [];
+  const ev = events.find((e) =>
+    e.type.includes("RETRY") ||
+    e.type.includes("REDELIVERY") ||
+    (e.payload && (e.payload.attempt > 1 || e.payload.retries > 0 || String(e.payload.reason || "").includes("retry")))
+  );
+  if (ev) {
+    if (state.replay.timer) toggleReplayPlay();
+    setReplayStep(ev.sequence);
+    toast(`Jumped to retry event #${ev.sequence}`);
+  } else {
+    toast("No retry events found in this run");
+  }
+}
+
+function jumpToFirstViolation() {
+  const failedAssertion = (state.currentRun?.assertions || []).find((a) => a.status === "failed");
+  if (!failedAssertion) {
+    toast("No invariant violations in this run (all passed)");
+    return;
+  }
+  const events = state.replay.events || [];
+  let targetSeq = null;
+  if (failedAssertion.evidence && failedAssertion.evidence.length) {
+    for (const evRef of failedAssertion.evidence) {
+      const match = events.find((e) =>
+        e.type === evRef ||
+        (evRef.startsWith("charge:") && e.payload?.charge_id === evRef.slice(7)) ||
+        (evRef.startsWith("refund:") && e.payload?.refund_id === evRef.slice(7)) ||
+        (evRef.startsWith("fulfillment:") && e.payload?.fulfillment_id === evRef.slice(12))
+      );
+      if (match) {
+        targetSeq = match.sequence;
+        break;
+      }
+    }
+  }
+  if (!targetSeq) {
+    const evalEvent = events.find((e) => e.type.includes("ASSERTION"));
+    if (evalEvent) targetSeq = evalEvent.sequence;
+  }
+  if (targetSeq) {
+    if (state.replay.timer) toggleReplayPlay();
+    setReplayStep(targetSeq);
+    toast(`Jumped to violation: ${failedAssertion.name}`);
+  } else {
+    toast(`Violation: ${failedAssertion.name}`);
+  }
+}
+
+$("#jump-first-fault")?.addEventListener("click", jumpToFirstFault);
+$("#jump-first-retry")?.addEventListener("click", jumpToFirstRetry);
+$("#jump-first-violation")?.addEventListener("click", jumpToFirstViolation);
+
+$("#history-compare-btn")?.addEventListener("click", async () => {
+  const ids = Array.from(state.selectedForCompare);
+  if (ids.length !== 2) return;
+  const [runA, runB] = ids;
+  await openRun(runA);
+  const diffCard = $("#run-diff-card");
+  if (diffCard) diffCard.hidden = false;
+  updateDiffBaselineSelect();
+  const select = $("#diff-baseline-select");
+  if (select) select.value = runB;
+  await executeRunDiff();
+  diffCard?.scrollIntoView({ behavior: "smooth", block: "start" });
+  toast(`Comparing run ${runA.slice(0, 8)} with ${runB.slice(0, 8)}`);
 });
 
 async function runSuite(implementation) {

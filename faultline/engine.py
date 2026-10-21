@@ -432,6 +432,16 @@ def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> N
             run_id, verdict,
             [item["name"] for item in assertions if item["status"] == "failed"],
         )
+        evs = store.get_run(run_id)["events"]
+        final_seq = max([e["sequence"] for e in evs], default=1)
+        store.record_snapshot(run_id, final_seq, scenario.get("scenario_version", 1), {
+            "verdict": verdict,
+            "status": "completed",
+            "charges": provider.ledger(run_id),
+            "fulfillments": checkout_service.ledger(run_id),
+            "refunds": provider.refund_ledger(run_id),
+            "assertions": assertions,
+        })
         cleanup_all(run_id, clean_targets)
         if store.transition_run(run_id, "completed", verdict=verdict, summary=summary, finished=True):
             store.record_event(run_id, "RUN_COMPLETED", {"verdict": verdict})

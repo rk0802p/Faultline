@@ -604,6 +604,57 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertTrue(any("Lost Response" in n for n in rec_names))
         self.assertTrue(any("Duplicate Webhook" in n for n in rec_names))
 
+    def test_project_services_registry_and_health_checks(self) -> None:
+        status, data = self.request("GET", "/api/projects/faultline-demo/services")
+        self.assertEqual(status, 200)
+        services = data["services"]
+        self.assertGreaterEqual(len(services), 2)
+        service_ids = [s["id"] for s in services]
+        self.assertIn("checkout-service", service_ids)
+        self.assertIn("payment-provider", service_ids)
+        for s in services:
+            self.assertEqual(s["status"], "healthy")
+            self.assertIsNotNone(s["latency_ms"])
+
+    def test_audit_events_lifecycle_and_retrieval(self) -> None:
+        # 1. Trigger an action that records an audit event (e.g. submit run)
+        run = self.launch_and_wait("fixed", "payment-response-lost")
+        run_id = run["id"]
+
+        # 2. Retrieve audit log
+        status, data = self.request("GET", "/api/projects/faultline-demo/audit-events")
+        self.assertEqual(status, 200)
+        events = data["audit_events"]
+        self.assertIsInstance(events, list)
+        self.assertGreaterEqual(len(events), 1)
+        actions = [e["action"] for e in events]
+        self.assertIn("RUN_SUBMITTED", actions)
+
+    def test_state_snapshots_and_point_in_time_reconstruction(self) -> None:
+        run = self.launch_and_wait("fixed", "payment-response-lost")
+        run_id = run["id"]
+
+        # Verify snapshots endpoint
+        status, snap_data = self.request("GET", f"/api/runs/{run_id}/snapshots")
+        self.assertEqual(status, 200)
+        snapshots = snap_data["snapshots"]
+        self.assertGreaterEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0]["snapshot"]["verdict"], "passed")
+
+        # Verify point-in-time state reconstruction
+        status, state_data = self.request("GET", f"/api/runs/{run_id}/state?sequence=10")
+        self.assertEqual(status, 200)
+        state = state_data["state"]
+        self.assertEqual(state["run_id"], run_id)
+        self.assertIn("orders", state)
+        self.assertIn("charges", state)
+
+    def test_generate_scenarios_from_coverage_gaps(self) -> None:
+        status, result = self.request("POST", "/api/scenarios/generate-from-gaps", {"project_id": "faultline-demo"})
+        self.assertEqual(status, 201)
+        self.assertIn("generated", result)
+        self.assertIsInstance(result["generated"], list)
+
 
 if __name__ == "__main__":
     unittest.main()

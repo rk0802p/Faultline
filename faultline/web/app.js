@@ -361,9 +361,99 @@ function setupOpenApiImporter() {
   });
 }
 
+async function checkServicesHealth() {
+  const pill = $("#services-health-pill");
+  if (!pill) return;
+  try {
+    const { services } = await request("/api/projects/faultline-demo/services");
+    const healthyCount = services.filter((s) => s.status === "healthy").length;
+    if (healthyCount === services.length) {
+      pill.innerHTML = `<i></i> SERVICES HEALTHY (${healthyCount}/${services.length})`;
+      pill.style.background = "#eefaf2";
+      pill.style.color = "#15803d";
+    } else {
+      pill.innerHTML = `<i></i> SERVICES DEGRADED (${healthyCount}/${services.length})`;
+      pill.style.background = "#fff1f2";
+      pill.style.color = "#be123c";
+    }
+  } catch {
+    pill.innerHTML = `<i></i> SERVICES OFFLINE`;
+  }
+}
+
+async function loadAuditEvents() {
+  const list = $("#audit-log-list");
+  if (!list) return;
+  try {
+    const { audit_events } = await request("/api/projects/faultline-demo/audit-events");
+    if (!audit_events.length) {
+      list.innerHTML = '<span style="font-size:11px;color:#94a3b8">No audit events recorded yet.</span>';
+      return;
+    }
+    list.innerHTML = audit_events.map((ev) => `
+      <div style="font-size:11px;padding:6px 0;border-bottom:1px solid #f1f5f9;display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <strong style="color:#0f172a">${escapeHtml(ev.action)}</strong>
+          <span style="color:#64748b">on ${escapeHtml(ev.target_type)}:<code>${escapeHtml(ev.target_id)}</code></span>
+          <small style="color:#94a3b8">by ${escapeHtml(ev.actor)}</small>
+        </div>
+        <time style="font-size:10px;color:#94a3b8">${escapeHtml(formatTime(ev.created_at))}</time>
+      </div>
+    `).join("");
+  } catch (err) {
+    list.innerHTML = `<span style="font-size:11px;color:#ef4444">Failed: ${escapeHtml(err.message)}</span>`;
+  }
+}
+
+function setupAuditModal() {
+  const openBtn = $("#open-audit-btn");
+  const closeBtn = $("#close-audit-btn");
+  const modal = $("#audit-modal");
+  if (!openBtn || !modal) return;
+  openBtn.addEventListener("click", async () => {
+    modal.hidden = !modal.hidden;
+    if (!modal.hidden) await loadAuditEvents();
+  });
+  closeBtn?.addEventListener("click", () => {
+    modal.hidden = true;
+  });
+}
+
+function setupGenerateFromGaps() {
+  const btn = $("#generate-gaps-btn");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    try {
+      btn.disabled = true;
+      btn.textContent = "Analyzing gaps...";
+      const { count } = await request("/api/scenarios/generate-from-gaps", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project_id: "faultline-demo" }),
+      });
+      if (count > 0) {
+        toast(`Generated ${count} new scenario(s) from coverage gaps!`);
+        const res = await request("/api/scenarios");
+        state.scenarios = res.scenarios;
+        $("#scenario-count").textContent = String(state.scenarios.length);
+        const select = $("#scenario-select");
+        select.innerHTML = '<option value="">Create a new scenario…</option>' + state.scenarios.map((scenario) => `<option value="${escapeHtml(scenario.id)}">${escapeHtml(scenario.name)} · v${scenario.version}</option>`).join("");
+      } else {
+        toast("No new gaps found to generate.");
+      }
+      await refreshCoverage();
+    } catch (err) {
+      toast(`Failed: ${err.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = "<span>⚡</span> Generate scenarios from coverage gaps";
+    }
+  });
+}
+
 async function initialize() {
   try {
-    const [scenarioResponse] = await Promise.all([request("/api/scenarios"), refreshRuns(), refreshCoverage(), loadTemplates()]);
+    const [scenarioResponse] = await Promise.all([request("/api/scenarios"), refreshRuns(), refreshCoverage(), loadTemplates(), checkServicesHealth()]);
     state.scenarios = scenarioResponse.scenarios;
     $("#scenario-count").textContent = String(state.scenarios.length);
     const select = $("#scenario-select");
@@ -371,6 +461,8 @@ async function initialize() {
     select.value = state.scenarios[0]?.id || "";
     setScenarioEditor();
     setupOpenApiImporter();
+    setupAuditModal();
+    setupGenerateFromGaps();
     if (state.runs.length) await openRun(state.runs[0].id);
   } catch (error) { toast(`Faultline could not load: ${error.message}`); }
 }

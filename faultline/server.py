@@ -7,7 +7,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from . import engine, importer, security, store
@@ -79,6 +79,12 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
         elif re.fullmatch(r"/api/projects/[^/]+/tasks", path):
             project_id = path.split("/")[3]
             self.respond(200, {"tasks": store.list_tasks(project_id=project_id)})
+        elif re.fullmatch(r"/api/projects/[^/]+/services", path):
+            project_id = path.split("/")[3]
+            self.respond(200, {"services": store.get_project_services(project_id)})
+        elif re.fullmatch(r"/api/projects/[^/]+/audit-events", path):
+            project_id = path.split("/")[3]
+            self.respond(200, {"audit_events": store.list_audit_events(project_id)})
         elif path == "/api/suites":
             self.respond(200, {"suites": store.list_suites()})
         elif re.fullmatch(r"/api/suites/[^/]+", path):
@@ -122,6 +128,19 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             elif len(parts) == 3 and parts[1] == "diff":
                 diff = store.diff_runs(run_id, parts[2])
                 self.respond(200, {"diff": diff}) if diff else self.respond(404, {"error": "one or both runs not found"})
+            elif len(parts) == 2 and parts[1] == "events":
+                run = store.get_run(run_id)
+                self.respond(200, {"events": run["events"] if run else []}) if run else self.respond(404, {"error": "run not found"})
+            elif len(parts) == 2 and parts[1] == "assertions":
+                run = store.get_run(run_id)
+                self.respond(200, {"assertions": run["assertions"] if run else []}) if run else self.respond(404, {"error": "run not found"})
+            elif len(parts) == 2 and parts[1] == "snapshots":
+                self.respond(200, {"snapshots": store.get_snapshots(run_id)})
+            elif len(parts) == 2 and parts[1] == "state":
+                parsed_query = parse_qs(urlparse(self.path).query)
+                seq = int(parsed_query.get("sequence", [0])[0])
+                st = store.reconstruct_state_at(run_id, seq)
+                self.respond(200, {"state": st}) if st else self.respond(404, {"error": "run not found"})
             elif len(parts) == 2 and parts[1] == "reproduce":
                 bundle = store.get_reproduction_bundle(run_id)
                 if bundle:
@@ -147,7 +166,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         if (
-            path not in {"/api/runs", "/api/scenarios", "/api/scenarios/validate", "/api/suites", "/api/scenarios/import-incident", "/api/workflows/import-openapi"}
+            path not in {"/api/runs", "/api/scenarios", "/api/scenarios/validate", "/api/suites", "/api/scenarios/import-incident", "/api/workflows/import-openapi", "/api/scenarios/generate-from-gaps"}
             and not re.fullmatch(r"/api/scenarios/[^/]+/versions", path)
             and not re.fullmatch(r"/api/templates/[^/]+/instantiate", path)
             and not re.fullmatch(r"/api/runs/[^/]+/cancel", path)
@@ -167,6 +186,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             if cancel_match:
                 run_id = cancel_match.group(1)
                 if engine.cancel(run_id):
+                    store.record_audit_event("faultline-demo", "developer", "RUN_CANCEL_REQUESTED", "run", run_id, {})
                     self.respond(202, {"run_id": run_id, "status": "cancel_requested"})
                 else:
                     run = store.get_run(run_id)
@@ -184,6 +204,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                     raise ValueError("comment is required")
                 seq = payload.get("sequence_number")
                 annotation = store.add_annotation(run_id, author, comment, seq)
+                store.record_audit_event("faultline-demo", author, "ANNOTATION_ADDED", "run", run_id, {"comment": comment[:80]})
                 self.respond(201, {"annotation": annotation})
                 return
             task_match = re.fullmatch(r"/api/runs/([^/]+)/tasks", path)
@@ -199,11 +220,19 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 priority = payload.get("priority", "medium")
                 assignee = payload.get("assignee", "Developer")
                 task = store.create_task("faultline-demo", run_id, title, description, priority, assignee)
+                store.record_audit_event("faultline-demo", assignee, "TASK_CREATED", "task", task["id"], {"title": title, "priority": priority})
                 self.respond(201, {"task": task})
+                return
+            if path == "/api/scenarios/generate-from-gaps":
+                project_id = payload.get("project_id", "faultline-demo")
+                generated = store.generate_scenarios_from_gaps(project_id)
+                store.record_audit_event(project_id, "developer", "SCENARIOS_GENERATED_FROM_GAPS", "project", project_id, {"count": len(generated)})
+                self.respond(201, {"generated": generated, "count": len(generated)})
                 return
             if path == "/api/workflows/import-openapi":
                 spec_data = payload.get("spec") or payload.get("spec_text") or payload
                 workflow = importer.import_openapi_spec(spec_data)
+                store.record_audit_event("faultline-demo", "developer", "OPENAPI_IMPORTED", "api", workflow["title"], {"endpoints": workflow["endpoints_count"]})
                 self.respond(200, {"workflow": workflow})
                 return
             template_match = re.fullmatch(r"/api/templates/([^/]+)/instantiate", path)
@@ -213,6 +242,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 name = payload.get("name")
                 parameters = payload.get("parameters")
                 instance = store.instantiate_template(template_id, scenario_id, name, parameters)
+                store.record_audit_event("faultline-demo", "developer", "TEMPLATE_INSTANTIATED", "scenario", scenario_id, {"template_id": template_id})
                 self.respond(201, {"instance": instance})
                 return
             if path == "/api/scenarios/import-incident":
@@ -257,6 +287,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 scenario_id = re.sub(r"[^a-z0-9]+", "-", definition["name"].lower()).strip("-")[:64]
                 if any(item["id"] == scenario_id for item in store.list_scenarios()): raise ValueError("scenario name already exists")
                 store.create_scenario(scenario_id, "faultline-demo", definition)
+                store.record_audit_event("faultline-demo", "developer", "SCENARIO_CREATED", "scenario", scenario_id, {})
                 self.respond(201, {"scenario_id": scenario_id, "version": 1})
                 return
             if path == "/api/suites":
@@ -269,6 +300,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 if not isinstance(scenarios, list) or not scenarios:
                     raise ValueError("scenarios must be a non-empty list of scenario IDs")
                 store.create_suite(suite_id, payload.get("project_id", "faultline-demo"), name, description, scenarios)
+                store.record_audit_event("faultline-demo", "developer", "SUITE_CREATED", "suite", suite_id, {"scenarios": scenarios})
                 self.respond(201, {"suite_id": suite_id})
                 return
             version_match = re.fullmatch(r"/api/scenarios/([^/]+)/versions", path)
@@ -279,6 +311,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 definition = payload.get("definition")
                 validate_scenario(definition)
                 version = store.add_scenario_version(scenario_id, definition)
+                store.record_audit_event("faultline-demo", "developer", "SCENARIO_VERSIONED", "scenario", scenario_id, {"version": version})
                 self.respond(201, {"scenario_id": scenario_id, "version": version})
                 return
             scenario_id = payload.get("scenario_id", "payment-response-lost")
@@ -293,6 +326,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             run_id = str(uuid4())
             store.create_run(run_id, scenario_id, scenario["version"], implementation)
             store.record_event(run_id, "RUN_QUEUED", {"scenario_id": scenario_id})
+            store.record_audit_event("faultline-demo", "developer", "RUN_SUBMITTED", "run", run_id, {"scenario_id": scenario_id, "implementation": implementation})
             submit(run_id, scenario["definition"], implementation)
             logger.info("submitted run_id=%s scenario=%s implementation=%s", run_id, scenario_id, implementation)
             self.respond(202, {"run_id": run_id, "status": "queued"})
@@ -318,6 +352,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 priority=payload.get("priority"),
             )
             if updated:
+                store.record_audit_event("faultline-demo", updated.get("assignee", "developer"), "TASK_UPDATED", "task", task_id, payload)
                 self.respond(200, {"task": updated})
             else:
                 self.respond(404, {"error": "task not found"})

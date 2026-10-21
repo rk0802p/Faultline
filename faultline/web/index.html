@@ -31,7 +31,7 @@
     </aside>
 
     <main class="main-content" id="overview">
-      <header class="topbar"><div class="breadcrumbs"><span>Reliability lab</span><span class="crumb-slash">/</span><strong>Overview</strong></div><div class="topbar-right"><span class="environment-pill"><i></i> LOCAL LAB</span><button class="icon-button" title="Refresh data" id="refresh-button">↻</button></div></header>
+      <header class="topbar"><div class="breadcrumbs"><span>Reliability lab</span><span class="crumb-slash">/</span><strong>Overview</strong></div><div class="topbar-right"><span class="environment-pill" id="services-health-pill"><i></i> LOCAL LAB</span><button class="button button-secondary" id="open-audit-btn" style="padding:4px 8px;font-size:10px">Audit log</button><button class="icon-button" title="Refresh data" id="refresh-button">↻</button></div></header>
       <section class="page-heading"><div><div class="eyebrow">FAULTLINE WORKSPACE</div><h1>Integration failure lab</h1><p>Find out whether your checkout stays correct when a dependency fails.</p></div><div class="heading-date"><span class="live-indicator"></span> Ready to run</div></section>
 
       <section class="hero-card">
@@ -167,7 +167,22 @@
               <tbody id="coverage-body"></tbody>
             </table>
           </div>
+          <div style="margin-top:14px;display:flex;justify-content:flex-end">
+            <button class="button button-primary" id="generate-gaps-btn"><span>⚡</span> Generate scenarios from coverage gaps</button>
+          </div>
         </div>
+      </section>
+
+      <section class="detail-card" id="audit-modal" style="margin-top:14px" hidden>
+        <div class="detail-title">
+          <span class="detail-title-icon" style="background:#f1f5f9;color:#475569">⚖</span>
+          <div>
+            <strong>Governance &amp; Audit Log (Spec §6.13)</strong>
+            <small>Immutable audit trail of scenario versions, run submissions, and security events</small>
+          </div>
+          <button class="more-button" id="close-audit-btn" style="margin-left:auto">✕</button>
+        </div>
+        <div id="audit-log-list" style="margin-top:10px;max-height:220px;overflow-y:auto"></div>
       </section>
 
       <section class="templates-section" id="templates">

@@ -227,6 +227,29 @@ class FaultlineCliTests(unittest.TestCase):
         self.assertIn("Defect Detection Rate:   100.0%", stdout.getvalue())
         self.assertIn("Benchmark PASSED", stdout.getvalue())
 
+    def test_cli_templates_command(self) -> None:
+        templates_response = {
+            "templates": [
+                {
+                    "id": "payment-response-lost-tpl",
+                    "name": "Payment Response Lost",
+                    "category": "network_failure",
+                    "description": "Verifies retry uses idempotency key.",
+                    "expected_invariants": ["no_duplicate_charge"],
+                    "cleanup_strategy": "Purges provider ledger.",
+                }
+            ]
+        }
+        stdout, stderr = io.StringIO(), io.StringIO()
+        args = ["faultline.cli", "templates"]
+        with patch.object(sys, "argv", args), \
+                patch("faultline.cli.api_json", return_value=templates_response), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 0)
+        self.assertIn("Faultline Reusable Scenario Templates", stdout.getvalue())
+        self.assertIn("payment-response-lost-tpl", stdout.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

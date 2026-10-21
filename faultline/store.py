@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from . import security
+
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("FAULTLINE_DATA_DIR", ROOT / "data"))
@@ -131,11 +133,24 @@ def initialize() -> None:
                 created_at TEXT NOT NULL,
                 resolved_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS scenario_templates (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                description TEXT NOT NULL,
+                parameters_schema_json TEXT NOT NULL,
+                default_definition_json TEXT NOT NULL,
+                expected_invariants_json TEXT NOT NULL,
+                cleanup_strategy TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
         run_columns = {row["name"] for row in db.execute("PRAGMA table_info(runs)")}
         if "scenario_version" not in run_columns:
             db.execute("ALTER TABLE runs ADD COLUMN scenario_version INTEGER NOT NULL DEFAULT 1")
+        if "cleanup_json" not in run_columns:
+            db.execute("ALTER TABLE runs ADD COLUMN cleanup_json TEXT NOT NULL DEFAULT '{}'")
         db.execute(
             "INSERT OR IGNORE INTO projects VALUES (?, ?, ?, ?)",
             ("faultline-demo", "Checkout reliability lab", "Local, isolated checkout integration environment.", now()),
@@ -165,6 +180,131 @@ def initialize() -> None:
             db.execute(
                 "INSERT OR IGNORE INTO suite_scenarios VALUES (?, ?, ?)",
                 (s_id, sc_id, seq),
+            )
+
+        templates = [
+            (
+                "payment-response-lost-tpl",
+                "Payment Response Lost After Provider Commit",
+                "network_failure",
+                "Verifies checkout handles lost HTTP response after provider commits charge. Tests whether retry uses an idempotency key to prevent duplicate charges.",
+                json.dumps({
+                    "order_id": {"type": "string", "default": "order-tpl-001"},
+                    "amount_cents": {"type": "integer", "default": 2500},
+                    "retries": {"type": "integer", "default": 1},
+                    "timeout_seconds": {"type": "integer", "default": 15},
+                }),
+                json.dumps({
+                    "scenario_version": 1,
+                    "name": "payment-response-lost",
+                    "description": "Detect duplicate charges when the provider commits but checkout loses the response.",
+                    "order_id": "order-tpl-001",
+                    "amount_cents": 2500,
+                    "fault": "payment_response_lost_after_commit",
+                    "retries": 1,
+                    "assertion": "no_duplicate_charge",
+                }),
+                json.dumps(["fault_activation_confirmed", "no_duplicate_charge", "payment_matches_ledger", "checkout_terminal_state"]),
+                "Purges provider ledger and resets checkout idempotency cache.",
+            ),
+            (
+                "duplicate-payment-webhook-tpl",
+                "Duplicate Payment Webhook Delivery",
+                "webhook_deduplication",
+                "Verifies fulfillment consumer deduplicates redelivered payment succeeded webhooks without multiple inventory reservations or shipments.",
+                json.dumps({
+                    "order_id": {"type": "string", "default": "order-tpl-002"},
+                    "amount_cents": {"type": "integer", "default": 4200},
+                    "webhook_deliveries": {"type": "integer", "default": 2},
+                    "delay_ms": {"type": "integer", "default": 100},
+                }),
+                json.dumps({
+                    "scenario_version": 1,
+                    "name": "duplicate-payment-webhook",
+                    "description": "Verify webhook receiver deduplicates redelivered payment succeeded webhooks.",
+                    "order_id": "order-tpl-002",
+                    "amount_cents": 4200,
+                    "fault": "duplicate_payment_webhook",
+                    "webhook_deliveries": 2,
+                    "delay_ms": 100,
+                    "assertion": "no_duplicate_fulfillment",
+                }),
+                json.dumps(["webhook_fault_activation_confirmed", "no_duplicate_fulfillment", "webhook_terminal_state", "all_webhooks_processed"]),
+                "Clears processed webhook idempotency ledger and resets fulfillment records.",
+            ),
+            (
+                "partial-persistence-failure-tpl",
+                "Partial Persistence Failure After Charge",
+                "database_failure",
+                "Verifies that when database persistence fails after provider commits payment, a compensating refund reconciles the transaction.",
+                json.dumps({
+                    "order_id": {"type": "string", "default": "order-tpl-003"},
+                    "amount_cents": {"type": "integer", "default": 5500},
+                    "compensate": {"type": "boolean", "default": True},
+                }),
+                json.dumps({
+                    "scenario_version": 1,
+                    "name": "partial-persistence-failure",
+                    "description": "Verify compensating refund reconciles payment when local database persistence fails after external commit.",
+                    "order_id": "order-tpl-003",
+                    "amount_cents": 5500,
+                    "fault": "partial_persistence_failure",
+                    "compensate": True,
+                    "assertion": "no_uncompensated_charge",
+                }),
+                json.dumps(["persistence_fault_activated", "no_uncompensated_charge", "compensating_refund_issued", "order_persistence_consistent"]),
+                "Purges provider refunds ledger and resets temporary order rows.",
+            ),
+            (
+                "dependency-rate-limiting-tpl",
+                "Dependency Rate Limiting and Backoff",
+                "rate_limiting",
+                "Tests client behavior when dependency returns HTTP 429 Too Many Requests with Retry-After header. Verifies retry jitter and exponential backoff.",
+                json.dumps({
+                    "order_id": {"type": "string", "default": "order-tpl-004"},
+                    "max_retries": {"type": "integer", "default": 3},
+                    "backoff_ms": {"type": "integer", "default": 200},
+                }),
+                json.dumps({
+                    "scenario_version": 1,
+                    "name": "dependency-rate-limiting",
+                    "description": "Verify graceful backoff when payment provider returns HTTP 429 rate limits.",
+                    "order_id": "order-tpl-004",
+                    "amount_cents": 1900,
+                    "fault": "payment_response_lost_after_commit",
+                    "retries": 2,
+                    "assertion": "checkout_terminal_state",
+                }),
+                json.dumps(["rate_limit_activated", "backoff_adhered", "checkout_terminal_state"]),
+                "Resets rate limit bucket counters.",
+            ),
+            (
+                "inventory-concurrency-race-tpl",
+                "Concurrent Reservation Race for Final Item",
+                "concurrency_race",
+                "Tests simultaneous checkout requests competing for the last available inventory unit. Verifies that exactly one succeeds and no oversell occurs.",
+                json.dumps({
+                    "item_id": {"type": "string", "default": "item-final-01"},
+                    "concurrent_callers": {"type": "integer", "default": 2},
+                }),
+                json.dumps({
+                    "scenario_version": 1,
+                    "name": "inventory-concurrency-race",
+                    "description": "Verify atomic inventory reservation under simultaneous competing checkout requests.",
+                    "order_id": "order-tpl-005",
+                    "amount_cents": 8900,
+                    "fault": "payment_response_lost_after_commit",
+                    "retries": 1,
+                    "assertion": "no_duplicate_charge",
+                }),
+                json.dumps(["concurrency_race_coordinated", "no_duplicate_charge", "checkout_terminal_state"]),
+                "Restores baseline inventory level.",
+            ),
+        ]
+        for t_id, name, cat, desc, p_schema, d_def, exp_inv, cleanup_strat in templates:
+            db.execute(
+                "INSERT OR IGNORE INTO scenario_templates VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (t_id, name, cat, desc, p_schema, d_def, exp_inv, cleanup_strat, now()),
             )
 
 
@@ -255,6 +395,7 @@ def request_cancel(run_id: str) -> bool:
 
 
 def record_event(run_id: str, event_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    sanitized = security.redact_sensitive(payload or {})
     with database() as db:
         sequence = db.execute(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_events WHERE run_id=?", (run_id,)
@@ -262,9 +403,27 @@ def record_event(run_id: str, event_type: str, payload: dict[str, Any] | None = 
         recorded_at = now()
         db.execute(
             "INSERT INTO run_events(run_id, sequence, recorded_at, type, payload_json) VALUES (?, ?, ?, ?, ?)",
-            (run_id, sequence, recorded_at, event_type, json.dumps(payload or {})),
+            (run_id, sequence, recorded_at, event_type, json.dumps(sanitized)),
         )
-    return {"sequence": sequence, "recorded_at": recorded_at, "type": event_type, "payload": payload or {}}
+    return {"sequence": sequence, "recorded_at": recorded_at, "type": event_type, "payload": sanitized}
+
+
+def record_cleanup(
+    run_id: str,
+    status: str,
+    owned_resources: list[str],
+    error: str | None = None,
+    duration_ms: int = 0,
+) -> None:
+    data = {
+        "status": status,
+        "cleaned_at": now(),
+        "owned_resources": owned_resources,
+        "error": error,
+        "duration_ms": duration_ms,
+    }
+    with database() as db:
+        db.execute("UPDATE runs SET cleanup_json=? WHERE id=?", (json.dumps(data), run_id))
 
 
 def replace_assertions(run_id: str, assertions: list[dict[str, Any]]) -> None:
@@ -297,6 +456,14 @@ def get_run(run_id: str) -> dict[str, Any] | None:
         result = dict(row)
         result["summary"] = json.loads(result.pop("summary_json"))
         result["scenario"] = json.loads(scenario["definition_json"])
+        cleanup_raw = result.pop("cleanup_json", None)
+        cleanup_data = {}
+        if cleanup_raw:
+            try:
+                cleanup_data = json.loads(cleanup_raw)
+            except Exception:
+                pass
+        result["cleanup"] = cleanup_data or {"status": "untracked", "owned_resources": []}
         result["events"] = [
             {"sequence": event["sequence"], "recorded_at": event["recorded_at"], "type": event["type"],
              "payload": json.loads(event["payload_json"])} for event in events
@@ -309,13 +476,82 @@ def get_run(run_id: str) -> dict[str, Any] | None:
         return result
 
 
+def list_templates() -> list[dict[str, Any]]:
+    with database() as db:
+        rows = db.execute("SELECT * FROM scenario_templates ORDER BY category, name").fetchall()
+        return [
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "category": r["category"],
+                "description": r["description"],
+                "parameters_schema": json.loads(r["parameters_schema_json"]),
+                "default_definition": json.loads(r["default_definition_json"]),
+                "expected_invariants": json.loads(r["expected_invariants_json"]),
+                "cleanup_strategy": r["cleanup_strategy"],
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
+
+
+def get_template(template_id: str) -> dict[str, Any] | None:
+    with database() as db:
+        row = db.execute("SELECT * FROM scenario_templates WHERE id=?", (template_id,)).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "category": row["category"],
+            "description": row["description"],
+            "parameters_schema": json.loads(row["parameters_schema_json"]),
+            "default_definition": json.loads(row["default_definition_json"]),
+            "expected_invariants": json.loads(row["expected_invariants_json"]),
+            "cleanup_strategy": row["cleanup_strategy"],
+            "created_at": row["created_at"],
+        }
+
+
+def instantiate_template(
+    template_id: str,
+    scenario_id: str,
+    name: str | None = None,
+    parameters: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    tpl = get_template(template_id)
+    if not tpl:
+        raise ValueError(f"Template '{template_id}' not found")
+    definition = dict(tpl["default_definition"])
+    definition["name"] = scenario_id
+    if name:
+        definition["description"] = f"{tpl['description']} (Instance: {name})"
+    if parameters:
+        for k, v in parameters.items():
+            definition[k] = v
+    create_scenario(scenario_id, "faultline-demo", definition)
+    return {
+        "scenario_id": scenario_id,
+        "template_id": template_id,
+        "definition": definition,
+        "expected_invariants": tpl["expected_invariants"],
+        "cleanup_strategy": tpl["cleanup_strategy"],
+    }
+
+
 def get_reproduction_bundle(run_id: str) -> dict[str, Any] | None:
     run = get_run(run_id)
     if run is None:
         return None
-    return {"format": "faultline-repro-v1", "run": run,
-            "replay": {"command": f"python -m faultline.cli run --scenario {run['scenario_id']} --implementation {run['implementation']}",
-                       "note": "Replays the recorded scenario against the local deterministic test services."}}
+    bundle = {
+        "format": "faultline-repro-v1",
+        "run": run,
+        "replay": {
+            "command": f"python -m faultline.cli run --scenario {run['scenario_id']} --implementation {run['implementation']}",
+            "note": "Replays the recorded scenario against the local deterministic test services.",
+        },
+    }
+    return security.redact_sensitive(bundle)
 
 
 def list_runs(limit: int = 30) -> list[dict[str, Any]]:
@@ -324,13 +560,29 @@ def list_runs(limit: int = 30) -> list[dict[str, Any]]:
             "SELECT r.*, s.name AS scenario_name FROM runs r JOIN scenarios s ON s.id=r.scenario_id "
             "ORDER BY r.started_at DESC LIMIT ?", (limit,)
         ).fetchall()
-        return [
-            {"id": row["id"], "scenario_id": row["scenario_id"], "scenario_version": row["scenario_version"], "scenario": row["scenario_name"],
-             "implementation": row["implementation"], "status": row["status"], "verdict": row["verdict"],
-             "started_at": row["started_at"], "finished_at": row["finished_at"],
-             "summary": json.loads(row["summary_json"]), "error": row["error"]}
-            for row in rows
-        ]
+        result = []
+        for row in rows:
+            cleanup_data = {}
+            if "cleanup_json" in row.keys() and row["cleanup_json"]:
+                try:
+                    cleanup_data = json.loads(row["cleanup_json"])
+                except Exception:
+                    pass
+            result.append({
+                "id": row["id"],
+                "scenario_id": row["scenario_id"],
+                "scenario_version": row["scenario_version"],
+                "scenario": row["scenario_name"],
+                "implementation": row["implementation"],
+                "status": row["status"],
+                "verdict": row["verdict"],
+                "cleanup": cleanup_data or {"status": "untracked", "owned_resources": []},
+                "started_at": row["started_at"],
+                "finished_at": row["finished_at"],
+                "summary": json.loads(row["summary_json"]),
+                "error": row["error"],
+            })
+        return result
 
 
 def list_suites() -> list[dict[str, Any]]:
@@ -738,6 +990,7 @@ def generate_run_report(run_id: str) -> dict[str, Any] | None:
             "side_effects": summary,
         },
         "invariants": assertions,
+        "cleanup": run.get("cleanup", {"status": "untracked", "owned_resources": []}),
         "annotations": annotations,
         "tasks": tasks,
         "recommendation": recommendation,
@@ -782,6 +1035,17 @@ def generate_markdown_report(report: dict[str, Any]) -> str:
     for inv in report["invariants"]:
         icon = "Passed" if inv["status"] == "passed" else "Failed"
         lines.append(f"| `{inv['name']}` | {icon} | {inv['expected']} | {inv['observed']} |")
+
+    cleanup = report.get("cleanup", {})
+    cleanup_status = cleanup.get("status", "untracked").upper()
+    owned_count = len(cleanup.get("owned_resources", []))
+    lines.extend([
+        "",
+        "## Cleanup & Fixture Teardown (Spec §6.14)",
+        f"- **Cleanup Verdict:** `{cleanup_status}`",
+        f"- **Owned Resources Tracked:** `{owned_count}`",
+        f"- **Teardown Error:** `{cleanup.get('error') or 'None'}`",
+    ])
 
     if report.get("annotations"):
         lines.extend([

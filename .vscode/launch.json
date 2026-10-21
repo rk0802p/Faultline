@@ -57,6 +57,66 @@
       "request": "launch",
       "url": "http://127.0.0.1:8000/",
       "webRoot": "${workspaceFolder}/faultline/web"
+    },
+    {
+      "name": "Faultline: Debug CLI Benchmark",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "faultline.cli",
+      "args": ["benchmark", "--debug"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Faultline: Debug CLI Suite (Critical Integrations - fixed)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "faultline.cli",
+      "args": ["run", "--suite", "critical-integrations", "--implementation", "fixed", "--debug"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Faultline: Debug CLI Suite (Critical Integrations - vulnerable)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "faultline.cli",
+      "args": ["run", "--suite", "critical-integrations", "--implementation", "vulnerable", "--debug"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Faultline: Debug Scenario 2 (Duplicate Webhook - fixed)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "faultline.cli",
+      "args": ["run", "--scenario", "duplicate-payment-webhook", "--implementation", "fixed", "--debug"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Faultline: Debug Scenario 3 (Persistence Failure - fixed)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "faultline.cli",
+      "args": ["run", "--scenario", "partial-persistence-failure", "--implementation", "fixed", "--debug"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Faultline: Debug CLI Report (Markdown)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "faultline.cli",
+      "args": ["report", "--report-format", "markdown"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false
     }
   ]
 }

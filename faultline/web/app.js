@@ -66,11 +66,15 @@ function renderRun(run) {
   status.className = `run-status-pill ${run.status === "completed" ? run.verdict : run.status}`;
   const summary = run.summary || {};
   const isWebhook = run.scenario.fault === "duplicate_payment_webhook";
+  const cleanup = run.cleanup || { status: "untracked", owned_resources: [] };
+  const cleanupLabel = cleanup.status ? cleanup.status.toUpperCase() : "UNTRACKED";
+  const ownedCount = cleanup.owned_resources?.length || 0;
   $("#run-overview").innerHTML = [
     ["Run", run.id],
     ["Order", summary.order_id || run.scenario.order_id],
     [isWebhook ? "Deliveries" : "Attempts", isWebhook ? (summary.deliveries ?? "—") : (summary.attempts ?? "—")],
     [isWebhook ? "Fulfillments" : "Charges", isWebhook ? (summary.fulfillment_count ?? "—") : (summary.charge_count ?? "—")],
+    ["Cleanup (Spec §6.14)", `${cleanupLabel} (${ownedCount} owned)`],
   ].map(([label, value]) => `<span class="overview-chip">${escapeHtml(label)}<strong>${escapeHtml(value)}</strong></span>`).join("");
 
   const charges = summary.charges || [];
@@ -246,15 +250,127 @@ async function launchRun(implementation, scenarioId) {
   finally { buttons.forEach((button) => { button.disabled = false; }); }
 }
 
+async function loadTemplates() {
+  const container = $("#template-grid");
+  if (!container) return;
+  try {
+    const { templates } = await request("/api/templates");
+    container.innerHTML = templates.map((tpl) => `
+      <article class="scenario-card template-card" style="display:flex;flex-direction:column;justify-content:space-between">
+        <div>
+          <div class="scenario-card-top">
+            <span class="scenario-symbol">⚡</span>
+            <span class="scenario-tag">${escapeHtml(tpl.category.toUpperCase())}</span>
+          </div>
+          <h3>${escapeHtml(tpl.name)}</h3>
+          <p class="scenario-description">${escapeHtml(tpl.description)}</p>
+          <div style="font-size:10px;color:#78869c;margin:8px 0">
+            <strong>Invariants:</strong> ${tpl.expected_invariants.map((inv) => `<code style="background:#eef2f8;padding:1px 4px;border-radius:3px">${escapeHtml(inv)}</code>`).join(" ")}
+          </div>
+          <div style="font-size:10px;color:#8592a6">
+            <strong>Cleanup:</strong> ${escapeHtml(tpl.cleanup_strategy)}
+          </div>
+        </div>
+        <div style="margin-top:14px">
+          <button class="button button-primary instantiate-btn" data-template-id="${escapeHtml(tpl.id)}" style="width:100%">
+            <span>+</span> Instantiate scenario
+          </button>
+        </div>
+      </article>
+    `).join("");
+
+    container.querySelectorAll(".instantiate-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const templateId = btn.dataset.templateId;
+        const scId = `${templateId.replace("-tpl", "")}-${Date.now().toString(36)}`;
+        try {
+          btn.disabled = true;
+          btn.textContent = "Instantiating...";
+          await request(`/api/templates/${encodeURIComponent(templateId)}/instantiate`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ scenario_id: scId }),
+          });
+          toast(`Created scenario '${scId}' from template!`);
+          const res = await request("/api/scenarios");
+          state.scenarios = res.scenarios;
+          $("#scenario-count").textContent = String(state.scenarios.length);
+          const select = $("#scenario-select");
+          select.innerHTML = '<option value="">Create a new scenario…</option>' + state.scenarios.map((scenario) => `<option value="${escapeHtml(scenario.id)}">${escapeHtml(scenario.name)} · v${scenario.version}</option>`).join("");
+          select.value = scId;
+          setScenarioEditor();
+        } catch (err) {
+          toast(`Failed: ${err.message}`);
+        } finally {
+          btn.disabled = false;
+          btn.innerHTML = "<span>+</span> Instantiate scenario";
+        }
+      });
+    });
+  } catch (err) {
+    console.error("Failed to load templates", err);
+  }
+}
+
+function setupOpenApiImporter() {
+  const btn = $("#import-openapi-btn");
+  const input = $("#openapi-input");
+  const results = $("#openapi-results");
+  if (!btn || !input || !results) return;
+
+  btn.addEventListener("click", async () => {
+    const raw = input.value.trim();
+    if (!raw) {
+      toast("Please paste an OpenAPI JSON specification");
+      return;
+    }
+    try {
+      btn.disabled = true;
+      btn.textContent = "Analyzing...";
+      const { workflow } = await request("/api/workflows/import-openapi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: raw,
+      });
+      results.hidden = false;
+      results.innerHTML = `
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:12px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <strong>${escapeHtml(workflow.title)} (v${escapeHtml(workflow.version)})</strong>
+            <span class="impl-badge" style="background:#dbeafe;color:#1e40af">${workflow.endpoints_count} endpoints discovered</span>
+          </div>
+          <div style="margin-top:8px;font-size:11px">
+            <strong>Recommended Failure Scenarios:</strong>
+            <ul style="margin:6px 0 0 16px;padding:0">
+              ${workflow.recommended_scenarios.map((rec) => `
+                <li style="margin-bottom:4px">
+                  <strong>${escapeHtml(rec.name)}</strong> · <span style="color:#64748b">${escapeHtml(rec.rationale)}</span>
+                </li>
+              `).join("")}
+            </ul>
+          </div>
+        </div>
+      `;
+      toast(`Successfully mapped ${workflow.endpoints_count} endpoints!`);
+    } catch (err) {
+      toast(`Import failed: ${err.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Import workflow";
+    }
+  });
+}
+
 async function initialize() {
   try {
-    const [scenarioResponse] = await Promise.all([request("/api/scenarios"), refreshRuns(), refreshCoverage()]);
+    const [scenarioResponse] = await Promise.all([request("/api/scenarios"), refreshRuns(), refreshCoverage(), loadTemplates()]);
     state.scenarios = scenarioResponse.scenarios;
     $("#scenario-count").textContent = String(state.scenarios.length);
     const select = $("#scenario-select");
     select.innerHTML = '<option value="">Create a new scenario…</option>' + state.scenarios.map((scenario) => `<option value="${escapeHtml(scenario.id)}">${escapeHtml(scenario.name)} · v${scenario.version}</option>`).join("");
     select.value = state.scenarios[0]?.id || "";
     setScenarioEditor();
+    setupOpenApiImporter();
     if (state.runs.length) await openRun(state.runs[0].id);
   } catch (error) { toast(`Faultline could not load: ${error.message}`); }
 }

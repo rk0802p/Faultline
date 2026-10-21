@@ -76,15 +76,17 @@ Delivered:
 - [x] Verify compensating refunds reconcile charges when order persistence fails.
 - [x] Add interactive step-by-step playback and seek controls to the execution timeline.
 - [x] Provide Dockerfile and Docker Compose infrastructure configurations.
-- [ ] Add failure coverage matrix and reusable scenario templates.
-- [ ] Report cleanup ownership and failures separately from scenario verdicts.
+- [x] Add failure coverage matrix and reusable scenario templates.
+- [x] Report cleanup ownership and failures separately from scenario verdicts.
 
 **Exit:** multiple failure classes expose cross-service correctness defects with recorded evidence.
 
 ## Phase 4 — CI and regression workflows
 
-- Add regression suites, GitHub Actions integration, JUnit reports, and historical comparisons.
-- Enforce allowlists, resource/time limits, secret redaction, and cleanup in the CI execution path.
+**Status: Complete.**
+
+- [x] Add regression suites, GitHub Actions integration, JUnit reports, and historical comparisons.
+- [x] Enforce allowlists, resource/time limits, secret redaction, and cleanup in the CI execution path.
 
 **Exit:** a seeded regression fails CI with a downloadable, sanitized reproduction artifact.
 

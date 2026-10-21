@@ -30,6 +30,18 @@
       "type": "shell",
       "command": "node --check faultline/web/app.js",
       "problemMatcher": []
+    },
+    {
+      "label": "Faultline: Run Benchmark",
+      "type": "shell",
+      "command": "python -m faultline.cli benchmark",
+      "problemMatcher": []
+    },
+    {
+      "label": "Faultline: Run Critical Integrations Suite",
+      "type": "shell",
+      "command": "python -m faultline.cli run --suite critical-integrations --implementation fixed",
+      "problemMatcher": []
     }
   ]
 }

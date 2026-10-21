@@ -180,7 +180,7 @@ def run_benchmark(base: str, timeout: float, debug: bool) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Faultline CLI for integration failure testing and benchmarks")
-    parser.add_argument("command", choices=["run", "report", "benchmark"], help="command to execute (run, report, or benchmark)")
+    parser.add_argument("command", choices=["run", "report", "benchmark", "templates"], help="command to execute (run, report, benchmark, or templates)")
     parser.add_argument("--scenario", help="scenario ID to run")
     parser.add_argument("--suite", help="suite ID to run all member scenarios")
     parser.add_argument("--implementation", choices=["vulnerable", "fixed"], default="vulnerable")
@@ -194,6 +194,20 @@ def main() -> int:
 
     base = args.base_url.rstrip("/")
     try:
+        if args.command == "templates":
+            templates_data = api_json(f"{base}/api/templates")["templates"]
+            print("=" * 60)
+            print(f"Faultline Reusable Scenario Templates ({len(templates_data)} available)")
+            print("=" * 60)
+            for tpl in templates_data:
+                print(f"  • {tpl['id']} [{tpl['category']}]:")
+                print(f"      Name:        {tpl['name']}")
+                print(f"      Description: {tpl['description']}")
+                print(f"      Invariants:  {', '.join(tpl['expected_invariants'])}")
+                print(f"      Cleanup:     {tpl['cleanup_strategy']}")
+                print()
+            return 0
+
         if args.command == "benchmark":
             return run_benchmark(base, args.timeout, args.debug)
 

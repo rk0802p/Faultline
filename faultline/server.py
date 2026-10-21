@@ -10,10 +10,9 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from . import store
+from . import engine, importer, security, store
 from .adapters import start_local_services
 from .engine import submit
-from . import engine
 
 
 WEB_ROOT = Path(__file__).resolve().parent / "web"
@@ -86,6 +85,12 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             suite_id = path.split("/")[3]
             suite = store.get_suite(suite_id)
             self.respond(200, {"suite": suite}) if suite else self.respond(404, {"error": "suite not found"})
+        elif path == "/api/templates":
+            self.respond(200, {"templates": store.list_templates()})
+        elif re.fullmatch(r"/api/templates/[^/]+", path):
+            template_id = path.split("/")[3]
+            template = store.get_template(template_id)
+            self.respond(200, {"template": template}) if template else self.respond(404, {"error": "template not found"})
         elif path == "/api/scenarios":
             self.respond(200, {"scenarios": store.list_scenarios()})
         elif re.fullmatch(r"/api/scenarios/[^/]+/versions", path):
@@ -142,8 +147,9 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlparse(self.path).path
         if (
-            path not in {"/api/runs", "/api/scenarios", "/api/scenarios/validate", "/api/suites", "/api/scenarios/import-incident"}
+            path not in {"/api/runs", "/api/scenarios", "/api/scenarios/validate", "/api/suites", "/api/scenarios/import-incident", "/api/workflows/import-openapi"}
             and not re.fullmatch(r"/api/scenarios/[^/]+/versions", path)
+            and not re.fullmatch(r"/api/templates/[^/]+/instantiate", path)
             and not re.fullmatch(r"/api/runs/[^/]+/cancel", path)
             and not re.fullmatch(r"/api/runs/[^/]+/annotations", path)
             and not re.fullmatch(r"/api/runs/[^/]+/tasks", path)
@@ -194,6 +200,20 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 assignee = payload.get("assignee", "Developer")
                 task = store.create_task("faultline-demo", run_id, title, description, priority, assignee)
                 self.respond(201, {"task": task})
+                return
+            if path == "/api/workflows/import-openapi":
+                spec_data = payload.get("spec") or payload.get("spec_text") or payload
+                workflow = importer.import_openapi_spec(spec_data)
+                self.respond(200, {"workflow": workflow})
+                return
+            template_match = re.fullmatch(r"/api/templates/([^/]+)/instantiate", path)
+            if template_match:
+                template_id = template_match.group(1)
+                scenario_id = payload.get("scenario_id") or f"scenario-{uuid4().hex[:6]}"
+                name = payload.get("name")
+                parameters = payload.get("parameters")
+                instance = store.instantiate_template(template_id, scenario_id, name, parameters)
+                self.respond(201, {"instance": instance})
                 return
             if path == "/api/scenarios/import-incident":
                 title = payload.get("title", "").strip()

@@ -483,6 +483,126 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertIn("# Faultline Retrospective Report", md)
         self.assertIn("Executive Summary", md)
         self.assertIn("Invariant Evaluation", md)
+        self.assertIn("Cleanup & Fixture Teardown", md)
+
+    def test_security_redaction_and_loopback_allowlist(self) -> None:
+        from faultline import security
+
+        # Test secret redaction on sensitive payload
+        sensitive_data = {
+            "password": "supersecretpassword123",
+            "auth_header": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.xyz",
+            "api_key": "sk_live_99887766554433221100",
+            "card_number": "4111 2222 3333 4444",
+            "order_id": "order-safe-123",
+            "nested": {
+                "token": "tok_12345",
+                "message": "User with card 5555444433332222 checked out with key sk_live_1122334455667788",
+            },
+        }
+        redacted = security.redact_sensitive(sensitive_data)
+        self.assertEqual(redacted["password"], "[REDACTED]")
+        self.assertIn("Bearer [REDACTED]", redacted["auth_header"])
+        self.assertEqual(redacted["api_key"], "[REDACTED]")
+        self.assertEqual(redacted["card_number"], "[REDACTED]")
+        self.assertEqual(redacted["order_id"], "order-safe-123")
+        self.assertEqual(redacted["nested"]["token"], "[REDACTED]")
+        self.assertIn("[REDACTED_PAN]", redacted["nested"]["message"])
+        self.assertIn("[REDACTED_KEY]", redacted["nested"]["message"])
+
+        # Test loopback security allowlist
+        self.assertTrue(security.is_loopback_allowed("http://127.0.0.1:8766/v1/checkout"))
+        self.assertTrue(security.is_loopback_allowed("http://localhost:8000/api/runs"))
+        self.assertTrue(security.is_loopback_allowed("127.0.0.1:8767"))
+        self.assertFalse(security.is_loopback_allowed("https://api.external-payment.com/v1/charges"))
+        self.assertFalse(security.is_loopback_allowed("http://192.168.1.50:8000"))
+
+        with self.assertRaises(PermissionError):
+            security.assert_loopback_safe("https://evil.internal.corp/steal")
+
+    def test_cleanup_tracking_and_failure_separation(self) -> None:
+        run = self.launch_and_wait("fixed", "payment-response-lost")
+        run_id = run["id"]
+
+        status, run_data = self.request("GET", f"/api/runs/{run_id}")
+        self.assertEqual(status, 200)
+        cleanup = run_data["run"]["cleanup"]
+        self.assertEqual(cleanup["status"], "succeeded")
+        self.assertIsInstance(cleanup["owned_resources"], list)
+        self.assertTrue(len(cleanup["owned_resources"]) > 0)
+        self.assertIsNone(cleanup.get("error"))
+
+    def test_scenario_templates_api_and_instantiation(self) -> None:
+        # 1. List templates
+        status, data = self.request("GET", "/api/templates")
+        self.assertEqual(status, 200)
+        templates = data["templates"]
+        self.assertGreaterEqual(len(templates), 5)
+        tpl_ids = [t["id"] for t in templates]
+        self.assertIn("payment-response-lost-tpl", tpl_ids)
+        self.assertIn("duplicate-payment-webhook-tpl", tpl_ids)
+        self.assertIn("partial-persistence-failure-tpl", tpl_ids)
+
+        # 2. Get specific template
+        status, tpl_data = self.request("GET", "/api/templates/payment-response-lost-tpl")
+        self.assertEqual(status, 200)
+        self.assertEqual(tpl_data["template"]["category"], "network_failure")
+        self.assertIn("parameters_schema", tpl_data["template"])
+
+        # 3. Instantiate template
+        inst_payload = {
+            "scenario_id": f"inst-sc-{uuid4().hex[:6]}",
+            "name": "Customized Payment Loss",
+            "parameters": {"amount_cents": 9999, "retries": 2},
+        }
+        status, inst_result = self.request("POST", "/api/templates/payment-response-lost-tpl/instantiate", inst_payload)
+        self.assertEqual(status, 201)
+        self.assertEqual(inst_result["instance"]["scenario_id"], inst_payload["scenario_id"])
+        self.assertEqual(inst_result["instance"]["definition"]["amount_cents"], 9999)
+
+        # Verify scenario exists and is runnable
+        status, scenarios_data = self.request("GET", "/api/scenarios")
+        self.assertEqual(status, 200)
+        sc_ids = [s["id"] for s in scenarios_data["scenarios"]]
+        self.assertIn(inst_payload["scenario_id"], sc_ids)
+
+    def test_openapi_workflow_import_endpoint(self) -> None:
+        openapi_spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "Checkout E-Commerce API", "version": "2.4.0"},
+            "paths": {
+                "/v1/checkout": {
+                    "post": {
+                        "summary": "Initiate checkout order",
+                        "operationId": "createCheckout",
+                        "parameters": [{"name": "Idempotency-Key", "in": "header"}],
+                    }
+                },
+                "/v1/charges": {
+                    "post": {
+                        "summary": "Process payment charge",
+                        "operationId": "createCharge",
+                    }
+                },
+                "/v1/webhooks/payment": {
+                    "post": {
+                        "summary": "Payment webhook notification callback",
+                        "operationId": "handlePaymentWebhook",
+                    }
+                },
+            },
+        }
+        status, result = self.request("POST", "/api/workflows/import-openapi", {"spec": openapi_spec})
+        self.assertEqual(status, 200)
+        wf = result["workflow"]
+        self.assertEqual(wf["title"], "Checkout E-Commerce API")
+        self.assertEqual(wf["endpoints_count"], 3)
+        self.assertEqual(len(wf["workflow_nodes"]), 3)
+        self.assertEqual(len(wf["workflow_edges"]), 2)
+        self.assertGreaterEqual(len(wf["recommended_scenarios"]), 2)
+        rec_names = [r["name"] for r in wf["recommended_scenarios"]]
+        self.assertTrue(any("Lost Response" in n for n in rec_names))
+        self.assertTrue(any("Duplicate Webhook" in n for n in rec_names))
 
 
 if __name__ == "__main__":

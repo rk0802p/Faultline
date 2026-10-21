@@ -7,7 +7,7 @@ import time
 from http.client import HTTPConnection
 from typing import Any
 
-from . import adapters, store
+from . import adapters, security, store
 from .adapters import provider, checkout_service
 
 
@@ -40,9 +40,49 @@ def cancel(run_id: str) -> bool:
     return accepted
 
 
-def cleanup_all(run_id: str) -> None:
-    provider.cleanup(run_id)
-    checkout_service.cleanup(run_id)
+def cleanup_all(run_id: str, clean_targets: list[str] | None = None) -> dict[str, Any]:
+    try:
+        t0 = time.monotonic()
+    except (StopIteration, Exception):
+        t0 = 0.0
+    owned_resources = [
+        f"provider:ledger:{run_id}",
+        f"provider:idempotency:{run_id}",
+        f"provider:refunds:{run_id}",
+        f"checkout:orders:{run_id}",
+        f"checkout:fulfillments:{run_id}",
+    ]
+    if clean_targets:
+        owned_resources.extend([f"target:{t}:{run_id}" for t in clean_targets])
+    try:
+        provider.cleanup(run_id)
+        checkout_service.cleanup(run_id)
+        try:
+            duration_ms = max(1, int((time.monotonic() - t0) * 1000))
+        except (StopIteration, Exception):
+            duration_ms = 1
+        store.record_cleanup(run_id, "succeeded", owned_resources=owned_resources, duration_ms=duration_ms)
+        store.record_event(run_id, "TEST_ENVIRONMENT_CLEANED", {
+            "status": "succeeded",
+            "targets": clean_targets or ["checkout", "payment-provider"],
+            "owned_resources": owned_resources,
+            "duration_ms": duration_ms,
+        })
+        return {"status": "succeeded", "owned_resources": owned_resources, "duration_ms": duration_ms}
+    except Exception as exc:
+        try:
+            duration_ms = max(1, int((time.monotonic() - t0) * 1000))
+        except (StopIteration, Exception):
+            duration_ms = 1
+        logger.exception("cleanup failed run_id=%s", run_id)
+        store.record_cleanup(run_id, "failed", owned_resources=owned_resources, error=str(exc), duration_ms=duration_ms)
+        store.record_event(run_id, "TEST_ENVIRONMENT_CLEANUP_FAILED", {
+            "status": "failed",
+            "owned_resources": owned_resources,
+            "error": str(exc),
+            "duration_ms": duration_ms,
+        })
+        return {"status": "failed", "owned_resources": owned_resources, "error": str(exc), "duration_ms": duration_ms}
 
 
 def _execute_payment_response_lost(
@@ -392,8 +432,7 @@ def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> N
             run_id, verdict,
             [item["name"] for item in assertions if item["status"] == "failed"],
         )
-        store.record_event(run_id, "TEST_ENVIRONMENT_CLEANED", {"targets": clean_targets})
-        cleanup_all(run_id)
+        cleanup_all(run_id, clean_targets)
         if store.transition_run(run_id, "completed", verdict=verdict, summary=summary, finished=True):
             store.record_event(run_id, "RUN_COMPLETED", {"verdict": verdict})
         else:

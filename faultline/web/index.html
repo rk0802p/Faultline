@@ -20,6 +20,7 @@
       <nav class="side-nav" aria-label="Main navigation">
         <a class="nav-item active" href="#overview"><span class="nav-icon">◫</span>Overview</a>
         <a class="nav-item" href="#scenarios"><span class="nav-icon">◇</span>Scenarios<span class="nav-count" id="scenario-count">1</span></a>
+        <a class="nav-item" href="#templates"><span class="nav-icon">☷</span>Templates</a>
         <a class="nav-item" href="#coverage"><span class="nav-icon">▦</span>Coverage</a>
         <a class="nav-item" href="#runs"><span class="nav-icon">◷</span>Run history</a>
       </nav>
@@ -167,6 +168,19 @@
             </table>
           </div>
         </div>
+      </section>
+
+      <section class="templates-section" id="templates">
+        <div class="section-heading"><div><div class="eyebrow">REUSABLE TEMPLATES &amp; WORKFLOW DISCOVERY</div><h2>Scenario templates &amp; OpenAPI import</h2></div><span class="section-subtitle">Spec §6.2 &amp; §6.7 — Pre-configured failure templates and automated workflow mapping</span></div>
+        <div class="detail-card" style="margin-bottom:14px">
+          <div class="detail-title"><span class="detail-title-icon" style="background:#e0f2fe;color:#0284c7">⚡</span><div><strong>OpenAPI specification importer</strong><small>Parse an OpenAPI / Swagger definition to discover endpoints and generate test scenarios</small></div></div>
+          <div style="display:flex;gap:10px;margin-top:10px;align-items:flex-start">
+            <textarea id="openapi-input" placeholder='Paste OpenAPI 3.0 / Swagger JSON here (e.g. {"openapi": "3.0.0", "paths": {...}})...' style="flex:1;min-height:75px;font-family:monospace;font-size:11px;padding:8px;border:1px solid #dfe5ee;border-radius:6px"></textarea>
+            <button class="button button-primary" id="import-openapi-btn" style="white-space:nowrap">Import workflow</button>
+          </div>
+          <div id="openapi-results" style="margin-top:10px" hidden></div>
+        </div>
+        <div class="template-grid" id="template-grid" style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:14px"></div>
       </section>
 
       <section class="history-section" id="runs"><div class="section-heading history-heading"><div><div class="eyebrow">RECENT ACTIVITY</div><h2>Run history</h2></div><button class="text-button" id="history-refresh">View latest <span>↗</span></button></div><div class="history-table-wrap"><table class="history-table"><thead><tr><th>SCENARIO</th><th>IMPLEMENTATION</th><th>STATUS</th><th>VERDICT</th><th>STARTED</th><th></th></tr></thead><tbody id="history-body"><tr><td colspan="6" class="empty-row">No runs yet. Launch a scenario to see its evidence here.</td></tr></tbody></table></div></section>

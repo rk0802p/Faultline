@@ -98,6 +98,8 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertIn("Execution timeline & replay", html)
         self.assertIn("id=\"replay-controls\"", html)
         self.assertIn("data-scenario=\"partial-persistence-failure\"", html)
+        self.assertIn("Critical Integrations Suite", html)
+        self.assertIn("id=\"run-diff-card\"", html)
 
     def test_partial_persistence_failure_vulnerable_leaves_uncompensated_charge(self) -> None:
         run = self.launch_and_wait("vulnerable", "partial-persistence-failure")
@@ -288,6 +290,69 @@ class FaultlinePlatformTests(unittest.TestCase):
         run = self.request("GET", f"/api/runs/{run_id}")[1]["run"]
         self.assertEqual(result["status"], "cancel_requested")
         self.assertEqual(run["status"], "cancelled")
+
+    def test_suites_api_list_get_and_create(self) -> None:
+        status, data = self.request("GET", "/api/suites")
+        self.assertEqual(status, 200)
+        suite_ids = [s["id"] for s in data["suites"]]
+        self.assertIn("critical-integrations", suite_ids)
+        crit = next(s for s in data["suites"] if s["id"] == "critical-integrations")
+        self.assertEqual(crit["scenarios"], [
+            "payment-response-lost",
+            "duplicate-payment-webhook",
+            "partial-persistence-failure",
+        ])
+
+        status, single = self.request("GET", "/api/suites/critical-integrations")
+        self.assertEqual(status, 200)
+        self.assertEqual(single["suite"]["id"], "critical-integrations")
+        self.assertEqual(len(single["suite"]["scenarios"]), 3)
+
+        status, missing = self.request("GET", "/api/suites/non-existent-suite")
+        self.assertEqual(status, 404)
+
+        # Create custom suite
+        new_suite_payload = {
+            "id": "custom-checkout-suite",
+            "name": "Custom Checkout Suite",
+            "description": "A customized regression suite",
+            "scenarios": ["duplicate-payment-webhook", "partial-persistence-failure"],
+        }
+        status, created = self.request("POST", "/api/suites", new_suite_payload)
+        self.assertEqual(status, 201)
+        self.assertEqual(created["suite_id"], "custom-checkout-suite")
+
+        status, fetched = self.request("GET", "/api/suites/custom-checkout-suite")
+        self.assertEqual(status, 200)
+        self.assertEqual(fetched["suite"]["scenarios"], [
+            "duplicate-payment-webhook",
+            "partial-persistence-failure",
+        ])
+
+    def test_run_diff_endpoint_compares_runs_and_identifies_divergence(self) -> None:
+        vuln_run = self.launch_and_wait("vulnerable", "payment-response-lost")
+        fixed_run = self.launch_and_wait("fixed", "payment-response-lost")
+
+        status, diff_data = self.request("GET", f"/api/runs/{vuln_run['id']}/diff/{fixed_run['id']}")
+        self.assertEqual(status, 200)
+        diff = diff_data["diff"]
+
+        self.assertFalse(diff["verdict_match"])
+        self.assertEqual(diff["run_a"]["verdict"], "failed")
+        self.assertEqual(diff["run_b"]["verdict"], "passed")
+
+        dup_charge_inv = next(item for item in diff["invariants"] if item["name"] == "no_duplicate_charge")
+        self.assertTrue(dup_charge_inv["diverged"])
+        self.assertEqual(dup_charge_inv["run_a_status"], "failed")
+        self.assertEqual(dup_charge_inv["run_b_status"], "passed")
+
+        self.assertIsNotNone(diff["first_event_divergence"])
+        self.assertGreater(diff["event_counts"]["run_a"], 0)
+        self.assertGreater(diff["event_counts"]["run_b"], 0)
+
+        # Non-existent run diff returns 404
+        status, _ = self.request("GET", f"/api/runs/{vuln_run['id']}/diff/non-existent-id")
+        self.assertEqual(status, 404)
 
 
 if __name__ == "__main__":

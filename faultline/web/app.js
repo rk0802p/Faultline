@@ -336,4 +336,105 @@ $("#replay-slider")?.addEventListener("input", (e) => {
   setReplayStep(Number(e.target.value));
 });
 
+async function runSuite(implementation) {
+  const buttons = [...document.querySelectorAll(".suite-run-btn")];
+  buttons.forEach((b) => { b.disabled = true; });
+  try {
+    toast(`Starting Critical Integrations Suite (${implementation})...`);
+    const { suite } = await request("/api/suites/critical-integrations");
+    for (const scId of suite.scenarios) {
+      await launchRun(implementation, scId);
+      for (let i = 0; i < 40; i++) {
+        await new Promise((r) => setTimeout(r, 200));
+        const { run } = await request(`/api/runs/${encodeURIComponent(state.selectedRunId)}`);
+        if (["completed", "failed", "cancelled", "timed_out"].includes(run.status)) {
+          break;
+        }
+      }
+    }
+    toast(`Critical Integrations Suite (${implementation}) completed`);
+  } catch (err) {
+    toast(`Suite error: ${err.message}`);
+  } finally {
+    buttons.forEach((b) => { b.disabled = false; });
+  }
+}
+
+function updateDiffBaselineSelect() {
+  const select = $("#diff-baseline-select");
+  if (!select) return;
+  const currentRunId = state.selectedRunId;
+  const candidates = state.runs.filter((r) => r.id !== currentRunId);
+  if (!candidates.length) {
+    select.innerHTML = '<option value="">No other runs available</option>';
+    return;
+  }
+  select.innerHTML = candidates.map((r) =>
+    `<option value="${escapeHtml(r.id)}">${escapeHtml(r.scenario)} · ${escapeHtml(r.implementation)} (${escapeHtml(r.verdict)}) · ${escapeHtml(r.id.slice(0, 8))}</option>`
+  ).join("");
+}
+
+async function executeRunDiff() {
+  const baselineId = $("#diff-baseline-select")?.value;
+  if (!baselineId || !state.selectedRunId) {
+    toast("Select a baseline run to compare");
+    return;
+  }
+  try {
+    const { diff } = await request(`/api/runs/${encodeURIComponent(state.selectedRunId)}/diff/${encodeURIComponent(baselineId)}`);
+    renderDiff(diff);
+  } catch (err) {
+    toast(`Diff error: ${err.message}`);
+  }
+}
+
+function renderDiff(diff) {
+  const container = $("#diff-content");
+  if (!container) return;
+  const matchClass = diff.verdict_match ? "good" : "fault";
+  let html = `
+    <div class="diff-summary ${matchClass}">
+      <strong>Verdict: Current [${escapeHtml(diff.run_a.verdict)}] vs Baseline [${escapeHtml(diff.run_b.verdict)}]</strong>
+      <small>${diff.verdict_match ? "Verdicts match" : "Verdicts diverged"}</small>
+    </div>
+  `;
+  if (diff.first_event_divergence) {
+    const d = diff.first_event_divergence;
+    html += `
+      <div class="diff-divergence">
+        <strong>Earliest event divergence at step #${escapeHtml(d.sequence)}:</strong>
+        <div>Current: <code>${escapeHtml(d.run_a_event)}</code></div>
+        <div>Baseline: <code>${escapeHtml(d.run_b_event)}</code></div>
+      </div>
+    `;
+  } else {
+    html += '<div class="diff-divergence"><strong>No event stream divergence detected.</strong></div>';
+  }
+  html += '<table class="diff-table"><thead><tr><th>Invariant</th><th>Current Run</th><th>Baseline Run</th><th>Status</th></tr></thead><tbody>';
+  diff.invariants.forEach((inv) => {
+    html += `
+      <tr class="${inv.diverged ? "row-diverged" : ""}">
+        <td><strong>${escapeHtml(inv.name)}</strong></td>
+        <td><span class="verdict-badge ${escapeHtml(inv.run_a_status)}">${escapeHtml(inv.run_a_status)}</span></td>
+        <td><span class="verdict-badge ${escapeHtml(inv.run_b_status)}">${escapeHtml(inv.run_b_status)}</span></td>
+        <td>${inv.diverged ? '<span class="diff-tag diverged">Diverged</span>' : '<span class="diff-tag matched">Matched</span>'}</td>
+      </tr>
+    `;
+  });
+  html += "</tbody></table>";
+  container.innerHTML = html;
+}
+
+document.querySelectorAll(".suite-run-btn").forEach((btn) => {
+  btn.addEventListener("click", () => runSuite(btn.dataset.implementation));
+});
+$("#diff-toggle-btn")?.addEventListener("click", () => {
+  const panel = $("#run-diff-card");
+  if (panel) {
+    panel.hidden = !panel.hidden;
+    if (!panel.hidden) updateDiffBaselineSelect();
+  }
+});
+$("#diff-execute-btn")?.addEventListener("click", executeRunDiff);
+
 initialize();

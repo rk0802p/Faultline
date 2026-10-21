@@ -58,6 +58,114 @@ class FaultlineCliTests(unittest.TestCase):
         self.assertIn("[debug] Submitting run:", stderr.getvalue())
         self.assertIn("[debug] Poll #1: status=completed", stderr.getvalue())
 
+    def test_cli_suite_execution_and_exit_codes(self) -> None:
+        suite_meta = {
+            "suite": {
+                "id": "critical-integrations",
+                "name": "Critical Integrations",
+                "scenarios": ["scenario-1", "scenario-2"],
+            }
+        }
+        passing_run_1 = {"scenario_id": "scenario-1", "status": "completed", "verdict": "passed"}
+        passing_run_2 = {"scenario_id": "scenario-2", "status": "completed", "verdict": "passed"}
+        failing_run_2 = {
+            "scenario_id": "scenario-2",
+            "status": "completed",
+            "verdict": "failed",
+            "assertions": [{"name": "no_duplicate_charge", "status": "failed"}],
+        }
+
+        # Case 1: All scenarios pass -> exit 0
+        responses_pass = [
+            suite_meta,
+            {"run_id": "r1"},
+            {"run": passing_run_1},
+            {"run_id": "r2"},
+            {"run": passing_run_2},
+        ]
+        stdout, stderr = io.StringIO(), io.StringIO()
+        args = ["faultline.cli", "run", "--suite", "critical-integrations", "--base-url", "http://faultline.test"]
+        with patch.object(sys, "argv", args), patch("faultline.cli.api_json", side_effect=responses_pass), \
+                patch("faultline.cli.time.sleep"), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 0)
+        self.assertIn('"passed": 2', stdout.getvalue())
+
+        # Case 2: One scenario has failed verdict -> exit 1
+        responses_fail = [
+            suite_meta,
+            {"run_id": "r1"},
+            {"run": passing_run_1},
+            {"run_id": "r2"},
+            {"run": failing_run_2},
+        ]
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(sys, "argv", args), patch("faultline.cli.api_json", side_effect=responses_fail), \
+                patch("faultline.cli.time.sleep"), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 1)
+        self.assertIn('"failed": 1', stdout.getvalue())
+
+    def test_cli_junit_xml_generation_and_output_file(self) -> None:
+        import tempfile
+        from pathlib import Path
+        import xml.etree.ElementTree as ET
+
+        run_result = {
+            "scenario_id": "payment-response-lost",
+            "status": "completed",
+            "verdict": "failed",
+            "started_at": "2026-10-21T10:00:00",
+            "finished_at": "2026-10-21T10:00:02",
+            "assertions": [
+                {"name": "no_duplicate_charge", "status": "failed"},
+                {"name": "fault_activation_confirmed", "status": "passed"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            out_file = Path(td) / "reports" / "junit.xml"
+            args = [
+                "faultline.cli", "run",
+                "--scenario", "payment-response-lost",
+                "--report-format", "junit",
+                "--output", str(out_file),
+                "--base-url", "http://faultline.test",
+            ]
+            responses = [{"run_id": "r-junit"}, {"run": run_result}]
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with patch.object(sys, "argv", args), patch("faultline.cli.api_json", side_effect=responses), \
+                    patch("faultline.cli.time.sleep"), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = cli.main()
+            self.assertEqual(code, 1)
+            self.assertTrue(out_file.exists())
+            tree = ET.parse(out_file)
+            root = tree.getroot()
+            self.assertEqual(root.tag, "testsuites")
+            self.assertEqual(root.attrib.get("tests"), "1")
+            self.assertEqual(root.attrib.get("failures"), "1")
+            tc = root.find(".//testcase")
+            self.assertIsNotNone(tc)
+            self.assertEqual(tc.attrib.get("name"), "payment-response-lost")
+            self.assertEqual(tc.attrib.get("time"), "2.000")
+            fail_el = tc.find("failure")
+            self.assertIsNotNone(fail_el)
+            self.assertIn("1 invariant(s) failed", fail_el.attrib.get("message"))
+
+    def test_cli_requires_either_scenario_or_suite(self) -> None:
+        # Neither flag provided
+        with patch.object(sys, "argv", ["faultline.cli", "run"]), \
+                patch("sys.stderr", io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                cli.main()
+            self.assertEqual(cm.exception.code, 2)
+
+        # Both flags provided
+        with patch.object(sys, "argv", ["faultline.cli", "run", "--scenario", "s1", "--suite", "su1"]), \
+                patch("sys.stderr", io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                cli.main()
+            self.assertEqual(cm.exception.code, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -45,6 +45,20 @@
       </section>
 
       <div class="section-heading" id="scenarios"><div><div class="eyebrow">START HERE</div><h2>Failure scenarios</h2></div><span class="section-subtitle">Controlled experiments against your local checkout</span></div>
+      <section class="detail-card suite-card">
+        <div class="detail-title">
+          <span class="detail-title-icon" style="background:#eaf0ff;color:#456fe8">☷</span>
+          <div>
+            <strong>Critical Integrations Suite</strong>
+            <small>Sequentially executes all 3 core failure scenarios (lost responses, duplicate webhooks, partial persistence)</small>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;margin-top:12px;align-items:center;flex-wrap:wrap">
+          <button class="button button-primary suite-run-btn" data-implementation="vulnerable"><span>▶</span> Run suite (vulnerable)</button>
+          <button class="button button-secondary suite-run-btn" data-implementation="fixed">Run suite (fixed) <span>↗</span></button>
+          <span style="font-size:10px;color:#8793a5;margin-left:auto">3 scenarios · CI automated suite</span>
+        </div>
+      </section>
       <section class="detail-card scenario-editor">
         <div class="detail-title"><div><strong>Visual scenario designer</strong><small>Configure the workflow, inspect its steps, then validate and save a version</small></div></div>
         <select id="scenario-select" aria-label="Scenario to edit"></select>
@@ -98,7 +112,17 @@
         <div class="run-overview" id="run-overview"></div>
         <div class="ledger-strip"><div class="ledger-heading"><span class="ledger-icon">$</span><div><strong id="ledger-label">Provider side-effect ledger</strong><small id="ledger-sub">Committed charges observed by the test provider</small></div></div><div class="charge-list" id="charge-list"></div></div>
         <div class="run-detail-grid"><div class="detail-card"><div class="detail-title"><span class="detail-title-icon assertion-icon">✓</span><div><strong>Business invariants</strong><small>Evaluated against recorded evidence</small></div></div><div id="assertion-list" class="assertion-list"></div></div><div class="detail-card timeline-card"><div class="detail-title"><span class="detail-title-icon timeline-icon">◷</span><div><strong>Execution timeline & replay</strong><small>Interactive step-by-step playback</small></div></div><div class="replay-controls" id="replay-controls"><button class="replay-btn" id="replay-prev" title="Step backward">◀</button><button class="replay-btn" id="replay-play" title="Play / Pause">▶ Play</button><button class="replay-btn" id="replay-next" title="Step forward">▶</button><button class="replay-btn" id="replay-reset" title="Reset to start">⟲</button><input type="range" class="replay-slider" id="replay-slider" min="1" max="1" value="1"><span class="replay-step-label" id="replay-step-label">Event 1 of 1</span></div><ol id="event-list" class="event-list"></ol></div></div>
-        <div class="report-footer"><span><span class="report-lock">⌑</span> Evidence saved to local run history</span><div><a class="text-button" id="download-repro" href="#" download>Download reproduction</a> <button class="text-button" id="copy-run-id">Copy run ID</button></div></div>
+        <div class="report-footer"><span><span class="report-lock">⌑</span> Evidence saved to local run history</span><div><button class="text-button" id="diff-toggle-btn">Compare with baseline ⇄</button> <a class="text-button" id="download-repro" href="#" download>Download reproduction</a> <button class="text-button" id="copy-run-id">Copy run ID</button></div></div>
+        <div id="run-diff-card" class="detail-card diff-card" style="margin-top:14px" hidden>
+          <div class="detail-title"><span class="detail-title-icon" style="background:#f0eaff;color:#7c52db">⇄</span><div><strong>Run comparison & divergence</strong><small id="diff-subtitle">Compare with another run to identify earliest behavioral divergence</small></div></div>
+          <div style="display:flex;gap:10px;align-items:center;margin:12px 0 8px">
+            <label style="font-size:10px;color:#77859a;display:flex;align-items:center;gap:6px">Baseline run:
+              <select id="diff-baseline-select" style="padding:4px 8px;border:1px solid #dfe5ee;border-radius:6px;font-size:11px"></select>
+            </label>
+            <button class="button button-secondary" id="diff-execute-btn">Diff runs</button>
+          </div>
+          <div id="diff-content" class="diff-content"></div>
+        </div>
       </section>
 
       <section class="history-section" id="runs"><div class="section-heading history-heading"><div><div class="eyebrow">RECENT ACTIVITY</div><h2>Run history</h2></div><button class="text-button" id="history-refresh">View latest <span>↗</span></button></div><div class="history-table-wrap"><table class="history-table"><thead><tr><th>SCENARIO</th><th>IMPLEMENTATION</th><th>STATUS</th><th>VERDICT</th><th>STARTED</th><th></th></tr></thead><tbody id="history-body"><tr><td colspan="6" class="empty-row">No runs yet. Launch a scenario to see its evidence here.</td></tr></tbody></table></div></section>

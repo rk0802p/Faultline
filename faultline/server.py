@@ -75,6 +75,12 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             self.respond(200, {"status": "ok", "service": "faultline-control-plane"})
         elif path == "/api/projects":
             self.respond(200, {"projects": store.list_projects()})
+        elif path == "/api/suites":
+            self.respond(200, {"suites": store.list_suites()})
+        elif re.fullmatch(r"/api/suites/[^/]+", path):
+            suite_id = path.split("/")[3]
+            suite = store.get_suite(suite_id)
+            self.respond(200, {"suite": suite}) if suite else self.respond(404, {"error": "suite not found"})
         elif path == "/api/scenarios":
             self.respond(200, {"scenarios": store.list_scenarios()})
         elif re.fullmatch(r"/api/scenarios/[^/]+/versions", path):
@@ -86,7 +92,10 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
         elif path.startswith("/api/runs/"):
             parts = path.removeprefix("/api/runs/").split("/")
             run_id = parts[0]
-            if len(parts) == 2 and parts[1] == "reproduce":
+            if len(parts) == 3 and parts[1] == "diff":
+                diff = store.diff_runs(run_id, parts[2])
+                self.respond(200, {"diff": diff}) if diff else self.respond(404, {"error": "one or both runs not found"})
+            elif len(parts) == 2 and parts[1] == "reproduce":
                 bundle = store.get_reproduction_bundle(run_id)
                 if bundle:
                     self.send_response(200)
@@ -110,7 +119,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path not in {"/api/runs", "/api/scenarios", "/api/scenarios/validate"} and not re.fullmatch(r"/api/scenarios/[^/]+/versions", path) and not re.fullmatch(r"/api/runs/[^/]+/cancel", path):
+        if path not in {"/api/runs", "/api/scenarios", "/api/scenarios/validate", "/api/suites"} and not re.fullmatch(r"/api/scenarios/[^/]+/versions", path) and not re.fullmatch(r"/api/runs/[^/]+/cancel", path):
             self.respond(404, {"error": "not found"})
             return
         try:
@@ -141,6 +150,18 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 if any(item["id"] == scenario_id for item in store.list_scenarios()): raise ValueError("scenario name already exists")
                 store.create_scenario(scenario_id, "faultline-demo", definition)
                 self.respond(201, {"scenario_id": scenario_id, "version": 1})
+                return
+            if path == "/api/suites":
+                suite_id = payload.get("id") or re.sub(r"[^a-z0-9]+", "-", payload.get("name", "").lower()).strip("-")[:64]
+                if not suite_id:
+                    raise ValueError("suite id or name is required")
+                name = payload.get("name") or suite_id
+                description = payload.get("description", "")
+                scenarios = payload.get("scenarios", [])
+                if not isinstance(scenarios, list) or not scenarios:
+                    raise ValueError("scenarios must be a non-empty list of scenario IDs")
+                store.create_suite(suite_id, payload.get("project_id", "faultline-demo"), name, description, scenarios)
+                self.respond(201, {"suite_id": suite_id})
                 return
             version_match = re.fullmatch(r"/api/scenarios/([^/]+)/versions", path)
             if version_match:

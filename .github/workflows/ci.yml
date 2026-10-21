@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  lint-and-test:
+    name: Lint & Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Compile Python bytecode
+        run: python -m compileall -q faultline tests
+
+      - name: Validate client JavaScript syntax
+        run: node --check faultline/web/app.js
+
+      - name: Run test suite
+        run: python -m unittest discover -s tests -v
+
+  integration-resilience-suite:
+    name: Critical Integration Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Start Faultline platform daemon
+        run: |
+          python -m faultline.server --port 8000 &
+          for i in $(seq 1 30); do
+            if curl -s http://127.0.0.1:8000/api/health > /dev/null; then
+              echo "Faultline server is ready on port 8000"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "Faultline server failed to start"
+          exit 1
+
+      - name: Run Critical Integrations Suite (Fixed Mode)
+        run: |
+          python -m faultline.cli run \
+            --suite critical-integrations \
+            --implementation fixed \
+            --report-format junit \
+            --output test-results/critical-integrations-junit.xml
+
+      - name: Upload Test Report Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-report
+          path: test-results/critical-integrations-junit.xml

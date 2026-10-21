@@ -97,6 +97,19 @@ def initialize() -> None:
                 observed TEXT NOT NULL,
                 evidence_json TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS test_suites (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id),
+                name TEXT NOT NULL,
+                description TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS suite_scenarios (
+                suite_id TEXT NOT NULL REFERENCES test_suites(id) ON DELETE CASCADE,
+                scenario_id TEXT NOT NULL REFERENCES scenarios(id) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL,
+                PRIMARY KEY(suite_id, scenario_id)
+            );
             """
         )
         run_columns = {row["name"] for row in db.execute("PRAGMA table_info(runs)")}
@@ -116,6 +129,22 @@ def initialize() -> None:
             existing = db.execute("SELECT 1 FROM scenario_versions WHERE scenario_id=?", (scenario_id,)).fetchone()
             if not existing:
                 _insert_scenario_version(db, scenario_id, 1, definition)
+
+        db.execute(
+            "INSERT OR IGNORE INTO test_suites VALUES (?, ?, ?, ?, ?)",
+            ("critical-integrations", "faultline-demo", "Critical Integrations Suite",
+             "Core resilience suite covering payment loss, duplicate webhooks, and persistence failure.", now()),
+        )
+        default_suite_scenarios = [
+            ("critical-integrations", "payment-response-lost", 1),
+            ("critical-integrations", "duplicate-payment-webhook", 2),
+            ("critical-integrations", "partial-persistence-failure", 3),
+        ]
+        for s_id, sc_id, seq in default_suite_scenarios:
+            db.execute(
+                "INSERT OR IGNORE INTO suite_scenarios VALUES (?, ?, ?)",
+                (s_id, sc_id, seq),
+            )
 
 
 def _insert_scenario_version(db: sqlite3.Connection, scenario_id: str, version: int, definition: dict[str, Any]) -> None:
@@ -281,3 +310,110 @@ def list_runs(limit: int = 30) -> list[dict[str, Any]]:
              "summary": json.loads(row["summary_json"]), "error": row["error"]}
             for row in rows
         ]
+
+
+def list_suites() -> list[dict[str, Any]]:
+    with database() as db:
+        rows = db.execute("SELECT * FROM test_suites ORDER BY name").fetchall()
+        result = []
+        for row in rows:
+            scenarios = [
+                r[0] for r in db.execute(
+                    "SELECT scenario_id FROM suite_scenarios WHERE suite_id=? ORDER BY sequence",
+                    (row["id"],)
+                ).fetchall()
+            ]
+            result.append({
+                "id": row["id"],
+                "project_id": row["project_id"],
+                "name": row["name"],
+                "description": row["description"],
+                "created_at": row["created_at"],
+                "scenarios": scenarios,
+            })
+        return result
+
+
+def get_suite(suite_id: str) -> dict[str, Any] | None:
+    with database() as db:
+        row = db.execute("SELECT * FROM test_suites WHERE id=?", (suite_id,)).fetchone()
+        if row is None:
+            return None
+        scenarios = [
+            r[0] for r in db.execute(
+                "SELECT scenario_id FROM suite_scenarios WHERE suite_id=? ORDER BY sequence",
+                (suite_id,)
+            ).fetchall()
+        ]
+        return {
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "name": row["name"],
+            "description": row["description"],
+            "created_at": row["created_at"],
+            "scenarios": scenarios,
+        }
+
+
+def create_suite(suite_id: str, project_id: str, name: str, description: str, scenario_ids: list[str]) -> None:
+    with database() as db:
+        db.execute("INSERT INTO test_suites VALUES (?, ?, ?, ?, ?)",
+                   (suite_id, project_id, name, description, now()))
+        for seq, sc_id in enumerate(scenario_ids, 1):
+            db.execute("INSERT INTO suite_scenarios VALUES (?, ?, ?)",
+                       (suite_id, sc_id, seq))
+
+
+def diff_runs(run_id_a: str, run_id_b: str) -> dict[str, Any] | None:
+    run_a = get_run(run_id_a)
+    run_b = get_run(run_id_b)
+    if not run_a or not run_b:
+        return None
+
+    assertions_a = {item["name"]: item for item in run_a["assertions"]}
+    assertions_b = {item["name"]: item for item in run_b["assertions"]}
+    invariant_diff = []
+    all_names = sorted(set(assertions_a.keys()) | set(assertions_b.keys()))
+    for name in all_names:
+        status_a = assertions_a.get(name, {}).get("status", "missing")
+        status_b = assertions_b.get(name, {}).get("status", "missing")
+        invariant_diff.append({
+            "name": name,
+            "run_a_status": status_a,
+            "run_b_status": status_b,
+            "diverged": status_a != status_b,
+        })
+
+    events_a = run_a["events"]
+    events_b = run_b["events"]
+    first_divergence = None
+    min_len = min(len(events_a), len(events_b))
+    for i in range(min_len):
+        ev_a = events_a[i]
+        ev_b = events_b[i]
+        if ev_a["type"] != ev_b["type"] or ev_a.get("payload") != ev_b.get("payload"):
+            first_divergence = {
+                "sequence": i + 1,
+                "run_a_event": ev_a["type"],
+                "run_b_event": ev_b["type"],
+                "run_a_payload": ev_a.get("payload"),
+                "run_b_payload": ev_b.get("payload"),
+            }
+            break
+
+    if not first_divergence and len(events_a) != len(events_b):
+        first_divergence = {
+            "sequence": min_len + 1,
+            "run_a_event": events_a[min_len]["type"] if len(events_a) > min_len else "END_OF_STREAM",
+            "run_b_event": events_b[min_len]["type"] if len(events_b) > min_len else "END_OF_STREAM",
+            "note": "event stream lengths differ",
+        }
+
+    return {
+        "run_a": {"id": run_a["id"], "scenario_id": run_a["scenario_id"], "implementation": run_a["implementation"], "verdict": run_a["verdict"]},
+        "run_b": {"id": run_b["id"], "scenario_id": run_b["scenario_id"], "implementation": run_b["implementation"], "verdict": run_b["verdict"]},
+        "verdict_match": run_a["verdict"] == run_b["verdict"],
+        "invariants": invariant_diff,
+        "first_event_divergence": first_divergence,
+        "event_counts": {"run_a": len(events_a), "run_b": len(events_b)},
+    }

@@ -268,11 +268,12 @@ class FaultlineCliTests(unittest.TestCase):
             {"run_id": "r-f1"},
             {"run_id": "r-f2"},
         ]
-        run_assertions = [{"name": "no_duplicate_charge", "status": "passed"}]
+        vuln_assertions = [{"name": "no_duplicate_charge", "status": "failed", "expected": "1", "observed": "2"}]
+        fixed_assertions = [{"name": "no_duplicate_charge", "status": "passed", "expected": "1", "observed": "1"}]
         poll_responses = [
-            {"status": "completed", "verdict": "failed", "assertions": run_assertions},
-            {"status": "completed", "verdict": "passed", "assertions": run_assertions},
-            {"status": "completed", "verdict": "passed", "assertions": run_assertions},
+            {"status": "completed", "verdict": "failed", "assertions": vuln_assertions},
+            {"status": "completed", "verdict": "passed", "assertions": fixed_assertions},
+            {"status": "completed", "verdict": "passed", "assertions": fixed_assertions},
         ]
 
         stdout, stderr = io.StringIO(), io.StringIO()
@@ -285,6 +286,94 @@ class FaultlineCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Evaluator Determinism:   100.0%", stdout.getvalue())
         self.assertIn("Benchmark PASSED", stdout.getvalue())
+
+    def test_cli_benchmark_defect_missed_when_wrong_assertion_fails(self) -> None:
+        """Verify that vulnerable run failing for the wrong reason counts as defect missed."""
+        scenarios_response = {
+            "scenarios": [
+                {"id": "sc-1", "definition": {"fault": "payment_response_lost_after_commit", "assertion": "no_duplicate_charge"}}
+            ]
+        }
+        api_responses = [
+            scenarios_response,
+            {"run_id": "r-v"},
+            {"run_id": "r-f"},
+        ]
+        # Vulnerable run fails, but with an unrelated assertion instead of expected no_duplicate_charge
+        poll_responses = [
+            {"status": "completed", "verdict": "failed", "assertions": [{"name": "unrelated_network_fault", "status": "failed"}]},
+            {"status": "completed", "verdict": "passed", "assertions": [{"name": "no_duplicate_charge", "status": "passed"}]},
+        ]
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        args = ["faultline.cli", "benchmark"]
+        with patch.object(sys, "argv", args), \
+                patch("faultline.cli.api_json", side_effect=api_responses), \
+                patch("faultline.cli.poll_run", side_effect=poll_responses), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL (defect missed)", stdout.getvalue())
+        self.assertIn("Benchmark FAILED", stdout.getvalue())
+
+    def test_cli_benchmark_determinism_mismatch_on_assertion_observed_value(self) -> None:
+        """Verify that repeated runs differing in observed invariant values drop the determinism score."""
+        scenarios_response = {
+            "scenarios": [
+                {"id": "sc-1", "definition": {"fault": "payment_response_lost_after_commit"}}
+            ]
+        }
+        api_responses = [
+            scenarios_response,
+            {"run_id": "r-v"},
+            {"run_id": "r-f1"},
+            {"run_id": "r-f2"},
+        ]
+        vuln_assertions = [{"name": "no_duplicate_charge", "status": "failed", "expected": "1", "observed": "2"}]
+        fixed_run1 = [{"name": "no_duplicate_charge", "status": "passed", "expected": "1", "observed": "value_a"}]
+        fixed_run2 = [{"name": "no_duplicate_charge", "status": "passed", "expected": "1", "observed": "value_b"}]
+        poll_responses = [
+            {"status": "completed", "verdict": "failed", "assertions": vuln_assertions},
+            {"status": "completed", "verdict": "passed", "assertions": fixed_run1},
+            {"status": "completed", "verdict": "passed", "assertions": fixed_run2},
+        ]
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        args = ["faultline.cli", "benchmark", "--measure-determinism"]
+        with patch.object(sys, "argv", args), \
+                patch("faultline.cli.api_json", side_effect=api_responses), \
+                patch("faultline.cli.poll_run", side_effect=poll_responses), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertIn("Evaluator Determinism:   0.0% (0/1 repeated runs matched)", stdout.getvalue())
+
+    def test_cli_junit_xml_redaction(self) -> None:
+        """Verify that sensitive values in run errors and assertions are redacted in JUnit XML."""
+        runs = [
+            {
+                "id": "run-secret-1",
+                "scenario_id": "test-scenario",
+                "status": "failed",
+                "verdict": "failed",
+                "error": "Connection failed with password supersecret123 and token tok_live_9999",
+                "started_at": "2026-10-21T12:00:00Z",
+                "finished_at": "2026-10-21T12:00:01Z",
+                "assertions": [
+                    {
+                        "name": "no_duplicate_charge",
+                        "status": "failed",
+                        "expected": "1 charge",
+                        "observed": "Bearer secret-token-xyz",
+                        "evidence": {"card": "4111 2222 3333 4444"},
+                    }
+                ],
+            }
+        ]
+        xml_output = cli.generate_junit_xml("security-suite", runs)
+        self.assertNotIn("supersecret123", xml_output)
+        self.assertNotIn("4111 2222 3333 4444", xml_output)
+        self.assertNotIn("secret-token-xyz", xml_output)
+        self.assertIn("[REDACTED", xml_output)
 
     def test_cli_templates_command(self) -> None:
         templates_response = {

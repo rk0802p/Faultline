@@ -20,6 +20,7 @@ REDACTION_KEY_PATTERNS = {
 PAN_PATTERN = re.compile(r"\b(?:\d[ -]*?){13,19}\b")
 BEARER_PATTERN = re.compile(r"Bearer\s+([A-Za-z0-9_\-\.]+)", re.IGNORECASE)
 API_KEY_PATTERN = re.compile(r"\b(?:sk|pk)_(?:live|test)_[0-9a-zA-Z]{14,}\b")
+PASSWORD_KV_PATTERN = re.compile(r"(?i)\b(password|secret|api_key|token)[\s:=]+([^\s,;\"'<>]+)")
 
 # Strictly restricted loopback hosts (0.0.0.0 excluded as it is a wildcard bind address)
 ALLOWED_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
@@ -50,6 +51,7 @@ def redact_sensitive(obj: Any) -> Any:
         text = BEARER_PATTERN.sub("Bearer [REDACTED]", obj)
         text = API_KEY_PATTERN.sub("[REDACTED_KEY]", text)
         text = PAN_PATTERN.sub("[REDACTED_PAN]", text)
+        text = PASSWORD_KV_PATTERN.sub(r"\1=[REDACTED]", text)
         return text
     return obj
 

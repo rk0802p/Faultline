@@ -1,0 +1,12 @@
+{
+  "scenario_version": 1,
+  "name": "duplicate-payment-webhook",
+  "description": "Ensure duplicate payment webhook deliveries do not duplicate order fulfillment side effects.",
+  "order_id": "order-wh-001",
+  "event_id": "evt_pay_001",
+  "amount_cents": 3500,
+  "fault": "duplicate_payment_webhook",
+  "webhook_deliveries": 2,
+  "delay_ms": 100,
+  "assertion": "idempotent_webhook_processing"
+}

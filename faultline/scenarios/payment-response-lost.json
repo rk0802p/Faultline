@@ -1,0 +1,10 @@
+{
+  "scenario_version": 1,
+  "name": "payment-response-lost",
+  "description": "Detect duplicate charges when the provider commits but checkout loses the response.",
+  "order_id": "order-001",
+  "amount_cents": 2500,
+  "fault": "payment_response_lost_after_commit",
+  "retries": 1,
+  "assertion": "no_duplicate_charge"
+}

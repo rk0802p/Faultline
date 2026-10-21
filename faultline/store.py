@@ -13,6 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from . import security
+from .schema import SUPPORTED_FAULTS, validate_scenario, validate_template_parameters
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,7 +49,9 @@ def database() -> Any:
 
 
 def initialize() -> None:
-    scenario_files = sorted((ROOT / "scenarios").glob("*.json"))
+    pkg_scenarios = Path(__file__).resolve().parent / "scenarios"
+    root_scenarios = ROOT / "scenarios"
+    scenario_files = sorted(pkg_scenarios.glob("*.json")) or sorted(root_scenarios.glob("*.json"))
     with database() as db:
         db.executescript(
             """
@@ -217,13 +220,25 @@ def initialize() -> None:
         for scenario_file in scenario_files:
             definition = json.loads(scenario_file.read_text(encoding="utf-8"))
             scenario_id = definition["name"]
-            db.execute(
-                "INSERT OR IGNORE INTO scenarios VALUES (?, ?, ?, ?, ?)",
-                (scenario_id, "faultline-demo", scenario_id, json.dumps(definition), now()),
-            )
-            existing = db.execute("SELECT 1 FROM scenario_versions WHERE scenario_id=?", (scenario_id,)).fetchone()
-            if not existing:
+            existing_row = db.execute("SELECT definition_json FROM scenarios WHERE id=?", (scenario_id,)).fetchone()
+            if not existing_row:
+                db.execute(
+                    "INSERT INTO scenarios VALUES (?, ?, ?, ?, ?)",
+                    (scenario_id, "faultline-demo", scenario_id, json.dumps(definition), now()),
+                )
                 _insert_scenario_version(db, scenario_id, 1, definition)
+            else:
+                existing_def = json.loads(existing_row["definition_json"])
+                if existing_def != definition:
+                    db.execute(
+                        "UPDATE scenarios SET definition_json=?, name=? WHERE id=?",
+                        (json.dumps(definition), scenario_id, scenario_id),
+                    )
+                    next_ver = (db.execute(
+                        "SELECT MAX(version) AS max_v FROM scenario_versions WHERE scenario_id=?",
+                        (scenario_id,)
+                    ).fetchone()["max_v"] or 0) + 1
+                    _insert_scenario_version(db, scenario_id, next_ver, definition)
 
         db.execute(
             "INSERT OR IGNORE INTO test_suites VALUES (?, ?, ?, ?, ?)",
@@ -249,9 +264,9 @@ def initialize() -> None:
                 "Verifies checkout handles lost HTTP response after provider commits charge. Tests whether retry uses an idempotency key to prevent duplicate charges.",
                 json.dumps({
                     "order_id": {"type": "string", "default": "order-tpl-001"},
-                    "amount_cents": {"type": "integer", "default": 2500},
-                    "retries": {"type": "integer", "default": 1},
-                    "timeout_seconds": {"type": "integer", "default": 15},
+                    "amount_cents": {"type": "integer", "min": 1, "default": 2500},
+                    "retries": {"type": "integer", "min": 0, "max": 3, "default": 1},
+                    "timeout_seconds": {"type": "integer", "min": 2, "max": 60, "default": 15},
                 }),
                 json.dumps({
                     "scenario_version": 1,
@@ -273,9 +288,10 @@ def initialize() -> None:
                 "Verifies fulfillment consumer deduplicates redelivered payment succeeded webhooks without multiple inventory reservations or shipments.",
                 json.dumps({
                     "order_id": {"type": "string", "default": "order-tpl-002"},
-                    "amount_cents": {"type": "integer", "default": 4200},
-                    "webhook_deliveries": {"type": "integer", "default": 2},
-                    "delay_ms": {"type": "integer", "default": 100},
+                    "amount_cents": {"type": "integer", "min": 1, "default": 4200},
+                    "webhook_deliveries": {"type": "integer", "min": 2, "max": 5, "default": 2},
+                    "delay_ms": {"type": "integer", "min": 0, "max": 5000, "default": 100},
+                    "timeout_seconds": {"type": "integer", "min": 2, "max": 60, "default": 15},
                 }),
                 json.dumps({
                     "scenario_version": 1,
@@ -298,9 +314,10 @@ def initialize() -> None:
                 "Verifies that when database persistence fails after provider commits payment, a compensating refund reconciles the transaction.",
                 json.dumps({
                     "order_id": {"type": "string", "default": "order-tpl-003"},
-                    "amount_cents": {"type": "integer", "default": 5500},
-                    "retries": {"type": "integer", "default": 0},
+                    "amount_cents": {"type": "integer", "min": 1, "default": 5500},
+                    "retries": {"type": "integer", "min": 0, "max": 3, "default": 0},
                     "compensate": {"type": "boolean", "default": True},
+                    "timeout_seconds": {"type": "integer", "min": 2, "max": 60, "default": 15},
                 }),
                 json.dumps({
                     "scenario_version": 1,
@@ -315,51 +332,6 @@ def initialize() -> None:
                 }),
                 json.dumps(["persistence_fault_activated", "charge_compensated_on_failure", "compensating_refund_issued", "order_persistence_consistent"]),
                 "Purges provider refunds ledger and resets temporary order rows.",
-            ),
-            (
-                "dependency-rate-limiting-tpl",
-                "Dependency Rate Limiting and Backoff",
-                "rate_limiting",
-                "Tests client behavior when dependency returns HTTP 429 Too Many Requests with Retry-After header. Verifies retry jitter and exponential backoff.",
-                json.dumps({
-                    "order_id": {"type": "string", "default": "order-tpl-004"},
-                    "max_retries": {"type": "integer", "default": 2},
-                    "backoff_ms": {"type": "integer", "default": 200},
-                }),
-                json.dumps({
-                    "scenario_version": 1,
-                    "name": "dependency-rate-limiting",
-                    "description": "Verify graceful backoff when payment provider returns HTTP 429 rate limits.",
-                    "order_id": "order-tpl-004",
-                    "amount_cents": 1900,
-                    "fault": "payment_response_lost_after_commit",
-                    "retries": 2,
-                    "assertion": "no_duplicate_charge",
-                }),
-                json.dumps(["rate_limit_activated", "no_duplicate_charge", "checkout_terminal_state"]),
-                "Resets rate limit bucket counters.",
-            ),
-            (
-                "inventory-concurrency-race-tpl",
-                "Concurrent Reservation Race for Final Item",
-                "concurrency_race",
-                "Tests simultaneous checkout requests competing for the last available inventory unit. Verifies that exactly one succeeds and no oversell occurs.",
-                json.dumps({
-                    "item_id": {"type": "string", "default": "item-final-01"},
-                    "concurrent_callers": {"type": "integer", "default": 2},
-                }),
-                json.dumps({
-                    "scenario_version": 1,
-                    "name": "inventory-concurrency-race",
-                    "description": "Verify atomic inventory reservation under simultaneous competing checkout requests.",
-                    "order_id": "order-tpl-005",
-                    "amount_cents": 8900,
-                    "fault": "payment_response_lost_after_commit",
-                    "retries": 1,
-                    "assertion": "no_duplicate_charge",
-                }),
-                json.dumps(["concurrency_race_coordinated", "no_duplicate_charge", "checkout_terminal_state"]),
-                "Restores baseline inventory level.",
             ),
         ]
         for t_id, name, cat, desc, p_schema, d_def, exp_inv, cleanup_strat in templates:
@@ -378,6 +350,12 @@ def initialize() -> None:
                 """,
                 (t_id, name, cat, desc, p_schema, d_def, exp_inv, cleanup_strat, now()),
             )
+
+        # Prune legacy or unverified templates so the database remains truthful
+        db.execute(
+            "DELETE FROM scenario_templates WHERE id NOT IN (?, ?, ?)",
+            ("payment-response-lost-tpl", "duplicate-payment-webhook-tpl", "partial-persistence-failure-tpl"),
+        )
 
 
 def _insert_scenario_version(db: sqlite3.Connection, scenario_id: str, version: int, definition: dict[str, Any]) -> None:
@@ -467,8 +445,10 @@ def transition_run(run_id: str, status: str, *, verdict: str = "pending", error:
         row = db.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
         if row is None or status not in allowed.get(row["status"], set()):
             return False
+        sanitized_error = security.redact_sensitive(error) if error else None
+        sanitized_summary = json.dumps(security.redact_sensitive(summary)) if summary is not None else None
         db.execute("UPDATE runs SET status=?, verdict=?, summary_json=COALESCE(?, summary_json), error=?, finished_at=? WHERE id=?",
-                   (status, verdict, json.dumps(summary) if summary is not None else None, error,
+                   (status, verdict, sanitized_summary, sanitized_error,
                     now() if finished else None, run_id))
         return True
 
@@ -511,8 +491,9 @@ def record_cleanup(
         "error": error,
         "duration_ms": duration_ms,
     }
+    clean_data = security.redact_sensitive(data)
     with database() as db:
-        db.execute("UPDATE runs SET cleanup_json=? WHERE id=?", (json.dumps(data), run_id))
+        db.execute("UPDATE runs SET cleanup_json=? WHERE id=?", (json.dumps(clean_data), run_id))
 
 
 def replace_assertions(run_id: str, assertions: list[dict[str, Any]]) -> None:
@@ -520,8 +501,8 @@ def replace_assertions(run_id: str, assertions: list[dict[str, Any]]) -> None:
         db.execute("DELETE FROM assertions WHERE run_id=?", (run_id,))
         db.executemany(
             "INSERT INTO assertions(run_id, name, status, expected, observed, evidence_json) VALUES (?, ?, ?, ?, ?, ?)",
-            [(run_id, item["name"], item["status"], item["expected"], item["observed"],
-              json.dumps(item["evidence"])) for item in assertions],
+            [(run_id, item["name"], item["status"], str(item.get("expected", "")), str(item.get("observed", "")),
+              json.dumps(security.redact_sensitive(item.get("evidence", {})))) for item in assertions],
         )
 
 
@@ -619,9 +600,11 @@ def instantiate_template(
     definition["name"] = scenario_id
     if name:
         definition["description"] = f"{tpl['description']} (Instance: {name})"
-    if parameters:
+    if parameters is not None:
+        validate_template_parameters(tpl["parameters_schema"], parameters)
         for k, v in parameters.items():
             definition[k] = v
+    validate_scenario(definition)
     create_scenario(scenario_id, "faultline-demo", definition)
     return {
         "scenario_id": scenario_id,
@@ -810,16 +793,18 @@ def list_annotations(run_id: str) -> list[dict[str, Any]]:
 def add_annotation(run_id: str, author: str, comment: str, sequence_number: int | None = None) -> dict[str, Any]:
     annotation_id = f"ann_{uuid4().hex[:10]}"
     created_at = now()
+    clean_comment = security.redact_sensitive(comment)
+    clean_author = security.redact_sensitive(author)
     with database() as db:
         db.execute(
             "INSERT INTO run_annotations VALUES (?, ?, ?, ?, ?, ?)",
-            (annotation_id, run_id, author, comment, sequence_number, created_at),
+            (annotation_id, run_id, clean_author, clean_comment, sequence_number, created_at),
         )
     return {
         "id": annotation_id,
         "run_id": run_id,
-        "author": author,
-        "comment": comment,
+        "author": clean_author,
+        "comment": clean_comment,
         "sequence_number": sequence_number,
         "created_at": created_at,
     }
@@ -862,17 +847,19 @@ def create_task(
 ) -> dict[str, Any]:
     task_id = f"tsk_{uuid4().hex[:10]}"
     created_at = now()
+    clean_title = security.redact_sensitive(title)
+    clean_desc = security.redact_sensitive(description) if description else ""
     with database() as db:
         db.execute(
             "INSERT INTO run_tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (task_id, project_id, run_id, title, description, "open", priority, assignee, created_at, None),
+            (task_id, project_id, run_id, clean_title, clean_desc, "open", priority, assignee, created_at, None),
         )
     return {
         "id": task_id,
         "project_id": project_id,
         "run_id": run_id,
-        "title": title,
-        "description": description,
+        "title": clean_title,
+        "description": clean_desc,
         "status": "open",
         "priority": priority,
         "assignee": assignee,
@@ -1249,13 +1236,19 @@ def get_snapshots(run_id: str) -> list[dict[str, Any]]:
 
 
 def reconstruct_state_at(run_id: str, target_sequence: int) -> dict[str, Any] | None:
+    if target_sequence < 0:
+        raise ValueError("target_sequence must be non-negative")
     run = get_run(run_id)
     if not run:
         return None
-    events = run["events"]
+    events = run.get("events", [])
+    max_sequence = max((ev["sequence"] for ev in events), default=0)
+    effective_sequence = min(target_sequence, max_sequence)
     state: dict[str, Any] = {
         "run_id": run_id,
-        "sequence": target_sequence,
+        "sequence": effective_sequence,
+        "requested_sequence": target_sequence,
+        "max_sequence": max_sequence,
         "status": "initial",
         "orders": {},
         "charges": [],
@@ -1265,7 +1258,7 @@ def reconstruct_state_at(run_id: str, target_sequence: int) -> dict[str, Any] | 
         "fault_activated": False,
     }
     for ev in events:
-        if ev["sequence"] > target_sequence:
+        if ev["sequence"] > effective_sequence:
             break
         t = ev["type"]
         p = ev.get("payload", {})
@@ -1296,71 +1289,43 @@ def generate_scenarios_from_gaps(project_id: str = "faultline-demo") -> list[dic
     cov = get_coverage_matrix()
     matrix = cov["matrix"]
     generated = []
-
-    gap_definitions = {
-        ("initiate_checkout", "duplicate_webhook"): {
-            "name": "checkout-duplicate-initiation",
-            "description": "Verify checkout initiation handles duplicate concurrent checkout attempts for the same cart.",
-            "order_id": "order-gap-dup",
-            "amount_cents": 3200,
-            "fault": "duplicate_payment_webhook",
-            "retries": 1,
-            "assertion": "no_duplicate_charge",
-        },
-        ("send_confirmation", "lost_response"): {
-            "name": "confirmation-notification-lost",
-            "description": "Verify checkout completes gracefully when confirmation notification service drops response.",
-            "order_id": "order-gap-notif",
-            "amount_cents": 1500,
-            "fault": "payment_response_lost_after_commit",
-            "retries": 1,
-            "assertion": "checkout_terminal_state",
-        },
-        ("persist_order", "lost_response"): {
-            "name": "persistence-timeout-recovery",
-            "description": "Verify reconciliation when persistence service times out during order commit.",
-            "order_id": "order-gap-persist",
-            "amount_cents": 7800,
-            "fault": "partial_persistence_failure",
-            "compensate": True,
-            "assertion": "no_uncompensated_charge",
-        },
-    }
-
     existing_scenario_ids = {s["id"] for s in list_scenarios()}
 
     for row in matrix:
         step_id = row["step"]["id"]
+        step_name = row["step"]["name"]
         for cell in row["cells"]:
             fault_id = cell["fault_id"]
             if cell["applicable"] and cell["status"] == "untested":
-                key = (step_id, fault_id)
-                candidate = gap_definitions.get(key)
-                if not candidate:
-                    candidate = {
-                        "name": f"gap-{step_id}-{fault_id}".replace("_", "-")[:40],
-                        "description": f"Automated scenario generated to test {row['step']['name']} under {cell['fault_name']}.",
-                        "order_id": f"order-gap-{uuid4().hex[:6]}",
-                        "amount_cents": 3000,
-                        "fault": cell.get("scenario_id") or "payment_response_lost_after_commit",
-                        "retries": 1,
-                        "assertion": "checkout_terminal_state",
-                    }
-                sc_id = candidate["name"]
-                if sc_id not in existing_scenario_ids:
-                    definition = {
-                        "scenario_version": 1,
-                        "name": sc_id,
-                        "description": candidate["description"],
-                        "order_id": candidate["order_id"],
-                        "amount_cents": candidate["amount_cents"],
-                        "fault": candidate.get("fault", "payment_response_lost_after_commit"),
-                        "retries": candidate.get("retries", 1),
-                        "assertion": candidate.get("assertion", "checkout_terminal_state"),
-                    }
-                    create_scenario(sc_id, project_id, definition)
-                    existing_scenario_ids.add(sc_id)
-                    generated.append({"scenario_id": sc_id, "step": step_id, "fault": fault_id, "definition": definition})
+                if fault_id not in SUPPORTED_FAULTS:
+                    continue
+                sc_id = f"gap-{step_id}-{fault_id}".replace("_", "-")[:40]
+                if sc_id in existing_scenario_ids:
+                    continue
+
+                primary_assertion = SUPPORTED_FAULTS[fault_id]["primary_assertion"]
+                definition: dict[str, Any] = {
+                    "scenario_version": 1,
+                    "name": sc_id,
+                    "description": f"Automated scenario generated to test {step_name} under {fault_id}.",
+                    "order_id": f"order-gap-{uuid4().hex[:6]}",
+                    "amount_cents": 3000,
+                    "fault": fault_id,
+                    "assertion": primary_assertion,
+                    "timeout_seconds": 15,
+                }
+                if fault_id in {"payment_response_lost_after_commit", "persistence_failure_after_payment"}:
+                    definition["retries"] = 1 if fault_id == "payment_response_lost_after_commit" else 0
+                if fault_id == "duplicate_payment_webhook":
+                    definition["webhook_deliveries"] = 2
+                    definition["delay_ms"] = 100
+                if fault_id == "persistence_failure_after_payment":
+                    definition["compensate"] = True
+
+                validate_scenario(definition)
+                create_scenario(sc_id, project_id, definition)
+                existing_scenario_ids.add(sc_id)
+                generated.append({"scenario_id": sc_id, "step": step_id, "fault": fault_id, "definition": definition})
     return generated
 
 

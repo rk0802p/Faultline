@@ -10,6 +10,13 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import xml.etree.ElementTree as ET
 
+try:
+    from . import security
+    from .schema import SUPPORTED_FAULTS
+except ImportError:
+    from faultline import security
+    from faultline.schema import SUPPORTED_FAULTS
+
 
 def api_json(url: str, payload: dict | None = None) -> dict:
     data = json.dumps(payload).encode() if payload is not None else None
@@ -61,9 +68,9 @@ def generate_junit_xml(suite_name: str, runs: list[dict]) -> str:
                 tc,
                 "error",
                 type=str(status),
-                message=str(run.get("error") or f"Run {status}"),
+                message=str(security.redact_sensitive(run.get("error")) or f"Run {status}"),
             )
-            error_el.text = json.dumps(run, indent=2)
+            error_el.text = json.dumps(security.redact_sensitive(run), indent=2)
         elif verdict != "passed":
             total_failures += 1
             failed_assertions = [a for a in run.get("assertions", []) if a.get("status") != "passed"]
@@ -74,7 +81,7 @@ def generate_junit_xml(suite_name: str, runs: list[dict]) -> str:
                 type="AssertionFailure",
                 message=fail_msg,
             )
-            fail_el.text = json.dumps(failed_assertions or run, indent=2)
+            fail_el.text = json.dumps(security.redact_sensitive(failed_assertions or run), indent=2)
 
     suite_el.set("tests", str(total_tests))
     suite_el.set("failures", str(total_failures))
@@ -118,6 +125,18 @@ def poll_run(base: str, run_id: str, timeout: float, debug: bool = False) -> dic
     return None
 
 
+def normalize_evaluation_assertions(assertions: list[dict]) -> list[tuple[str, str, str, str]]:
+    normalized = []
+    for a in assertions:
+        normalized.append((
+            str(a.get("name")),
+            str(a.get("status")),
+            str(a.get("expected")),
+            str(a.get("observed")),
+        ))
+    return sorted(normalized, key=lambda x: x[0])
+
+
 def run_benchmark(base: str, timeout: float, debug: bool, measure_determinism: bool = False) -> int:
     print("=" * 60)
     print("Faultline Integration Reliability Benchmark (Spec §17.4)")
@@ -126,17 +145,35 @@ def run_benchmark(base: str, timeout: float, debug: bool, measure_determinism: b
     results = []
     defects_caught = 0
     total_defects = len(scenarios_data)
-    false_positives = 0
+    fixes_verified = 0
+    fixed_verification_failures = 0
     determinism_matches = 0
     determinism_total = 0
 
     for sc in scenarios_data:
         sc_id = sc["id"]
+        sc_def = sc.get("definition", {})
+        fault_type = sc_def.get("fault", "unknown")
+        expected_primary = sc_def.get("assertion") or (SUPPORTED_FAULTS.get(fault_type, {}).get("primary_assertion") if fault_type else None)
+
         if debug:
             print(f"[benchmark] Testing defect detection on {sc_id} (vulnerable)...", file=sys.stderr)
         sub_v = api_json(f"{base}/api/runs", {"scenario_id": sc_id, "implementation": "vulnerable"})
         res_v = poll_run(base, sub_v["run_id"], timeout, debug)
-        vuln_detected = bool(res_v and res_v.get("status") == "completed" and res_v.get("verdict") == "failed")
+
+        assertions_v = res_v.get("assertions", []) if res_v else []
+        failed_assertions = {a.get("name") for a in assertions_v if a.get("status") == "failed"}
+        vuln_completed = bool(res_v and res_v.get("status") == "completed")
+
+        # Specific defect verification: must fail with the expected primary assertion
+        if vuln_completed and res_v.get("verdict") == "failed":
+            if not expected_primary or not assertions_v or expected_primary in failed_assertions:
+                vuln_detected = True
+            else:
+                vuln_detected = False
+        else:
+            vuln_detected = False
+
         if vuln_detected:
             defects_caught += 1
 
@@ -149,8 +186,10 @@ def run_benchmark(base: str, timeout: float, debug: bool, measure_determinism: b
             and res_f.get("status") == "completed"
             and res_f.get("verdict") == "passed"
         )
-        if not fixed_passed:
-            false_positives += 1
+        if fixed_passed:
+            fixes_verified += 1
+        else:
+            fixed_verification_failures += 1
 
         if measure_determinism and fixed_passed:
             if debug:
@@ -159,14 +198,14 @@ def run_benchmark(base: str, timeout: float, debug: bool, measure_determinism: b
             res_rep = poll_run(base, sub_rep["run_id"], timeout, debug)
             determinism_total += 1
             if res_rep and res_rep.get("status") == "completed" and res_rep.get("verdict") == res_f.get("verdict"):
-                inv1 = [(a.get("name"), a.get("status")) for a in res_f.get("assertions", [])]
-                inv2 = [(a.get("name"), a.get("status")) for a in res_rep.get("assertions", [])]
+                inv1 = normalize_evaluation_assertions(res_f.get("assertions", []))
+                inv2 = normalize_evaluation_assertions(res_rep.get("assertions", []))
                 if inv1 == inv2:
                     determinism_matches += 1
 
         results.append({
             "scenario": sc_id,
-            "fault": sc.get("definition", {}).get("fault", "unknown"),
+            "fault": fault_type,
             "defect_caught": vuln_detected,
             "fix_verified": fixed_passed,
         })
@@ -181,21 +220,26 @@ def run_benchmark(base: str, timeout: float, debug: bool, measure_determinism: b
         print(f"      Fixed run:      {f_mark}")
 
     print("-" * 60)
-    detection_rate = (defects_caught / total_defects * 100) if total_defects else 0
-    fp_rate = (false_positives / total_defects * 100) if total_defects else 0
+    detection_rate = (defects_caught / total_defects * 100) if total_defects else 0.0
+    fixed_pass_rate = (fixes_verified / total_defects * 100) if total_defects else 0.0
+    fixed_fail_rate = (fixed_verification_failures / total_defects * 100) if total_defects else 0.0
+    scenarios_fully_verified = sum(1 for r in results if r["defect_caught"] and r["fix_verified"])
+
     print(f"Defect Detection Rate:   {detection_rate:.1f}% ({defects_caught}/{total_defects} caught)")
-    print(f"False Positive Rate:     {fp_rate:.1f}% ({false_positives}/{total_defects})")
+    print(f"False Positive Rate:     {fixed_fail_rate:.1f}% ({fixed_verification_failures}/{total_defects})")
+    print(f"Fixed Verification Rate: {fixed_pass_rate:.1f}% ({fixes_verified}/{total_defects} passed)")
     if measure_determinism and determinism_total > 0:
         det_rate = (determinism_matches / determinism_total) * 100
         print(f"Evaluator Determinism:   {det_rate:.1f}% ({determinism_matches}/{determinism_total} repeated runs matched)")
     else:
         print("Evaluator Determinism:   NOT MEASURED (use --measure-determinism)")
-    print(f"Scenarios Verified:      {len(results)}/{total_defects} consistent outcomes")
+    print(f"Scenarios Verified:      {scenarios_fully_verified}/{total_defects} consistent outcomes")
     print("=" * 60)
 
     all_defects_detected = (defects_caught == total_defects) and (total_defects > 0)
-    all_fixes_verified = all(r["fix_verified"] for r in results) and (len(results) > 0)
-    if all_defects_detected and all_fixes_verified and false_positives == 0:
+    all_fixes_verified = (fixed_verification_failures == 0) and (total_defects > 0)
+    all_scenarios_verified = (scenarios_fully_verified == total_defects) and (total_defects > 0)
+    if all_defects_detected and all_fixes_verified and all_scenarios_verified:
         print("Benchmark PASSED: All seeded integration defects detected and verified.")
         return 0
     else:

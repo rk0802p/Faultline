@@ -73,8 +73,8 @@
 
 ```sh
 # Clone the repository
-git clone https://github.com/example/faultline.git
-cd faultline
+git clone https://github.com/rk0802p/Faultline.git
+cd Faultline
 
 # Start the Faultline server daemon
 python -m faultline
@@ -143,18 +143,19 @@ Faultline Integration Reliability Benchmark (Spec §17.4)
 ============================================================
 Benchmark Results across 3 Integration Scenarios:
 ------------------------------------------------------------
-  • payment-response-lost:
+  * payment-response-lost:
       Vulnerable run: PASS (defect caught)
       Fixed run:      PASS (verified)
-  • duplicate-payment-webhook:
+  * duplicate-payment-webhook:
       Vulnerable run: PASS (defect caught)
       Fixed run:      PASS (verified)
-  • partial-persistence-failure:
+  * partial-persistence-failure:
       Vulnerable run: PASS (defect caught)
       Fixed run:      PASS (verified)
 ------------------------------------------------------------
 Defect Detection Rate:   100.0% (3/3 caught)
 False Positive Rate:     0.0% (0/3)
+Fixed Verification Rate: 100.0% (3/3 passed)
 Evaluator Determinism:   NOT MEASURED (use --measure-determinism)
 Scenarios Verified:      3/3 consistent outcomes
 ============================================================
@@ -283,7 +284,7 @@ A runnable reference demo is available at [`examples/checkout_demo.py`](examples
 
 ## Automated Verification & CI Results
 
-The repository includes a comprehensive automated test suite with **62 automated tests passing** across unit, platform, CLI, and SDK test files:
+The repository includes a comprehensive automated test suite with **68 automated tests passing** across unit, platform, CLI, and SDK test files:
 
 ```sh
 # Run full automated test suite
@@ -297,7 +298,7 @@ node --check faultline/web/app.js
 ### GitHub Actions CI Workflow
 The CI pipeline (`.github/workflows/ci.yml`) runs on every push and pull request:
 1. Python bytecode compilation (`compileall`) and client JavaScript validation (`node --check`).
-2. Complete unit, platform, and SDK test suite execution (62 tests).
+2. Complete unit, platform, and SDK test suite execution (68 tests).
 3. Live platform daemon startup.
 4. Critical Integrations regression suite execution with JUnit XML report generation.
 5. Automated defect benchmark execution verifying 100% detection rate.

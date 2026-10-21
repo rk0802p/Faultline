@@ -13,47 +13,11 @@ from uuid import uuid4
 from . import engine, importer, security, store
 from .adapters import start_local_services
 from .engine import submit
+from .schema import SUPPORTED_FAULTS, validate_scenario
 
 
 WEB_ROOT = Path(__file__).resolve().parent / "web"
 logger = logging.getLogger("faultline.control")
-
-
-SUPPORTED_FAULTS = {
-    "payment_response_lost_after_commit": {"primary_assertion": "no_duplicate_charge"},
-    "duplicate_payment_webhook": {"primary_assertion": "idempotent_webhook_processing"},
-    "persistence_failure_after_payment": {"primary_assertion": "charge_compensated_on_failure"},
-}
-
-
-def validate_scenario(definition: dict[str, Any]) -> None:
-    if type(definition.get("scenario_version")) is not int or definition["scenario_version"] != 1:
-        raise ValueError("unsupported scenario_version")
-    fault = definition.get("fault")
-    if fault not in SUPPORTED_FAULTS:
-        raise ValueError("unsupported fault type")
-    expected_assertion = SUPPORTED_FAULTS[fault]["primary_assertion"]
-    if definition.get("assertion") != expected_assertion:
-        raise ValueError("unsupported primary assertion")
-    if not isinstance(definition.get("name"), str) or not definition["name"]:
-        raise ValueError("scenario name is required")
-    if not isinstance(definition.get("order_id"), str) or not definition["order_id"]:
-        raise ValueError("order_id is required")
-    if type(definition.get("amount_cents")) is not int or definition["amount_cents"] < 1:
-        raise ValueError("amount_cents must be a positive integer")
-    if fault in {"payment_response_lost_after_commit", "persistence_failure_after_payment"}:
-        if type(definition.get("retries")) is not int or not 0 <= definition["retries"] <= 3:
-            raise ValueError("retries must be between zero and three")
-    elif fault == "duplicate_payment_webhook":
-        deliveries = definition.get("webhook_deliveries", 2)
-        if type(deliveries) is not int or not 2 <= deliveries <= 5:
-            raise ValueError("webhook_deliveries must be between two and five")
-        delay = definition.get("delay_ms", 100)
-        if type(delay) is not int or not 0 <= delay <= 5000:
-            raise ValueError("delay_ms must be between 0 and 5000")
-    timeout = definition.get("timeout_seconds", 15)
-    if type(timeout) is not int or not 2 <= timeout <= 60:
-        raise ValueError("timeout_seconds must be between two and sixty")
 
 
 class ControlPlaneHandler(BaseHTTPRequestHandler):
@@ -67,6 +31,39 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(raw)
+
+    def read_json_payload(self, max_bytes: int = 16_384) -> dict[str, Any] | None:
+        raw_len = self.headers.get("Content-Length", "0")
+        try:
+            length = int(raw_len)
+            if length < 0:
+                self.respond(400, {"error": "negative Content-Length is not permitted"})
+                return None
+        except (ValueError, TypeError):
+            self.respond(400, {"error": "invalid Content-Length header"})
+            return None
+
+        if length > max_bytes:
+            self.respond(413, {"error": "request too large"})
+            return None
+
+        if length == 0:
+            return {}
+
+        raw_body = self.rfile.read(length)
+        if len(raw_body) < length:
+            self.respond(400, {"error": "unexpected EOF reading request body"})
+            return None
+
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+            if not isinstance(payload, dict):
+                self.respond(400, {"error": "request body must be a JSON object"})
+                return None
+            return payload
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            self.respond(400, {"error": f"malformed JSON: {exc}"})
+            return None
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
@@ -215,13 +212,10 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
         ):
             self.respond(404, {"error": "not found"})
             return
+        payload = self.read_json_payload()
+        if payload is None:
+            return
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            if length > 16_384:
-                self.respond(413, {"error": "request too large"})
-                return
-            payload = json.loads(self.rfile.read(length)) if length > 0 else {}
-            if not isinstance(payload, dict): raise ValueError("request body must be a JSON object")
             cancel_match = re.fullmatch(r"/api/runs/([^/]+)/cancel", path)
             if cancel_match:
                 run_id = cancel_match.group(1)
@@ -462,11 +456,10 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             self.respond(404, {"error": "not found"})
             return
         task_id = task_match.group(1)
+        payload = self.read_json_payload()
+        if payload is None:
+            return
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            payload = json.loads(self.rfile.read(length))
-            if not isinstance(payload, dict):
-                raise ValueError("request body must be a JSON object")
             updated = store.update_task(
                 task_id,
                 status=payload.get("status"),
@@ -478,7 +471,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 self.respond(200, {"task": updated})
             else:
                 self.respond(404, {"error": "task not found"})
-        except (ValueError, json.JSONDecodeError) as exc:
+        except (ValueError, TypeError) as exc:
             self.respond(400, {"error": str(exc)})
 
     def static_file(self, filename: str, content_type: str) -> None:

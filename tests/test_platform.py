@@ -548,11 +548,13 @@ class FaultlinePlatformTests(unittest.TestCase):
         status, data = self.request("GET", "/api/templates")
         self.assertEqual(status, 200)
         templates = data["templates"]
-        self.assertGreaterEqual(len(templates), 5)
+        self.assertEqual(len(templates), 3)
         tpl_ids = [t["id"] for t in templates]
-        self.assertIn("payment-response-lost-tpl", tpl_ids)
-        self.assertIn("duplicate-payment-webhook-tpl", tpl_ids)
-        self.assertIn("partial-persistence-failure-tpl", tpl_ids)
+        self.assertEqual(sorted(tpl_ids), [
+            "duplicate-payment-webhook-tpl",
+            "partial-persistence-failure-tpl",
+            "payment-response-lost-tpl",
+        ])
 
         # 2. Get specific template
         status, tpl_data = self.request("GET", "/api/templates/payment-response-lost-tpl")
@@ -560,7 +562,7 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertEqual(tpl_data["template"]["category"], "network_failure")
         self.assertIn("parameters_schema", tpl_data["template"])
 
-        # 3. Instantiate template
+        # 3. Instantiate template with valid parameters
         inst_payload = {
             "scenario_id": f"inst-sc-{uuid4().hex[:6]}",
             "name": "Customized Payment Loss",
@@ -571,7 +573,29 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertEqual(inst_result["instance"]["scenario_id"], inst_payload["scenario_id"])
         self.assertEqual(inst_result["instance"]["definition"]["amount_cents"], 9999)
 
-        # Verify scenario exists and is runnable
+        # 4. Reject invalid parameters
+        # Unknown parameter rejected
+        status, bad_res1 = self.request("POST", "/api/templates/payment-response-lost-tpl/instantiate", {
+            "scenario_id": f"inst-sc-bad1-{uuid4().hex[:4]}",
+            "parameters": {"unexpected_key": "val"},
+        })
+        self.assertEqual(status, 400)
+
+        # Invalid parameter type rejected
+        status, bad_res2 = self.request("POST", "/api/templates/payment-response-lost-tpl/instantiate", {
+            "scenario_id": f"inst-sc-bad2-{uuid4().hex[:4]}",
+            "parameters": {"amount_cents": "not_an_integer"},
+        })
+        self.assertEqual(status, 400)
+
+        # Out-of-range parameter rejected
+        status, bad_res3 = self.request("POST", "/api/templates/payment-response-lost-tpl/instantiate", {
+            "scenario_id": f"inst-sc-bad3-{uuid4().hex[:4]}",
+            "parameters": {"retries": 99},
+        })
+        self.assertEqual(status, 400)
+
+        # Verify valid scenario exists and is runnable
         status, scenarios_data = self.request("GET", "/api/scenarios")
         self.assertEqual(status, 200)
         sc_ids = [s["id"] for s in scenarios_data["scenarios"]]
@@ -666,6 +690,13 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertEqual(status, 201)
         self.assertIn("generated", result)
         self.assertIsInstance(result["generated"], list)
+        for gen in result["generated"]:
+            sc_def = gen["definition"]
+            # Every generated scenario must validate cleanly under canonical validate_scenario
+            server.validate_scenario(sc_def)
+            self.assertIn(sc_def["fault"], server.SUPPORTED_FAULTS)
+            expected_assertion = server.SUPPORTED_FAULTS[sc_def["fault"]]["primary_assertion"]
+            self.assertEqual(sc_def["assertion"], expected_assertion)
 
     def test_opentelemetry_traces_and_telemetry_endpoint(self) -> None:
         run = self.launch_and_wait("fixed", "payment-response-lost")
@@ -870,7 +901,7 @@ class FaultlinePlatformTests(unittest.TestCase):
         status, data = self.request("GET", "/api/templates")
         self.assertEqual(status, 200)
         templates = data["templates"]
-        self.assertGreaterEqual(len(templates), 3)
+        self.assertEqual(len(templates), 3)
 
         for tpl in templates:
             t_id = tpl["id"]
@@ -907,6 +938,88 @@ class FaultlinePlatformTests(unittest.TestCase):
         status, data = self.request("GET", f"/api/runs/{run_id}/state?sequence=-5")
         self.assertEqual(status, 400)
         self.assertIn("error", data)
+
+    def test_state_reconstruction_boundary_clamping(self) -> None:
+        """Verify that requesting sequences beyond latest recorded event clamps to max sequence."""
+        run = self.launch_and_wait("fixed", "payment-response-lost")
+        run_id = run["id"]
+
+        status, data = self.request("GET", f"/api/runs/{run_id}/state?sequence=99999")
+        self.assertEqual(status, 200)
+        state = data["state"]
+        self.assertLess(state["sequence"], 99999)
+        self.assertEqual(state["sequence"], state["max_sequence"])
+        self.assertEqual(state["requested_sequence"], 99999)
+
+    def test_request_body_validation_and_size_limits(self) -> None:
+        """Verify uniform 16KB limit, negative length rejection, and JSON parsing on POST & PATCH."""
+        import http.client
+
+        # 1. Negative Content-Length on POST rejected with 400
+        conn = http.client.HTTPConnection("127.0.0.1", self.api_port, timeout=5)
+        conn.putrequest("POST", "/api/runs")
+        conn.putheader("Content-Length", "-1")
+        conn.endheaders()
+        resp = conn.getresponse()
+        self.assertEqual(resp.status, 400)
+        conn.close()
+
+        # 2. Negative Content-Length on PATCH rejected with 400
+        conn = http.client.HTTPConnection("127.0.0.1", self.api_port, timeout=5)
+        conn.putrequest("PATCH", "/api/tasks/tsk_dummy")
+        conn.putheader("Content-Length", "-1")
+        conn.endheaders()
+        resp = conn.getresponse()
+        self.assertEqual(resp.status, 400)
+        conn.close()
+
+        # 3. Oversized POST (>16KB) rejected with 413
+        huge_payload = {"padding": "x" * 20000}
+        status, _ = self.request("POST", "/api/runs", huge_payload)
+        self.assertEqual(status, 413)
+
+        # 4. Oversized PATCH (>16KB) rejected with 413
+        status, _ = self.request("PATCH", "/api/tasks/tsk_dummy", huge_payload)
+        self.assertEqual(status, 413)
+
+        # 5. Malformed JSON on POST rejected with 400
+        conn = http.client.HTTPConnection("127.0.0.1", self.api_port, timeout=5)
+        conn.request("POST", "/api/runs", body=b"{malformed json", headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        self.assertEqual(resp.status, 400)
+        conn.close()
+
+    def test_redaction_at_persistence_boundaries(self) -> None:
+        """Verify that annotations, tasks, and cleanup errors redact sensitive keys and patterns."""
+        run = self.launch_and_wait("fixed", "payment-response-lost")
+        run_id = run["id"]
+
+        # 1. Annotations redact secret keys
+        ann = store.add_annotation(run_id, "auditor", "Authorization: Bearer my-top-secret-token")
+        self.assertNotIn("my-top-secret-token", ann["comment"])
+        self.assertIn("Bearer [REDACTED]", ann["comment"])
+
+        # 2. Tasks redact passwords and card numbers
+        tsk = store.create_task(
+            "faultline-demo",
+            run_id=run_id,
+            title="Fix password supersecretpass123 in order service",
+            description="Card 4111 2222 3333 4444 observed in unmasked log",
+        )
+        self.assertNotIn("supersecretpass123", tsk["title"])
+        self.assertNotIn("4111 2222 3333 4444", tsk["description"])
+
+        # 3. Cleanup error redaction
+        store.record_cleanup(
+            run_id,
+            "failed",
+            ["res1"],
+            error="DB error with password=mysecretpass and card 4111 2222 3333 4444",
+        )
+        db_run = store.get_run(run_id)
+        cleanup_data = db_run.get("cleanup", {})
+        self.assertNotIn("mysecretpass", str(cleanup_data))
+        self.assertNotIn("4111 2222 3333 4444", str(cleanup_data))
 
     def test_security_loopback_and_url_boundary_validation(self) -> None:
         """Verify robust URL parsing, scheme checking, credential rejection, and wildcard rejection."""

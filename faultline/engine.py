@@ -495,6 +495,11 @@ class StepRunnerRegistry:
         return set(self._registry.keys())
 
 
+MAX_REDIRECTS = 5
+BLOCKED_REQUEST_HEADERS = {"host", "transfer-encoding", "connection", "upgrade"}
+SAFE_RESPONSE_HEADERS = {"content-type", "content-length", "server", "location", "date", "x-request-id", "etag"}
+
+
 def _resolve_http_endpoint(step: dict[str, Any]) -> tuple[str, str, int, str]:
     """Resolves scheme, host, port, path from step definition or defaults to local checkout service."""
     url = step.get("url") or step.get("endpoint")
@@ -534,6 +539,165 @@ def _create_http_connection(
         raise ValueError(f"unsupported scheme '{scheme}'")
 
 
+def _build_http_payload(step: dict[str, Any]) -> tuple[bytes | None, str | None, dict[str, str]]:
+    """Constructs and validates HTTP body, content-type, and headers from step definition."""
+    step_config = step.get("config") or {}
+    raw_input_body = step.get("body") if "body" in step else step_config.get("body")
+    step_headers = step.get("headers") or step_config.get("headers") or {}
+
+    raw_body: bytes | None = None
+    content_type: str | None = None
+
+    if raw_input_body is not None:
+        if isinstance(raw_input_body, (dict, list)):
+            raw_body = json.dumps(raw_input_body).encode("utf-8")
+            content_type = "application/json"
+        elif isinstance(raw_input_body, str):
+            raw_body = raw_input_body.encode("utf-8")
+            content_type = "text/plain; charset=utf-8"
+        elif isinstance(raw_input_body, (bytes, bytearray)):
+            raw_body = bytes(raw_input_body)
+            content_type = "application/octet-stream"
+        else:
+            raw_body = str(raw_input_body).encode("utf-8")
+            content_type = "text/plain; charset=utf-8"
+
+    headers: dict[str, str] = {}
+    if content_type:
+        headers["Content-Type"] = content_type
+    if raw_body is not None:
+        headers["Content-Length"] = str(len(raw_body))
+
+    # Add step headers, filtering out dangerous transport override headers
+    if isinstance(step_headers, dict):
+        for k, v in step_headers.items():
+            if str(k).lower() not in BLOCKED_REQUEST_HEADERS:
+                headers[str(k)] = str(v)
+
+    return raw_body, content_type, headers
+
+
+def _capture_response_summary(body_bytes: bytes, max_len: int = 500) -> tuple[int, str, bool]:
+    """Returns total size, redacted snippet, and whether truncated."""
+    size = len(body_bytes)
+    truncated = size > max_len
+    snippet = body_bytes[:max_len].decode("utf-8", errors="replace")
+    redacted = security.redact_sensitive(snippet)
+    return size, redacted, truncated
+
+
+def _execute_http_request_with_redirects(
+    run_id: str,
+    step_id: str,
+    scheme: str,
+    host: str,
+    port: int,
+    path: str,
+    method: str,
+    headers: dict[str, str],
+    raw_body: bytes | None,
+    timeout: float,
+    allowed_statuses: set[int],
+    max_redirects: int = MAX_REDIRECTS,
+) -> tuple[int, dict[str, str], bytes, float, list[dict[str, Any]]]:
+    """Executes HTTP request, validating destinations and handling redirects securely."""
+    curr_scheme = scheme
+    curr_host = host
+    curr_port = port
+    curr_path = path
+    curr_method = method
+    curr_body = raw_body
+    curr_headers = dict(headers)
+
+    visited_urls: set[str] = set()
+    redirect_count = 0
+    redirect_history: list[dict[str, Any]] = []
+
+    while True:
+        curr_url = f"{curr_scheme}://{curr_host}:{curr_port}{curr_path}"
+        if curr_url in visited_urls:
+            raise ValueError(f"redirect loop detected for URL: '{curr_url}'")
+        visited_urls.add(curr_url)
+
+        # Immediate revalidation of destination and prohibited ports before connecting
+        security.assert_loopback_safe(curr_url)
+
+        conn = _create_http_connection(curr_scheme, curr_host, curr_port, timeout=timeout)
+        with _active_lock:
+            _active_connections[run_id] = conn
+
+        t0 = time.monotonic()
+        try:
+            conn.request(curr_method, curr_path, body=curr_body, headers=curr_headers)
+            resp = conn.getresponse()
+            body_bytes = resp.read()
+            elapsed = time.monotonic() - t0
+            status_code = resp.status
+            resp_headers = {k.lower(): v for k, v in resp.getheaders()}
+        finally:
+            with _active_lock:
+                _active_connections.pop(run_id, None)
+            conn.close()
+
+        if status_code in {301, 302, 303, 307, 308}:
+            loc = resp_headers.get("location")
+            if not loc:
+                return status_code, resp_headers, body_bytes, elapsed, redirect_history
+
+            if redirect_count >= max_redirects:
+                store.record_event(run_id, "HTTP_REDIRECT_LIMIT_EXCEEDED", {
+                    "step_id": step_id,
+                    "max_redirects": max_redirects,
+                    "final_url": curr_url,
+                })
+                raise ValueError(f"exceeded maximum redirect limit of {max_redirects}")
+
+            redirect_count += 1
+            target_url = security.validate_redirect(curr_url, loc)
+
+            next_scheme, next_host, next_port, next_path = _resolve_http_endpoint({"url": target_url})
+
+            # Block HTTPS to HTTP downgrade!
+            if curr_scheme == "https" and next_scheme == "http":
+                raise PermissionError(f"Insecure redirect downgrade from HTTPS to HTTP blocked: '{target_url}'")
+
+            # Revalidate loopback on target URL
+            security.assert_loopback_safe(target_url)
+
+            # Strip credentials if scheme/host/port changed (cross-origin)
+            if (next_scheme, next_host, next_port) != (curr_scheme, curr_host, curr_port):
+                curr_headers.pop("authorization", None)
+                curr_headers.pop("cookie", None)
+                curr_headers.pop("x-api-key", None)
+
+            # Standard RFC 7231 method changes: 301, 302, 303 switch to GET and drop body
+            if status_code in {301, 302, 303}:
+                curr_method = "GET"
+                curr_body = None
+                curr_headers.pop("content-length", None)
+                curr_headers.pop("content-type", None)
+
+            redirect_entry = {
+                "from_url": curr_url,
+                "to_url": target_url,
+                "status": status_code,
+                "method_after_redirect": curr_method,
+            }
+            redirect_history.append(redirect_entry)
+            store.record_event(run_id, "HTTP_REDIRECT_FOLLOWED", {
+                "step_id": step_id,
+                **redirect_entry,
+            })
+
+            curr_scheme = next_scheme
+            curr_host = next_host
+            curr_port = next_port
+            curr_path = next_path
+            continue
+
+        return status_code, resp_headers, body_bytes, elapsed, redirect_history
+
+
 def _execute_http_step(
     run_id: str,
     step: dict[str, Any],
@@ -546,40 +710,87 @@ def _execute_http_step(
     """Executes a real HTTP request against an approved test endpoint with bounded timeouts and evidence capture."""
     step_id = step.get("id", "http_step")
     scheme, host, port, path = _resolve_http_endpoint(step)
-    method = step.get("method", "GET").upper()
-    if step.get("type") == "http.post":
-        method = "POST"
+    method = (step.get("method") or ("POST" if step.get("type") == "http.post" else "GET")).upper()
 
-    base_headers = {"Content-Type": "application/json"}
+    raw_body, content_type, base_headers = _build_http_payload(step)
     if trace_id and root_span_id:
         base_headers["traceparent"] = f"00-{trace_id}-{root_span_id}-01"
 
     step_config = step.get("config") or {}
     allowed_statuses = set(step.get("allowed_statuses") or step_config.get("allowed_statuses") or [200, 201, 204])
 
+    step_body = step.get("body") if "body" in step else step_config.get("body")
+    sanitized_headers = security.redact_sensitive(base_headers)
+    sanitized_body = security.redact_sensitive(step_body) if step_body is not None else None
+
+    # Retry and idempotency semantics
+    is_idempotent = step.get("idempotent") if "idempotent" in step else (
+        step_config.get("idempotent", method in {"GET", "HEAD", "PUT", "DELETE"})
+    )
+    configured_retries = int(step.get("retries", step_config.get("retries", 1 if implementation == "fixed" else 0)))
+
     if inject_fault and fault_type == "http_timeout":
+        fault_config = step.get("fault_config") or {}
+        client_timeout = float(fault_config.get("client_timeout_seconds", 0.1))
+        server_delay = float(fault_config.get("server_delay_seconds", client_timeout + 0.3))
+
         fault_headers = dict(base_headers)
         fault_headers["X-Faultline-Fault"] = "http_timeout"
-        fault_headers["X-Faultline-Delay"] = "0.4"
+        fault_headers["X-Faultline-Delay"] = str(server_delay)
 
-        client_timeout = 0.1  # 100ms bounded socket timeout
+        store.record_event(run_id, "HTTP_REQUEST_SENT", {
+            "step_id": step_id,
+            "method": method,
+            "url": f"{scheme}://{host}:{port}{path}",
+            "headers": security.redact_sensitive(fault_headers),
+            "body": sanitized_body,
+            "attempt": 1,
+            "injected_fault": "http_timeout",
+            "client_timeout_seconds": client_timeout,
+        })
+
         t0 = time.monotonic()
         timed_out = False
         conn = _create_http_connection(scheme, host, port, timeout=client_timeout)
         with _active_lock:
             _active_connections[run_id] = conn
         try:
-            store.record_event(run_id, "HTTP_REQUEST_SENT", {
-                "step_id": step_id,
-                "method": method,
-                "url": f"{scheme}://{host}:{port}{path}",
-                "headers": fault_headers,
-                "attempt": 1,
-                "injected_fault": "http_timeout",
-            })
-            conn.request(method, path, headers=fault_headers)
+            conn.request(method, path, body=raw_body, headers=fault_headers)
             resp = conn.getresponse()
-            resp.read()
+            resp_body = resp.read()
+            elapsed = time.monotonic() - t0
+            size, snippet, truncated = _capture_response_summary(resp_body)
+            # Target completed without timing out! (e.g. ignored fault headers)
+            store.record_event(run_id, "HTTP_FAULT_ACTIVATION_FAILED", {
+                "step_id": step_id,
+                "fault": "http_timeout",
+                "reason": "target completed request without timing out",
+                "status": resp.status,
+                "elapsed_seconds": round(elapsed, 4),
+            })
+            store.record_event(run_id, "HTTP_RESPONSE_RECEIVED", {
+                "step_id": step_id,
+                "status": resp.status,
+                "attempt": 1,
+                "elapsed_seconds": round(elapsed, 4),
+                "response_size_bytes": size,
+                "body_snippet": snippet,
+                "body_truncated": truncated,
+                "recovered": False,
+            })
+            is_ok = resp.status in allowed_statuses
+            store.record_event(run_id, "STEP_COMPLETED", {
+                "step_id": step_id,
+                "status": "success" if is_ok else "unexpected_status",
+                "http_status": resp.status,
+            })
+            return is_ok, {
+                "step_id": step_id,
+                "type": "http_result",
+                "status": resp.status,
+                "fault_activated": False,
+                "simulated": False,
+            }
         except (TimeoutError, socket.timeout, OSError) as exc:
             timed_out = True
             t_elapsed = round(time.monotonic() - t0, 4)
@@ -597,7 +808,8 @@ def _execute_http_step(
             conn.close()
 
         if timed_out:
-            if implementation == "vulnerable":
+            can_retry = configured_retries > 0 and (is_idempotent or implementation == "fixed")
+            if not can_retry or implementation == "vulnerable":
                 store.record_event(run_id, "STEP_FAILED", {
                     "step_id": step_id,
                     "error": f"HTTP request to {scheme}://{host}:{port}{path} timed out after {client_timeout}s",
@@ -618,109 +830,104 @@ def _execute_http_step(
                     "recovered": True,
                     "reason": "http_timeout_recovered",
                 })
-                retry_conn = _create_http_connection(scheme, host, port, timeout=3.0)
-                with _active_lock:
-                    _active_connections[run_id] = retry_conn
-                try:
-                    store.record_event(run_id, "HTTP_REQUEST_SENT", {
-                        "step_id": step_id,
-                        "method": method,
-                        "url": f"{scheme}://{host}:{port}{path}",
-                        "headers": base_headers,
-                        "attempt": 2,
-                    })
-                    retry_conn.request(method, path, headers=base_headers)
-                    retry_resp = retry_conn.getresponse()
-                    retry_resp.read()
-                    store.record_event(run_id, "HTTP_RESPONSE_RECEIVED", {
-                        "step_id": step_id,
-                        "status": retry_resp.status,
-                        "attempt": 2,
-                        "recovered": True,
-                    })
-                    is_status_ok = retry_resp.status in allowed_statuses
-                    store.record_event(run_id, "STEP_COMPLETED", {
-                        "step_id": step_id,
-                        "status": "success" if is_status_ok else "unexpected_status",
-                        "http_status": retry_resp.status,
-                        "recovered": True,
-                    })
-                    return is_status_ok, {
-                        "step_id": step_id,
-                        "type": "http_result",
-                        "status": retry_resp.status,
-                        "recovered": True,
-                        "fault_activated": True,
-                        "simulated": False,
-                    }
-                finally:
-                    with _active_lock:
-                        _active_connections.pop(run_id, None)
-                    retry_conn.close()
+                store.record_event(run_id, "HTTP_REQUEST_SENT", {
+                    "step_id": step_id,
+                    "method": method,
+                    "url": f"{scheme}://{host}:{port}{path}",
+                    "headers": sanitized_headers,
+                    "body": sanitized_body,
+                    "attempt": 2,
+                })
+                retry_status, retry_headers, retry_body, retry_elapsed, _ = _execute_http_request_with_redirects(
+                    run_id=run_id,
+                    step_id=step_id,
+                    scheme=scheme,
+                    host=host,
+                    port=port,
+                    path=path,
+                    method=method,
+                    headers=base_headers,
+                    raw_body=raw_body,
+                    timeout=3.0,
+                    allowed_statuses=allowed_statuses,
+                )
+                size, snippet, truncated = _capture_response_summary(retry_body)
+                safe_resp_headers = {k: v for k, v in retry_headers.items() if k in SAFE_RESPONSE_HEADERS}
+                store.record_event(run_id, "HTTP_RESPONSE_RECEIVED", {
+                    "step_id": step_id,
+                    "status": retry_status,
+                    "attempt": 2,
+                    "elapsed_seconds": round(retry_elapsed, 4),
+                    "response_size_bytes": size,
+                    "headers": safe_resp_headers,
+                    "body_snippet": snippet,
+                    "body_truncated": truncated,
+                    "recovered": True,
+                })
+                is_status_ok = retry_status in allowed_statuses
+                store.record_event(run_id, "STEP_COMPLETED", {
+                    "step_id": step_id,
+                    "status": "success" if is_status_ok else "unexpected_status",
+                    "http_status": retry_status,
+                    "recovered": True,
+                })
+                return is_status_ok, {
+                    "step_id": step_id,
+                    "type": "http_result",
+                    "status": retry_status,
+                    "recovered": True,
+                    "fault_activated": True,
+                    "simulated": False,
+                }
 
     # Normal (non-faulted) HTTP step execution
-    conn = _create_http_connection(scheme, host, port, timeout=3.0)
-    with _active_lock:
-        _active_connections[run_id] = conn
-    try:
-        store.record_event(run_id, "HTTP_REQUEST_SENT", {
-            "step_id": step_id,
-            "method": method,
-            "url": f"{scheme}://{host}:{port}{path}",
-            "headers": base_headers,
-        })
-        conn.request(method, path, headers=base_headers)
-        resp = conn.getresponse()
-
-        # Handle redirects safely if 3xx
-        if resp.status in {301, 302, 303, 307, 308}:
-            loc = resp.getheader("Location")
-            if loc:
-                current_url = f"{scheme}://{host}:{port}{path}"
-                target_url = security.validate_redirect(current_url, loc)
-                store.record_event(run_id, "HTTP_REDIRECT_FOLLOWED", {
-                    "step_id": step_id,
-                    "from_url": current_url,
-                    "to_url": target_url,
-                    "status": resp.status,
-                })
-                resp.read()
-                conn.close()
-                r_scheme, r_host, r_port, r_path = _resolve_http_endpoint({"url": target_url})
-                r_conn = _create_http_connection(r_scheme, r_host, r_port, timeout=3.0)
-                with _active_lock:
-                    _active_connections[run_id] = r_conn
-                try:
-                    r_conn.request(method, r_path, headers=base_headers)
-                    resp = r_conn.getresponse()
-                    resp.read()
-                finally:
-                    r_conn.close()
-            else:
-                resp.read()
-        else:
-            resp.read()
-
-        store.record_event(run_id, "HTTP_RESPONSE_RECEIVED", {
-            "step_id": step_id,
-            "status": resp.status,
-        })
-        is_status_ok = resp.status in allowed_statuses
-        store.record_event(run_id, "STEP_COMPLETED", {
-            "step_id": step_id,
-            "status": "success" if is_status_ok else "unexpected_status",
-            "http_status": resp.status,
-        })
-        return is_status_ok, {
-            "step_id": step_id,
-            "type": "http_result",
-            "status": resp.status,
-            "simulated": False,
-        }
-    finally:
-        with _active_lock:
-            _active_connections.pop(run_id, None)
-        conn.close()
+    store.record_event(run_id, "HTTP_REQUEST_SENT", {
+        "step_id": step_id,
+        "method": method,
+        "url": f"{scheme}://{host}:{port}{path}",
+        "headers": sanitized_headers,
+        "body": sanitized_body,
+        "attempt": 1,
+    })
+    step_timeout = float(step.get("timeout_seconds", step_config.get("timeout_seconds", 3.0)))
+    status_code, resp_headers, body_bytes, elapsed, _ = _execute_http_request_with_redirects(
+        run_id=run_id,
+        step_id=step_id,
+        scheme=scheme,
+        host=host,
+        port=port,
+        path=path,
+        method=method,
+        headers=base_headers,
+        raw_body=raw_body,
+        timeout=step_timeout,
+        allowed_statuses=allowed_statuses,
+    )
+    size, snippet, truncated = _capture_response_summary(body_bytes)
+    safe_resp_headers = {k: v for k, v in resp_headers.items() if k in SAFE_RESPONSE_HEADERS}
+    store.record_event(run_id, "HTTP_RESPONSE_RECEIVED", {
+        "step_id": step_id,
+        "status": status_code,
+        "attempt": 1,
+        "elapsed_seconds": round(elapsed, 4),
+        "response_size_bytes": size,
+        "headers": safe_resp_headers,
+        "body_snippet": snippet,
+        "body_truncated": truncated,
+        "recovered": False,
+    })
+    is_status_ok = status_code in allowed_statuses
+    store.record_event(run_id, "STEP_COMPLETED", {
+        "step_id": step_id,
+        "status": "success" if is_status_ok else "unexpected_status",
+        "http_status": status_code,
+    })
+    return is_status_ok, {
+        "step_id": step_id,
+        "type": "http_result",
+        "status": status_code,
+        "simulated": False,
+    }
 
 
 def _execute_db_step(

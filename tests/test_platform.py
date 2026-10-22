@@ -1,5 +1,6 @@
 import http.client
 import json
+import os
 import tempfile
 import threading
 import time
@@ -1513,6 +1514,278 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertIn("DB_OPERATION_SIMULATED", event_types)
         db_events = [e for e in run.get("events", []) if e["type"] == "DB_OPERATION_SIMULATED"]
         self.assertTrue(all(e.get("payload", {}).get("simulated") is True for e in db_events))
+
+    def test_unconfirmed_fault_when_target_ignores_fault_header(self) -> None:
+        """Verify fault is NOT confirmed if target service ignores fault headers and returns normally."""
+        sc_id = f"ignore-fault-{uuid4().hex[:6]}"
+        scenario_def = {
+            "scenario_version": 1,
+            "name": sc_id,
+            "fault": "http_timeout",
+            "assertion": "all_steps_succeeded_or_handled",
+            "timeout_seconds": 10,
+            "workflow": [
+                {
+                    "id": "fast_step",
+                    "name": "Fast Service",
+                    "type": "http.get",
+                    "path": "/v1/health",
+                    "fault_config": {
+                        "client_timeout_seconds": 1.0,
+                        "server_delay_seconds": 0.0,
+                    },
+                }
+            ],
+            "target_step": "fast_step",
+        }
+        status, res = self.request("POST", "/api/scenarios", {"definition": scenario_def})
+        self.assertEqual(status, 201)
+
+        run = self.launch_and_wait("vulnerable", sc_id)
+        assertions = {a["name"]: a["status"] for a in run["assertions"]}
+        self.assertEqual(assertions.get("fault_activation_confirmed"), "failed")
+        self.assertEqual(run["verdict"], "failed")
+        event_types = [e["type"] for e in run.get("events", [])]
+        self.assertIn("HTTP_FAULT_ACTIVATION_FAILED", event_types)
+        self.assertNotIn("HTTP_TIMEOUT_OBSERVED", event_types)
+
+    def test_http_request_construction_and_evidence_redaction(self) -> None:
+        """Verify request method, path, headers, and body are constructed and sensitive fields are redacted."""
+        sc_id = f"req-construct-{uuid4().hex[:6]}"
+        scenario_def = {
+            "scenario_version": 1,
+            "name": sc_id,
+            "fault": "http_timeout",
+            "assertion": "all_steps_succeeded_or_handled",
+            "timeout_seconds": 10,
+            "workflow": [
+                {
+                    "id": "post_item",
+                    "name": "Create Item",
+                    "type": "http.post",
+                    "path": "/v1/health",
+                    "headers": {
+                        "Authorization": "Bearer my_secret_token_12345",
+                        "X-Custom-Client": "v1.0",
+                        "Host": "malicious-host-override.com",
+                    },
+                    "body": {
+                        "item_name": "Gadget",
+                        "api_key": "sk_test_secret1234567890",
+                    },
+                    "config": {
+                        "allowed_statuses": [200],
+                    },
+                }
+            ],
+            "target_step": "post_item",
+        }
+        status, res = self.request("POST", "/api/scenarios", {"definition": scenario_def})
+        self.assertEqual(status, 201)
+
+        run = self.launch_and_wait("fixed", sc_id)
+        events = run.get("events", [])
+        req_events = [e for e in events if e["type"] == "HTTP_REQUEST_SENT"]
+        self.assertGreaterEqual(len(req_events), 1)
+
+        payload = req_events[0]["payload"]
+        self.assertEqual(payload["method"], "POST")
+        headers = payload.get("headers", {})
+        self.assertEqual(headers.get("Authorization"), "[REDACTED]")
+        self.assertEqual(headers.get("X-Custom-Client"), "v1.0")
+        self.assertNotIn("Host", headers)
+
+        body = payload.get("body", {})
+        self.assertEqual(body.get("item_name"), "Gadget")
+        self.assertEqual(body.get("api_key"), "[REDACTED]")
+
+    def test_redirect_hardening_loop_and_downgrade_detection(self) -> None:
+        """Verify redirect loops and HTTPS-to-HTTP downgrades are strictly rejected."""
+        from faultline.engine import _execute_http_request_with_redirects
+        from unittest.mock import patch, MagicMock
+
+        run_id = f"test-redir-{uuid4().hex[:6]}"
+        store.create_run(run_id, "payment-response-lost", 1, "fixed")
+
+        # 1. Redirect loop detection
+        mock_resp_1 = MagicMock()
+        mock_resp_1.status = 302
+        mock_resp_1.getheaders.return_value = [("Location", "http://127.0.0.1:8766/loop_b")]
+        mock_resp_1.read.return_value = b""
+
+        mock_resp_2 = MagicMock()
+        mock_resp_2.status = 302
+        mock_resp_2.getheaders.return_value = [("Location", "http://127.0.0.1:8766/loop_a")]
+        mock_resp_2.read.return_value = b""
+
+        mock_conn = MagicMock()
+        mock_conn.getresponse.side_effect = [mock_resp_1, mock_resp_2, mock_resp_1]
+
+        with patch("faultline.engine._create_http_connection", return_value=mock_conn):
+            with self.assertRaises(ValueError) as ctx:
+                _execute_http_request_with_redirects(
+                    run_id=run_id,
+                    step_id="step-redirect",
+                    scheme="http",
+                    host="127.0.0.1",
+                    port=8766,
+                    path="/loop_a",
+                    method="GET",
+                    headers={},
+                    raw_body=None,
+                    timeout=2.0,
+                    allowed_statuses={200},
+                )
+            self.assertIn("redirect loop detected", str(ctx.exception))
+
+        # 2. HTTPS to HTTP downgrade detection
+        mock_downgrade_resp = MagicMock()
+        mock_downgrade_resp.status = 301
+        mock_downgrade_resp.getheaders.return_value = [("Location", "http://127.0.0.1:8766/insecure")]
+        mock_downgrade_resp.read.return_value = b""
+
+        mock_https_conn = MagicMock()
+        mock_https_conn.getresponse.return_value = mock_downgrade_resp
+
+        with patch("faultline.engine._create_http_connection", return_value=mock_https_conn):
+            with self.assertRaises(PermissionError) as ctx:
+                _execute_http_request_with_redirects(
+                    run_id=run_id,
+                    step_id="step-redirect",
+                    scheme="https",
+                    host="127.0.0.1",
+                    port=8766,
+                    path="/secure",
+                    method="GET",
+                    headers={},
+                    raw_body=None,
+                    timeout=2.0,
+                    allowed_statuses={200},
+                )
+            self.assertIn("Insecure redirect downgrade", str(ctx.exception))
+
+    def test_http_response_evidence_summary(self) -> None:
+        """Verify response evidence captures status, headers, size, truncated snippet, and timing."""
+        sc_id = f"resp-ev-{uuid4().hex[:6]}"
+        scenario_def = {
+            "scenario_version": 1,
+            "name": sc_id,
+            "fault": "http_timeout",
+            "assertion": "all_steps_succeeded_or_handled",
+            "timeout_seconds": 10,
+            "workflow": [
+                {
+                    "id": "ping",
+                    "name": "Ping Health",
+                    "type": "http.get",
+                    "path": "/v1/health",
+                }
+            ],
+            "target_step": "ping",
+        }
+        status, res = self.request("POST", "/api/scenarios", {"definition": scenario_def})
+        self.assertEqual(status, 201)
+
+        run = self.launch_and_wait("fixed", sc_id)
+        events = run.get("events", [])
+        resp_events = [e for e in events if e["type"] == "HTTP_RESPONSE_RECEIVED"]
+        self.assertGreaterEqual(len(resp_events), 1)
+
+        payload = resp_events[-1]["payload"]
+        self.assertEqual(payload["status"], 200)
+        self.assertIn("response_size_bytes", payload)
+        self.assertGreater(payload["response_size_bytes"], 0)
+        self.assertIn("headers", payload)
+        self.assertIn("content-type", payload["headers"])
+        self.assertIn("body_snippet", payload)
+        self.assertIn("checkout-service", payload["body_snippet"])
+        self.assertIn("elapsed_seconds", payload)
+        self.assertIn("attempt", payload)
+
+    def test_real_https_server_integration_tls_validation(self) -> None:
+        """Real HTTPS server test proving strict TLS verification: untrusted cert fails, trusted cert succeeds."""
+        import tempfile
+        import ssl
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        import datetime
+        import ipaddress
+        from faultline.engine import _create_http_connection
+        from http.client import HTTPSConnection
+
+        # 1. Generate real self-signed certificate and private key for 127.0.0.1
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+        san = x509.SubjectAlternativeName([x509.IPAddress(ipaddress.IPv4Address("127.0.0.1"))])
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(name)
+            .issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(1001)
+            .not_valid_before(datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1))
+            .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1))
+            .add_extension(san, critical=False)
+            .sign(key, hashes.SHA256())
+        )
+
+        with tempfile.NamedTemporaryFile("wb", delete=False, suffix=".pem") as cert_file, \
+             tempfile.NamedTemporaryFile("wb", delete=False, suffix=".key") as key_file:
+            cert_file.write(cert.public_bytes(serialization.Encoding.PEM))
+            key_file.write(key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            ))
+            cert_path = cert_file.name
+            key_path = key_file.name
+
+        class SimpleHTTPSHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "15")
+                self.end_headers()
+                self.wfile.write(b'{"status":"ok"}')
+            def log_message(self, *args): pass
+
+        # Start HTTPS server on ephemeral port
+        httpd = HTTPServer(("127.0.0.1", 0), SimpleHTTPSHandler)
+        server_port = httpd.server_address[1]
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
+        httpd.socket = ssl_ctx.wrap_socket(httpd.socket, server_side=True)
+
+        server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        server_thread.start()
+
+        try:
+            # 2. Strict default TLS verification: system trust store does NOT trust this cert -> MUST FAIL
+            conn = _create_http_connection("https", "127.0.0.1", server_port, timeout=2.0)
+            with self.assertRaises(ssl.SSLError):
+                conn.request("GET", "/test")
+                conn.getresponse()
+            conn.close()
+
+            # 3. Connection with trusted CA certificate -> MUST SUCCEED
+            custom_ctx = ssl.create_default_context(cafile=cert_path)
+            conn_trusted = HTTPSConnection("127.0.0.1", server_port, timeout=2.0, context=custom_ctx)
+            conn_trusted.request("GET", "/test")
+            resp = conn_trusted.getresponse()
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(json.loads(resp.read()), {"status": "ok"})
+            conn_trusted.close()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            try:
+                os.remove(cert_path)
+                os.remove(key_path)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

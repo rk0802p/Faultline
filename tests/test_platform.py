@@ -1372,6 +1372,8 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertEqual(vuln_run["verdict"], "failed")
         vuln_events = [e["type"] for e in vuln_run.get("events", [])]
         self.assertIn("FAULT_INJECTED", vuln_events)
+        self.assertIn("HTTP_REQUEST_SENT", vuln_events)
+        self.assertIn("HTTP_TIMEOUT_OBSERVED", vuln_events)
         self.assertIn("STEP_FAILED", vuln_events)
 
         # 4. Execute in fixed mode -> recovers and passes
@@ -1379,13 +1381,64 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertEqual(fixed_run["verdict"], "passed")
         fixed_events = [e["type"] for e in fixed_run.get("events", [])]
         self.assertIn("FAULT_INJECTED", fixed_events)
+        self.assertIn("HTTP_REQUEST_SENT", fixed_events)
+        self.assertIn("HTTP_TIMEOUT_OBSERVED", fixed_events)
         self.assertIn("STEP_RETRY", fixed_events)
+        self.assertIn("HTTP_RESPONSE_RECEIVED", fixed_events)
         self.assertIn("STEP_COMPLETED", fixed_events)
 
         # Invariants
         assertions = {a["name"]: a["status"] for a in fixed_run["assertions"]}
         self.assertEqual(assertions.get("fault_activation_confirmed"), "passed")
         self.assertEqual(assertions.get("all_steps_succeeded_or_handled"), "passed")
+
+    def test_registry_rejects_duplicate_registration(self) -> None:
+        """Verify fault and step registries reject duplicate handler registrations."""
+        from faultline.engine import fault_registry, step_registry
+
+        # Duplicate fault registration raises ValueError
+        with self.assertRaises(ValueError) as ctx:
+            fault_registry.register("http_timeout", lambda *a: None, ["test"])
+        self.assertIn("already registered", str(ctx.exception))
+
+        # Duplicate step registration raises ValueError
+        with self.assertRaises(ValueError) as ctx:
+            step_registry.register("http.request", lambda *a: None)
+        self.assertIn("already registered", str(ctx.exception))
+
+    def test_schema_validates_step_types_and_target_step(self) -> None:
+        """Verify schema rejects unknown step types and incompatible target steps for faults."""
+        base_def = {
+            "scenario_version": 1,
+            "name": "test-step-val",
+            "fault": "http_timeout",
+            "assertion": "all_steps_succeeded_or_handled",
+            "timeout_seconds": 10,
+        }
+
+        # 1. Unknown step type is rejected
+        bad_type_def = dict(base_def, workflow=[
+            {"id": "s1", "name": "Bad Step", "type": "unsupported.custom.type"},
+        ])
+        with self.assertRaises(ValueError) as ctx:
+            server.validate_scenario(bad_type_def)
+        self.assertIn("unsupported workflow step type", str(ctx.exception))
+
+        # 2. Incompatible target_step for http_timeout (e.g. db.write instead of HTTP)
+        incompatible_def = dict(base_def, workflow=[
+            {"id": "db_step", "name": "Write DB", "type": "db.write"},
+        ], target_step="db_step")
+        with self.assertRaises(ValueError) as ctx:
+            server.validate_scenario(incompatible_def)
+        self.assertIn("is incompatible with fault 'http_timeout'", str(ctx.exception))
+
+        # 3. Non-existent target_step is rejected
+        nonexistent_def = dict(base_def, workflow=[
+            {"id": "s1", "name": "Step 1", "type": "http.get"},
+        ], target_step="s_does_not_exist")
+        with self.assertRaises(ValueError) as ctx:
+            server.validate_scenario(nonexistent_def)
+        self.assertIn("unsupported target_step", str(ctx.exception))
 
     def test_prohibited_ports_security_enforcement(self) -> None:
         """Verify that loopback security check rejects dangerous/privileged service ports."""

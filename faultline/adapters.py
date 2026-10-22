@@ -229,6 +229,14 @@ def json_reply(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> No
 
 class ProviderHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
+        if self.headers.get("X-Faultline-Fault") == "http_timeout" or self.headers.get("X-Faultline-Delay"):
+            delay_sec = float(self.headers.get("X-Faultline-Delay", "0.4"))
+            time.sleep(min(delay_sec, 2.0))
+
+        if self.path in {"/v1/health", "/health"}:
+            json_reply(self, 200, {"status": "ok", "service": "payment-provider"})
+            return
+
         if self.path == "/v1/refunds":
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -266,6 +274,9 @@ class ProviderHandler(BaseHTTPRequestHandler):
             json_reply(self, 400, {"error": str(exc)})
 
     def do_GET(self) -> None:
+        if self.headers.get("X-Faultline-Fault") == "http_timeout" or self.headers.get("X-Faultline-Delay"):
+            delay_sec = float(self.headers.get("X-Faultline-Delay", "0.4"))
+            time.sleep(min(delay_sec, 2.0))
         parsed = urlparse(self.path)
         if parsed.path in {"/v1/health", "/health"}:
             json_reply(self, 200, {"status": "ok", "service": "payment-provider"})
@@ -286,6 +297,14 @@ class ProviderHandler(BaseHTTPRequestHandler):
 
 class CheckoutHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
+        if self.headers.get("X-Faultline-Fault") == "http_timeout" or self.headers.get("X-Faultline-Delay"):
+            delay_sec = float(self.headers.get("X-Faultline-Delay", "0.4"))
+            time.sleep(min(delay_sec, 2.0))
+
+        if self.path in {"/v1/health", "/health"}:
+            json_reply(self, 200, {"status": "ok", "service": "checkout-service"})
+            return
+
         if self.path == "/v1/webhooks/payment":
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -430,6 +449,9 @@ class CheckoutHandler(BaseHTTPRequestHandler):
             json_reply(self, 500, {"error": str(exc)})
 
     def do_GET(self) -> None:
+        if self.headers.get("X-Faultline-Fault") == "http_timeout" or self.headers.get("X-Faultline-Delay"):
+            delay_sec = float(self.headers.get("X-Faultline-Delay", "0.4"))
+            time.sleep(min(delay_sec, 2.0))
         parsed = urlparse(self.path)
         if parsed.path in {"/v1/health", "/health"}:
             json_reply(self, 200, {"status": "ok", "service": "checkout-service"})

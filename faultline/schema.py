@@ -75,6 +75,22 @@ VALID_WORKFLOW_STEPS: set[str] = {
     "reconciliation_refund",
 }
 
+SUPPORTED_STEP_TYPES: set[str] = {
+    "http.request",
+    "http.get",
+    "http.post",
+    "db.operation",
+    "db.write",
+    "db.read",
+    "generic.operation",
+}
+
+HTTP_STEP_TYPES: set[str] = {
+    "http.request",
+    "http.get",
+    "http.post",
+}
+
 
 def validate_scenario(definition: dict[str, Any]) -> None:
     """Validates that a scenario definition conforms strictly to supported failure testing constraints."""
@@ -89,11 +105,13 @@ def validate_scenario(definition: dict[str, Any]) -> None:
         raise ValueError(f"unsupported fault type: '{fault}'. Supported: {list(SUPPORTED_FAULTS.keys())}")
 
     workflow = definition.get("workflow")
-    valid_step_ids = set(VALID_WORKFLOW_STEPS)
+    target_step = definition.get("target_step")
+
     if workflow is not None:
-        if not isinstance(workflow, list):
-            raise ValueError("workflow must be a list of step definitions")
-        seen_step_ids = set()
+        if not isinstance(workflow, list) or not workflow:
+            raise ValueError("workflow must be a non-empty list of step definitions")
+        seen_step_ids: set[str] = set()
+        step_by_id: dict[str, dict[str, Any]] = {}
         for idx, step in enumerate(workflow):
             if not isinstance(step, dict):
                 raise ValueError(f"workflow step #{idx+1} must be an object")
@@ -103,11 +121,28 @@ def validate_scenario(definition: dict[str, Any]) -> None:
             if step_id in seen_step_ids:
                 raise ValueError(f"duplicate workflow step id '{step_id}'")
             seen_step_ids.add(step_id)
-            valid_step_ids.add(step_id)
+            step_by_id[step_id] = step
+            step_type = step.get("type")
+            if not isinstance(step_type, str) or not step_type.strip():
+                raise ValueError(f"workflow step '{step_id}' requires a valid 'type'")
+            if step_type not in SUPPORTED_STEP_TYPES:
+                raise ValueError(
+                    f"unsupported workflow step type: '{step_type}'. Supported step types: {sorted(SUPPORTED_STEP_TYPES)}"
+                )
 
-    target_step = definition.get("target_step")
-    if target_step is not None and target_step not in valid_step_ids:
-        raise ValueError(f"unsupported target_step: '{target_step}'. Valid steps: {sorted(valid_step_ids)}")
+        if target_step is not None:
+            if target_step not in seen_step_ids:
+                raise ValueError(f"unsupported target_step: '{target_step}'. Valid steps: {sorted(seen_step_ids)}")
+            target_obj = step_by_id[target_step]
+            target_type = target_obj.get("type")
+            if fault == "http_timeout" and target_type not in HTTP_STEP_TYPES:
+                raise ValueError(
+                    f"target_step '{target_step}' with type '{target_type}' is incompatible with fault 'http_timeout'; "
+                    f"must be an HTTP operation ({sorted(HTTP_STEP_TYPES)})"
+                )
+    else:
+        if target_step is not None and target_step not in VALID_WORKFLOW_STEPS:
+            raise ValueError(f"unsupported target_step: '{target_step}'. Valid steps: {sorted(VALID_WORKFLOW_STEPS)}")
 
     expected_assertion = SUPPORTED_FAULTS[fault]["primary_assertion"]
     if definition.get("assertion") != expected_assertion:

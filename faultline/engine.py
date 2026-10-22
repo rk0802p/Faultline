@@ -2,15 +2,17 @@
 
 import json
 import logging
+import socket
 import threading
 import time
 from http.client import HTTPConnection
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from . import adapters, security, store
 from .adapters import provider, checkout_service
-from .schema import validate_scenario
+from .schema import validate_scenario, SUPPORTED_STEP_TYPES, HTTP_STEP_TYPES
 
 
 logger = logging.getLogger("faultline.runner")
@@ -460,6 +462,8 @@ class FaultRunnerRegistry:
         self._registry: dict[str, tuple[Any, list[str]]] = {}
 
     def register(self, fault_type: str, handler: Any, cleanup_targets: list[str]) -> None:
+        if fault_type in self._registry:
+            raise ValueError(f"fault type '{fault_type}' is already registered")
         self._registry[fault_type] = (handler, cleanup_targets)
 
     def get(self, fault_type: str) -> tuple[Any, list[str]] | None:
@@ -467,6 +471,223 @@ class FaultRunnerRegistry:
 
     def is_registered(self, fault_type: str) -> bool:
         return fault_type in self._registry
+
+
+class StepRunnerRegistry:
+    """Registry mapping workflow step types to their execution handlers."""
+
+    def __init__(self) -> None:
+        self._registry: dict[str, Any] = {}
+
+    def register(self, step_type: str, handler: Any) -> None:
+        if step_type in self._registry:
+            raise ValueError(f"step type '{step_type}' is already registered")
+        self._registry[step_type] = handler
+
+    def get(self, step_type: str) -> Any | None:
+        return self._registry.get(step_type)
+
+    def is_registered(self, step_type: str) -> bool:
+        return step_type in self._registry
+
+    def registered_types(self) -> set[str]:
+        return set(self._registry.keys())
+
+
+def _resolve_http_endpoint(step: dict[str, Any]) -> tuple[str, int, str]:
+    """Resolves host, port, path from step definition or defaults to local checkout service."""
+    url = step.get("url") or step.get("endpoint")
+    if url:
+        parsed = urlparse(url)
+        host = parsed.hostname or adapters.CHECKOUT_HOST
+        port = parsed.port or (443 if parsed.scheme == "https" else (80 if parsed.scheme == "http" else adapters.CHECKOUT_PORT))
+        path = parsed.path or "/v1/health"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        return host, port, path
+
+    host = step.get("host") or adapters.CHECKOUT_HOST
+    port = int(step.get("port") or adapters.CHECKOUT_PORT)
+    path = step.get("path") or "/v1/health"
+    return host, port, path
+
+
+def _execute_http_step(
+    run_id: str,
+    step: dict[str, Any],
+    inject_fault: bool,
+    fault_type: str,
+    implementation: str,
+    trace_id: str,
+    root_span_id: str,
+) -> tuple[bool, dict[str, Any]]:
+    """Executes a real HTTP request against an approved test endpoint with bounded timeouts and evidence capture."""
+    step_id = step.get("id", "http_step")
+    host, port, path = _resolve_http_endpoint(step)
+    method = step.get("method", "GET").upper()
+    if step.get("type") == "http.post":
+        method = "POST"
+
+    security.assert_loopback_safe(host, port)
+
+    base_headers = {"Content-Type": "application/json"}
+    if trace_id and root_span_id:
+        base_headers["traceparent"] = f"00-{trace_id}-{root_span_id}-01"
+
+    if inject_fault and fault_type == "http_timeout":
+        fault_headers = dict(base_headers)
+        fault_headers["X-Faultline-Fault"] = "http_timeout"
+        fault_headers["X-Faultline-Delay"] = "0.4"
+
+        client_timeout = 0.1  # 100ms bounded socket timeout
+        t0 = time.monotonic()
+        timed_out = False
+        conn = HTTPConnection(host, port, timeout=client_timeout)
+        try:
+            store.record_event(run_id, "HTTP_REQUEST_SENT", {
+                "step_id": step_id,
+                "method": method,
+                "url": f"http://{host}:{port}{path}",
+                "headers": fault_headers,
+                "attempt": 1,
+                "injected_fault": "http_timeout",
+            })
+            conn.request(method, path, headers=fault_headers)
+            resp = conn.getresponse()
+            resp.read()
+        except (TimeoutError, socket.timeout, OSError) as exc:
+            timed_out = True
+            t_elapsed = round(time.monotonic() - t0, 4)
+            store.record_event(run_id, "HTTP_TIMEOUT_OBSERVED", {
+                "step_id": step_id,
+                "method": method,
+                "target": f"{host}:{port}{path}",
+                "client_timeout_seconds": client_timeout,
+                "elapsed_seconds": t_elapsed,
+                "error": type(exc).__name__,
+            })
+        finally:
+            conn.close()
+
+        if timed_out:
+            if implementation == "vulnerable":
+                store.record_event(run_id, "STEP_FAILED", {
+                    "step_id": step_id,
+                    "error": f"HTTP request to http://{host}:{port}{path} timed out after {client_timeout}s",
+                    "evidence": "HTTP_TIMEOUT_OBSERVED",
+                })
+                return False, {"step_id": step_id, "type": "http_result", "status": "timed_out"}
+            else:
+                # Resilient implementation recovers by issuing a retry with standard timeout
+                store.record_event(run_id, "STEP_RETRY", {
+                    "step_id": step_id,
+                    "attempt": 2,
+                    "recovered": True,
+                    "reason": "http_timeout_recovered",
+                })
+                retry_conn = HTTPConnection(host, port, timeout=3.0)
+                try:
+                    store.record_event(run_id, "HTTP_REQUEST_SENT", {
+                        "step_id": step_id,
+                        "method": method,
+                        "url": f"http://{host}:{port}{path}",
+                        "headers": base_headers,
+                        "attempt": 2,
+                    })
+                    retry_conn.request(method, path, headers=base_headers)
+                    retry_resp = retry_conn.getresponse()
+                    retry_resp.read()
+                    store.record_event(run_id, "HTTP_RESPONSE_RECEIVED", {
+                        "step_id": step_id,
+                        "status": retry_resp.status,
+                        "attempt": 2,
+                        "recovered": True,
+                    })
+                    store.record_event(run_id, "STEP_COMPLETED", {
+                        "step_id": step_id,
+                        "status": "success",
+                        "recovered": True,
+                    })
+                    return True, {"step_id": step_id, "type": "http_result", "status": retry_resp.status, "recovered": True}
+                finally:
+                    retry_conn.close()
+
+    # Normal (non-faulted) HTTP step execution
+    conn = HTTPConnection(host, port, timeout=3.0)
+    try:
+        store.record_event(run_id, "HTTP_REQUEST_SENT", {
+            "step_id": step_id,
+            "method": method,
+            "url": f"http://{host}:{port}{path}",
+            "headers": base_headers,
+        })
+        conn.request(method, path, headers=base_headers)
+        resp = conn.getresponse()
+        resp.read()
+        store.record_event(run_id, "HTTP_RESPONSE_RECEIVED", {
+            "step_id": step_id,
+            "status": resp.status,
+        })
+        store.record_event(run_id, "STEP_COMPLETED", {
+            "step_id": step_id,
+            "status": "success",
+        })
+        return True, {"step_id": step_id, "type": "http_result", "status": resp.status}
+    finally:
+        conn.close()
+
+
+def _execute_db_step(
+    run_id: str,
+    step: dict[str, Any],
+    inject_fault: bool,
+    fault_type: str,
+    implementation: str,
+    trace_id: str,
+    root_span_id: str,
+) -> tuple[bool, dict[str, Any]]:
+    step_id = step.get("id", "db_step")
+    store.record_event(run_id, "DB_OPERATION_EXECUTED", {
+        "step_id": step_id,
+        "operation": step.get("operation", "write"),
+        "table": step.get("table", "records"),
+    })
+    store.record_event(run_id, "STEP_COMPLETED", {
+        "step_id": step_id,
+        "status": "success",
+    })
+    return True, {"step_id": step_id, "type": "db_result", "status": "success"}
+
+
+def _execute_generic_step(
+    run_id: str,
+    step: dict[str, Any],
+    inject_fault: bool,
+    fault_type: str,
+    implementation: str,
+    trace_id: str,
+    root_span_id: str,
+) -> tuple[bool, dict[str, Any]]:
+    step_id = step.get("id", "generic_step")
+    store.record_event(run_id, "GENERIC_OPERATION_EXECUTED", {
+        "step_id": step_id,
+        "name": step.get("name", step_id),
+    })
+    store.record_event(run_id, "STEP_COMPLETED", {
+        "step_id": step_id,
+        "status": "success",
+    })
+    return True, {"step_id": step_id, "type": "generic_result", "status": "success"}
+
+
+step_registry = StepRunnerRegistry()
+step_registry.register("http.request", _execute_http_step)
+step_registry.register("http.get", _execute_http_step)
+step_registry.register("http.post", _execute_http_step)
+step_registry.register("db.operation", _execute_db_step)
+step_registry.register("db.write", _execute_db_step)
+step_registry.register("db.read", _execute_db_step)
+step_registry.register("generic.operation", _execute_generic_step)
 
 
 def _execute_generic_workflow(
@@ -507,6 +728,10 @@ def _execute_generic_workflow(
         step_name = step.get("name", step_id)
         step_type = step.get("type", "generic.operation")
 
+        handler = step_registry.get(step_type)
+        if handler is None:
+            raise ValueError(f"unsupported workflow step type: '{step_type}'")
+
         store.record_event(run_id, "STEP_STARTED", {
             "step_id": step_id,
             "name": step_name,
@@ -523,33 +748,24 @@ def _execute_generic_workflow(
                 "target_step": step_id,
                 "config": fault_config,
             })
-            if implementation == "vulnerable":
-                step_failures += 1
-                store.record_event(run_id, "STEP_FAILED", {
-                    "step_id": step_id,
-                    "error": f"Simulated unhandled {fault_type} failure",
-                })
-            else:
-                fault_recovered = True
-                store.record_event(run_id, "STEP_RETRY", {
-                    "step_id": step_id,
-                    "attempt": 2,
-                    "recovered": True,
-                })
-                store.record_event(run_id, "STEP_COMPLETED", {
-                    "step_id": step_id,
-                    "status": "success",
-                    "recovered": True,
-                })
+            success, side_effect = handler(
+                run_id, step, True, fault_type, implementation, trace_id, root_span_id
+            )
+            if success:
                 executed_steps.append(step_id)
-                side_effects.append({"step_id": step_id, "type": "step_result", "status": "recovered"})
+                fault_recovered = True
+                side_effects.append(side_effect)
+            else:
+                step_failures += 1
         else:
-            store.record_event(run_id, "STEP_COMPLETED", {
-                "step_id": step_id,
-                "status": "success",
-            })
-            executed_steps.append(step_id)
-            side_effects.append({"step_id": step_id, "type": "step_result", "status": "success"})
+            success, side_effect = handler(
+                run_id, step, False, fault_type, implementation, trace_id, root_span_id
+            )
+            if success:
+                executed_steps.append(step_id)
+                side_effects.append(side_effect)
+            else:
+                step_failures += 1
 
     primary_assertion = scenario.get("assertion", "all_steps_succeeded_or_handled")
     is_passed = (fault_recovered and step_failures == 0) if implementation == "fixed" else (step_failures == 0)

@@ -1454,6 +1454,66 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertTrue(security.is_loopback_allowed("127.0.0.1", port=8080))
         self.assertTrue(security.is_loopback_allowed("localhost", port=3000))
 
+    def test_https_strict_tls_verification(self) -> None:
+        """Verify HTTPS connections enforce strict TLS context with CERT_REQUIRED and hostname checking."""
+        import ssl
+        from faultline.engine import _resolve_http_endpoint, _create_http_connection
+        from http.client import HTTPSConnection
+
+        scheme, host, port, path = _resolve_http_endpoint({"url": "https://127.0.0.1:8443/v1/health"})
+        self.assertEqual(scheme, "https")
+        self.assertEqual(host, "127.0.0.1")
+        self.assertEqual(port, 8443)
+        self.assertEqual(path, "/v1/health")
+
+        conn = _create_http_connection("https", "127.0.0.1", 8443, 2.0)
+        self.assertIsInstance(conn, HTTPSConnection)
+        # Verify strict TLS certificate validation is enabled
+        self.assertEqual(conn._context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(conn._context.check_hostname)
+
+    def test_redirect_loopback_validation(self) -> None:
+        """Verify redirect validation allows loopback targets and rejects external/prohibited ports."""
+        from faultline import security
+
+        # Valid relative redirect
+        target = security.validate_redirect("http://127.0.0.1:8766/v1/checkout", "/v1/receipt")
+        self.assertEqual(target, "http://127.0.0.1:8766/v1/receipt")
+
+        # Open redirect to external domain must be rejected
+        with self.assertRaises(PermissionError):
+            security.validate_redirect("http://127.0.0.1:8766/v1/checkout", "http://external-malicious.com/leak")
+
+        # Redirect to prohibited port (e.g. SSH port 22) must be rejected
+        with self.assertRaises(PermissionError):
+            security.validate_redirect("http://127.0.0.1:8766/v1/checkout", "http://127.0.0.1:22/admin")
+
+    def test_db_step_explicitly_labeled_as_simulation(self) -> None:
+        """Verify database workflow steps are explicitly marked as simulations in events and side-effects."""
+        sc_id = f"sim-db-{uuid4().hex[:6]}"
+        db_scenario = {
+            "scenario_version": 1,
+            "name": sc_id,
+            "description": "Simulated DB step execution",
+            "fault": "http_timeout",
+            "assertion": "all_steps_succeeded_or_handled",
+            "timeout_seconds": 10,
+            "workflow": [
+                {"id": "db_step", "name": "Persist Order Record", "type": "db.write", "table": "orders"},
+                {"id": "call_svc", "name": "Ping Service", "type": "http.get"},
+            ],
+            "target_step": "call_svc",
+        }
+        status, res = self.request("POST", "/api/scenarios", {"definition": db_scenario})
+        self.assertEqual(status, 201)
+
+        run = self.launch_and_wait("fixed", sc_id)
+        self.assertEqual(run["verdict"], "passed")
+        event_types = [e["type"] for e in run.get("events", [])]
+        self.assertIn("DB_OPERATION_SIMULATED", event_types)
+        db_events = [e for e in run.get("events", []) if e["type"] == "DB_OPERATION_SIMULATED"]
+        self.assertTrue(all(e.get("payload", {}).get("simulated") is True for e in db_events))
+
 
 if __name__ == "__main__":
     unittest.main()

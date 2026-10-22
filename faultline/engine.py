@@ -3,9 +3,10 @@
 import json
 import logging
 import socket
+import ssl
 import threading
 import time
-from http.client import HTTPConnection
+from http.client import HTTPConnection, HTTPSConnection
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -494,22 +495,43 @@ class StepRunnerRegistry:
         return set(self._registry.keys())
 
 
-def _resolve_http_endpoint(step: dict[str, Any]) -> tuple[str, int, str]:
-    """Resolves host, port, path from step definition or defaults to local checkout service."""
+def _resolve_http_endpoint(step: dict[str, Any]) -> tuple[str, str, int, str]:
+    """Resolves scheme, host, port, path from step definition or defaults to local checkout service."""
     url = step.get("url") or step.get("endpoint")
     if url:
         parsed = urlparse(url)
+        scheme = (parsed.scheme or "http").lower()
+        if scheme not in {"http", "https"}:
+            raise ValueError(f"unsupported scheme '{scheme}', only http and https are allowed")
         host = parsed.hostname or adapters.CHECKOUT_HOST
-        port = parsed.port or (443 if parsed.scheme == "https" else (80 if parsed.scheme == "http" else adapters.CHECKOUT_PORT))
+        port = parsed.port or (443 if scheme == "https" else 80)
         path = parsed.path or "/v1/health"
         if parsed.query:
             path = f"{path}?{parsed.query}"
-        return host, port, path
+        return scheme, host, port, path
 
+    scheme = step.get("scheme", "http").lower()
     host = step.get("host") or adapters.CHECKOUT_HOST
     port = int(step.get("port") or adapters.CHECKOUT_PORT)
     path = step.get("path") or "/v1/health"
-    return host, port, path
+    return scheme, host, port, path
+
+
+def _create_http_connection(
+    scheme: str,
+    host: str,
+    port: int,
+    timeout: float,
+) -> HTTPConnection:
+    """Creates an HTTP or HTTPS connection with strict TLS certificate verification."""
+    security.assert_loopback_safe(host, port)
+    if scheme == "https":
+        context = ssl.create_default_context()
+        return HTTPSConnection(host, port, timeout=timeout, context=context)
+    elif scheme == "http":
+        return HTTPConnection(host, port, timeout=timeout)
+    else:
+        raise ValueError(f"unsupported scheme '{scheme}'")
 
 
 def _execute_http_step(
@@ -523,16 +545,17 @@ def _execute_http_step(
 ) -> tuple[bool, dict[str, Any]]:
     """Executes a real HTTP request against an approved test endpoint with bounded timeouts and evidence capture."""
     step_id = step.get("id", "http_step")
-    host, port, path = _resolve_http_endpoint(step)
+    scheme, host, port, path = _resolve_http_endpoint(step)
     method = step.get("method", "GET").upper()
     if step.get("type") == "http.post":
         method = "POST"
 
-    security.assert_loopback_safe(host, port)
-
     base_headers = {"Content-Type": "application/json"}
     if trace_id and root_span_id:
         base_headers["traceparent"] = f"00-{trace_id}-{root_span_id}-01"
+
+    step_config = step.get("config") or {}
+    allowed_statuses = set(step.get("allowed_statuses") or step_config.get("allowed_statuses") or [200, 201, 204])
 
     if inject_fault and fault_type == "http_timeout":
         fault_headers = dict(base_headers)
@@ -542,12 +565,14 @@ def _execute_http_step(
         client_timeout = 0.1  # 100ms bounded socket timeout
         t0 = time.monotonic()
         timed_out = False
-        conn = HTTPConnection(host, port, timeout=client_timeout)
+        conn = _create_http_connection(scheme, host, port, timeout=client_timeout)
+        with _active_lock:
+            _active_connections[run_id] = conn
         try:
             store.record_event(run_id, "HTTP_REQUEST_SENT", {
                 "step_id": step_id,
                 "method": method,
-                "url": f"http://{host}:{port}{path}",
+                "url": f"{scheme}://{host}:{port}{path}",
                 "headers": fault_headers,
                 "attempt": 1,
                 "injected_fault": "http_timeout",
@@ -561,22 +586,30 @@ def _execute_http_step(
             store.record_event(run_id, "HTTP_TIMEOUT_OBSERVED", {
                 "step_id": step_id,
                 "method": method,
-                "target": f"{host}:{port}{path}",
+                "target": f"{scheme}://{host}:{port}{path}",
                 "client_timeout_seconds": client_timeout,
                 "elapsed_seconds": t_elapsed,
                 "error": type(exc).__name__,
             })
         finally:
+            with _active_lock:
+                _active_connections.pop(run_id, None)
             conn.close()
 
         if timed_out:
             if implementation == "vulnerable":
                 store.record_event(run_id, "STEP_FAILED", {
                     "step_id": step_id,
-                    "error": f"HTTP request to http://{host}:{port}{path} timed out after {client_timeout}s",
+                    "error": f"HTTP request to {scheme}://{host}:{port}{path} timed out after {client_timeout}s",
                     "evidence": "HTTP_TIMEOUT_OBSERVED",
                 })
-                return False, {"step_id": step_id, "type": "http_result", "status": "timed_out"}
+                return False, {
+                    "step_id": step_id,
+                    "type": "http_result",
+                    "status": "timed_out",
+                    "fault_activated": True,
+                    "simulated": False,
+                }
             else:
                 # Resilient implementation recovers by issuing a retry with standard timeout
                 store.record_event(run_id, "STEP_RETRY", {
@@ -585,12 +618,14 @@ def _execute_http_step(
                     "recovered": True,
                     "reason": "http_timeout_recovered",
                 })
-                retry_conn = HTTPConnection(host, port, timeout=3.0)
+                retry_conn = _create_http_connection(scheme, host, port, timeout=3.0)
+                with _active_lock:
+                    _active_connections[run_id] = retry_conn
                 try:
                     store.record_event(run_id, "HTTP_REQUEST_SENT", {
                         "step_id": step_id,
                         "method": method,
-                        "url": f"http://{host}:{port}{path}",
+                        "url": f"{scheme}://{host}:{port}{path}",
                         "headers": base_headers,
                         "attempt": 2,
                     })
@@ -603,37 +638,88 @@ def _execute_http_step(
                         "attempt": 2,
                         "recovered": True,
                     })
+                    is_status_ok = retry_resp.status in allowed_statuses
                     store.record_event(run_id, "STEP_COMPLETED", {
                         "step_id": step_id,
-                        "status": "success",
+                        "status": "success" if is_status_ok else "unexpected_status",
+                        "http_status": retry_resp.status,
                         "recovered": True,
                     })
-                    return True, {"step_id": step_id, "type": "http_result", "status": retry_resp.status, "recovered": True}
+                    return is_status_ok, {
+                        "step_id": step_id,
+                        "type": "http_result",
+                        "status": retry_resp.status,
+                        "recovered": True,
+                        "fault_activated": True,
+                        "simulated": False,
+                    }
                 finally:
+                    with _active_lock:
+                        _active_connections.pop(run_id, None)
                     retry_conn.close()
 
     # Normal (non-faulted) HTTP step execution
-    conn = HTTPConnection(host, port, timeout=3.0)
+    conn = _create_http_connection(scheme, host, port, timeout=3.0)
+    with _active_lock:
+        _active_connections[run_id] = conn
     try:
         store.record_event(run_id, "HTTP_REQUEST_SENT", {
             "step_id": step_id,
             "method": method,
-            "url": f"http://{host}:{port}{path}",
+            "url": f"{scheme}://{host}:{port}{path}",
             "headers": base_headers,
         })
         conn.request(method, path, headers=base_headers)
         resp = conn.getresponse()
-        resp.read()
+
+        # Handle redirects safely if 3xx
+        if resp.status in {301, 302, 303, 307, 308}:
+            loc = resp.getheader("Location")
+            if loc:
+                current_url = f"{scheme}://{host}:{port}{path}"
+                target_url = security.validate_redirect(current_url, loc)
+                store.record_event(run_id, "HTTP_REDIRECT_FOLLOWED", {
+                    "step_id": step_id,
+                    "from_url": current_url,
+                    "to_url": target_url,
+                    "status": resp.status,
+                })
+                resp.read()
+                conn.close()
+                r_scheme, r_host, r_port, r_path = _resolve_http_endpoint({"url": target_url})
+                r_conn = _create_http_connection(r_scheme, r_host, r_port, timeout=3.0)
+                with _active_lock:
+                    _active_connections[run_id] = r_conn
+                try:
+                    r_conn.request(method, r_path, headers=base_headers)
+                    resp = r_conn.getresponse()
+                    resp.read()
+                finally:
+                    r_conn.close()
+            else:
+                resp.read()
+        else:
+            resp.read()
+
         store.record_event(run_id, "HTTP_RESPONSE_RECEIVED", {
             "step_id": step_id,
             "status": resp.status,
         })
+        is_status_ok = resp.status in allowed_statuses
         store.record_event(run_id, "STEP_COMPLETED", {
             "step_id": step_id,
-            "status": "success",
+            "status": "success" if is_status_ok else "unexpected_status",
+            "http_status": resp.status,
         })
-        return True, {"step_id": step_id, "type": "http_result", "status": resp.status}
+        return is_status_ok, {
+            "step_id": step_id,
+            "type": "http_result",
+            "status": resp.status,
+            "simulated": False,
+        }
     finally:
+        with _active_lock:
+            _active_connections.pop(run_id, None)
         conn.close()
 
 
@@ -647,16 +733,18 @@ def _execute_db_step(
     root_span_id: str,
 ) -> tuple[bool, dict[str, Any]]:
     step_id = step.get("id", "db_step")
-    store.record_event(run_id, "DB_OPERATION_EXECUTED", {
+    store.record_event(run_id, "DB_OPERATION_SIMULATED", {
         "step_id": step_id,
         "operation": step.get("operation", "write"),
         "table": step.get("table", "records"),
+        "simulated": True,
     })
     store.record_event(run_id, "STEP_COMPLETED", {
         "step_id": step_id,
         "status": "success",
+        "simulated": True,
     })
-    return True, {"step_id": step_id, "type": "db_result", "status": "success"}
+    return True, {"step_id": step_id, "type": "db_result", "status": "simulated", "simulated": True}
 
 
 def _execute_generic_step(
@@ -669,15 +757,17 @@ def _execute_generic_step(
     root_span_id: str,
 ) -> tuple[bool, dict[str, Any]]:
     step_id = step.get("id", "generic_step")
-    store.record_event(run_id, "GENERIC_OPERATION_EXECUTED", {
+    store.record_event(run_id, "GENERIC_OPERATION_SIMULATED", {
         "step_id": step_id,
         "name": step.get("name", step_id),
+        "simulated": True,
     })
     store.record_event(run_id, "STEP_COMPLETED", {
         "step_id": step_id,
         "status": "success",
+        "simulated": True,
     })
-    return True, {"step_id": step_id, "type": "generic_result", "status": "success"}
+    return True, {"step_id": step_id, "type": "generic_result", "status": "simulated", "simulated": True}
 
 
 step_registry = StepRunnerRegistry()
@@ -714,6 +804,7 @@ def _execute_generic_workflow(
     side_effects = []
     fault_injected = False
     fault_recovered = False
+    fault_activation_confirmed = False
     step_failures = 0
 
     if not workflow:
@@ -751,6 +842,8 @@ def _execute_generic_workflow(
             success, side_effect = handler(
                 run_id, step, True, fault_type, implementation, trace_id, root_span_id
             )
+            if side_effect.get("fault_activated"):
+                fault_activation_confirmed = True
             if success:
                 executed_steps.append(step_id)
                 fault_recovered = True
@@ -773,10 +866,10 @@ def _execute_generic_workflow(
     assertions = [
         {
             "name": "fault_activation_confirmed",
-            "status": "passed" if fault_injected else "failed",
-            "expected": f"fault '{fault_type}' activated at target step",
-            "observed": "confirmed" if fault_injected else "fault not activated",
-            "evidence": ["FAULT_INJECTED"] if fault_injected else ["NO_FAULT_INJECTED"],
+            "status": "passed" if fault_activation_confirmed else "failed",
+            "expected": f"fault '{fault_type}' activated and observed at target step",
+            "observed": "confirmed" if fault_activation_confirmed else "fault activation not observed",
+            "evidence": ["FAULT_INJECTED", "HTTP_TIMEOUT_OBSERVED"] if fault_activation_confirmed else ["NO_FAULT_CONFIRMED"],
         },
         {
             "name": primary_assertion,

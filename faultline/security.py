@@ -90,7 +90,12 @@ def is_loopback_allowed(target: str, port: int | None = None) -> bool:
             return False
         hostname = (parsed.hostname or "").lower()
         try:
-            parsed_port = parsed.port
+            if parsed.port is not None:
+                parsed_port = parsed.port
+            elif parsed.scheme.lower() == "http":
+                parsed_port = 80
+            elif parsed.scheme.lower() == "https":
+                parsed_port = 443
         except (ValueError, TypeError):
             # Raised by urlparse when port is invalid or out of range (e.g. 99999)
             return False
@@ -171,3 +176,11 @@ def assert_loopback_safe(target: str, port: int | None = None) -> None:
         raise PermissionError(
             f"Destination '{dest_repr}' is rejected. Faultline restricts all network targets to loopback (Spec §16)."
         )
+
+
+def validate_redirect(current_url: str, redirect_target: str) -> str:
+    """Validates that an HTTP redirect stays strictly within approved loopback boundaries."""
+    from urllib.parse import urljoin
+    target_url = urljoin(current_url, redirect_target)
+    assert_loopback_safe(target_url)
+    return target_url

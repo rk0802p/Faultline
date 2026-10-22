@@ -206,8 +206,10 @@ class FaultlineCliTests(unittest.TestCase):
                 {"id": "sc-1", "definition": {"fault": "payment_response_lost_after_commit"}}
             ]
         }
-        run_v_res = {"run": {"status": "completed", "verdict": "failed"}}
-        run_f_res = {"run": {"status": "completed", "verdict": "passed"}}
+        vuln_assertions = [{"name": "no_duplicate_charge", "status": "failed", "expected": "1", "observed": "2"}]
+        fixed_assertions = [{"name": "no_duplicate_charge", "status": "passed", "expected": "1", "observed": "1"}]
+        run_v_res = {"run": {"status": "completed", "verdict": "failed", "assertions": vuln_assertions}}
+        run_f_res = {"run": {"status": "completed", "verdict": "passed", "assertions": fixed_assertions}}
         api_responses = [
             scenarios_response,
             {"run_id": "r-v"},
@@ -239,9 +241,10 @@ class FaultlineCliTests(unittest.TestCase):
             {"run_id": "r-v"},
             {"run_id": "r-f"},
         ]
+        vuln_assertions = [{"name": "no_duplicate_charge", "status": "failed", "expected": "1", "observed": "2"}]
         # Vulnerable run catches defect, but fixed run times out (poll_run returns None)
         poll_responses = [
-            {"status": "completed", "verdict": "failed"},
+            {"status": "completed", "verdict": "failed", "assertions": vuln_assertions},
             None,
         ]
 
@@ -253,7 +256,7 @@ class FaultlineCliTests(unittest.TestCase):
                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             code = cli.main()
         self.assertEqual(code, 1)
-        self.assertIn("False Positive Rate:     100.0% (1/1)", stdout.getvalue())
+        self.assertIn("Fixed Verification Failure Rate: 100.0% (1/1)", stdout.getvalue())
         self.assertIn("Benchmark FAILED", stdout.getvalue())
 
     def test_cli_benchmark_measure_determinism_flag(self) -> None:

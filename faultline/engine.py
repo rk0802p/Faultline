@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from . import adapters, security, store
 from .adapters import provider, checkout_service
+from .schema import validate_scenario
 
 
 logger = logging.getLogger("faultline.runner")
@@ -669,9 +670,18 @@ def branch_run(
 
     overrides = overrides or {}
     new_impl = overrides.get("implementation", parent["implementation"])
+    if new_impl not in {"vulnerable", "fixed"}:
+        raise ValueError(f"invalid implementation '{new_impl}', must be 'vulnerable' or 'fixed'")
+
     scenario = dict(parent["scenario"])
-    for k, v in overrides.get("scenario_overrides", {}).items():
-        scenario[k] = v
+    scenario_overrides = overrides.get("scenario_overrides")
+    if scenario_overrides is not None:
+        if not isinstance(scenario_overrides, dict):
+            raise ValueError("scenario_overrides must be a dictionary")
+        for k, v in scenario_overrides.items():
+            scenario[k] = v
+
+    validate_scenario(scenario)
 
     snaps = store.get_snapshots(parent_run_id)
     if snaps:
@@ -693,6 +703,7 @@ def branch_run(
         implementation=new_impl,
         parent_run_id=parent_run_id,
         forked_from_snapshot_id=snapshot_sequence,
+        definition_override=scenario,
     )
     store.record_event(branch_run_id, "RUN_BRANCHED_FROM_CHECKPOINT", {
         "parent_run_id": parent_run_id,

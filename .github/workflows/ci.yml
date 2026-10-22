@@ -40,6 +40,15 @@ jobs:
           python -m zipfile -l dist/*.whl | grep "scenarios/"
           python -m zipfile -l dist/*.whl | grep "web/"
 
+      - name: Verify installed-wheel smoke test outside repository checkout
+        run: |
+          python -m venv /tmp/smoke-venv
+          /tmp/smoke-venv/bin/python -m pip install dist/*.whl
+          mkdir /tmp/smoke-run
+          cd /tmp/smoke-run
+          /tmp/smoke-venv/bin/python -m faultline.cli --help
+          /tmp/smoke-venv/bin/python -c "from faultline import store; store.initialize(); scens = store.list_scenarios(); assert len(scens) >= 3, f'Expected >= 3 seeded scenarios, got {len(scens)}'"
+
   integration-resilience-suite:
     name: Critical Integration Suite & Benchmarks
     runs-on: ubuntu-latest

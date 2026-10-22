@@ -601,6 +601,21 @@ class FaultlinePlatformTests(unittest.TestCase):
         sc_ids = [s["id"] for s in scenarios_data["scenarios"]]
         self.assertIn(inst_payload["scenario_id"], sc_ids)
 
+        # 5. Multi-project template instantiation
+        store.create_project("custom-proj", "Custom Project", "Testing multi-project support")
+        custom_sc_id = f"inst-custom-{uuid4().hex[:6]}"
+        inst_custom_payload = {
+            "scenario_id": custom_sc_id,
+            "project_id": "custom-proj",
+            "parameters": {"amount_cents": 5000},
+        }
+        status, custom_res = self.request("POST", "/api/templates/payment-response-lost-tpl/instantiate", inst_custom_payload)
+        self.assertEqual(status, 201)
+        self.assertEqual(custom_res["instance"]["project_id"], "custom-proj")
+        custom_scen = store.get_scenario(custom_sc_id)
+        self.assertIsNotNone(custom_scen)
+        self.assertEqual(custom_scen["project_id"], "custom-proj")
+
     def test_openapi_workflow_import_endpoint(self) -> None:
         openapi_spec = {
             "openapi": "3.0.0",
@@ -731,10 +746,26 @@ class FaultlinePlatformTests(unittest.TestCase):
         parent_id = parent_run["id"]
         self.assertEqual(parent_run["verdict"], "failed")
 
-        # Branch from checkpoint snapshot with 'fixed' override
+        # 1. Invalid implementation rejected with 400
+        status, bad_impl = self.request("POST", f"/api/runs/{parent_id}/branch", {
+            "overrides": {"implementation": "invalid_mode"}
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("invalid implementation", bad_impl.get("error", "").lower())
+
+        # 2. Invalid scenario override rejected with 400
+        status, bad_override = self.request("POST", f"/api/runs/{parent_id}/branch", {
+            "overrides": {"scenario_overrides": {"retries": 99}}
+        })
+        self.assertEqual(status, 400)
+
+        # 3. Valid branch from checkpoint snapshot with 'fixed' override and scenario override
         branch_payload = {
             "snapshot_sequence": 1,
-            "overrides": {"implementation": "fixed"},
+            "overrides": {
+                "implementation": "fixed",
+                "scenario_overrides": {"retries": 2},
+            },
         }
         status, branch_data = self.request("POST", f"/api/runs/{parent_id}/branch", branch_payload)
         self.assertEqual(status, 201)
@@ -742,10 +773,26 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertEqual(branched["parent_run_id"], parent_id)
         self.assertEqual(branched["forked_from_snapshot_id"], 1)
         self.assertEqual(branched["implementation"], "fixed")
+        self.assertEqual(branched["scenario"]["retries"], 2)
 
-        # Await completion of branched run
+        # 4. Reproduction bundle captures branch metadata and effective overrides
+        status, repro_data = self.request("GET", f"/api/runs/{branched['id']}/reproduce")
+        self.assertEqual(status, 200)
+        bundle = repro_data
+        self.assertIn("branch", bundle)
+        self.assertEqual(bundle["branch"]["parent_run_id"], parent_id)
+        self.assertEqual(bundle["branch"]["forked_from_snapshot_id"], 1)
+        self.assertEqual(bundle["branch"]["effective_scenario"]["retries"], 2)
+
+        # 5. Await completion of branched run
         final_branched = self.wait_for_run(branched["id"])
         self.assertEqual(final_branched["verdict"], "passed")
+        self.assertEqual(final_branched["scenario"]["retries"], 2)
+
+        # 6. Verify parent run remains unchanged
+        status, parent_check = self.request("GET", f"/api/runs/{parent_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(parent_check["run"]["verdict"], "failed")
 
     def test_suite_runs_lifecycle_and_history(self) -> None:
         # 1. Execute suite synchronously
@@ -1053,11 +1100,45 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertFalse(security.is_loopback_allowed("http://169.254.169.254"))
         self.assertFalse(security.is_loopback_allowed("http://8.8.8.8"))
 
-        # 6. assert_loopback_safe raises PermissionError
+        # 6. Port boundary and malformed port tests
+        self.assertFalse(security.is_loopback_allowed("http://localhost:99999"))
+        self.assertFalse(security.is_loopback_allowed("localhost:99999"))
+        self.assertFalse(security.is_loopback_allowed("http://127.0.0.1:0"))
+        self.assertFalse(security.is_loopback_allowed("http://127.0.0.1:65536"))
+        self.assertFalse(security.is_loopback_allowed("[::1]:99999"))
+        self.assertFalse(security.is_loopback_allowed("http://[::1]:99999"))
+
+        # 7. Container service port allowlists
+        with patch.object(security, "CONTAINER_ALLOWED_HOSTS", {"checkout-service", "payment-provider", "toxiproxy", "redis"}):
+            self.assertTrue(security.is_loopback_allowed("http://checkout-service:8766/v1/checkout"))
+            self.assertFalse(security.is_loopback_allowed("http://checkout-service:9000/v1/checkout"))
+            self.assertTrue(security.is_loopback_allowed("payment-provider:8767"))
+            self.assertFalse(security.is_loopback_allowed("payment-provider:8080"))
+            self.assertTrue(security.is_loopback_allowed("http://toxiproxy:8474"))
+            self.assertFalse(security.is_loopback_allowed("http://toxiproxy:22"))
+            self.assertTrue(security.is_loopback_allowed("redis:6379"))
+            self.assertFalse(security.is_loopback_allowed("redis:80"))
+
+        # 8. assert_loopback_safe raises PermissionError
         with self.assertRaises(PermissionError):
             security.assert_loopback_safe("http://evil.com")
         with self.assertRaises(PermissionError):
             security.assert_loopback_safe("0.0.0.0")
+
+    def test_request_transfer_encoding_chunked_rejected_with_501(self) -> None:
+        """Verify that requests with unsupported Transfer-Encoding are rejected with HTTP 501."""
+        conn = http.client.HTTPConnection("127.0.0.1", self.api_port)
+        conn.putrequest("POST", "/api/runs")
+        conn.putheader("Transfer-Encoding", "chunked")
+        conn.putheader("Content-Type", "application/json")
+        conn.endheaders()
+        body = b"0\r\n\r\n"
+        conn.send(body)
+        resp = conn.getresponse()
+        self.assertEqual(resp.status, 501)
+        resp_data = json.loads(resp.read().decode("utf-8"))
+        self.assertIn("unsupported Transfer-Encoding", resp_data.get("error", ""))
+        conn.close()
 
     def test_security_redaction_nested_structures(self) -> None:
         """Verify recursive sensitive data redaction on nested dicts, lists, and strings."""

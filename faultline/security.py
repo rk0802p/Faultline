@@ -5,6 +5,7 @@ Implements Spec Section 16 & Section 6.1:
 - Loopback destination allowlist to strictly prevent unintended external network requests.
 """
 
+import ipaddress
 import os
 import re
 from typing import Any
@@ -31,6 +32,14 @@ CONTAINER_ALLOWED_HOSTS = {
         "checkout-service,payment-provider,toxiproxy,redis"
     ).split(",")
     if h.strip()
+}
+
+# Per-service port restrictions for configured internal containers
+CONTAINER_SERVICE_PORTS: dict[str, set[int]] = {
+    "checkout-service": {8766},
+    "payment-provider": {8767},
+    "toxiproxy": {8474, 8475, 8476, 8477, 8478, 8479, 8480},
+    "redis": {6379},
 }
 
 
@@ -63,6 +72,8 @@ def is_loopback_allowed(target: str) -> bool:
     target = target.strip()
     if not target:
         return False
+
+    port: int | None = None
     if "://" in target:
         try:
             parsed = urlparse(target)
@@ -75,6 +86,11 @@ def is_loopback_allowed(target: str) -> bool:
         if parsed.username or parsed.password:
             return False
         hostname = (parsed.hostname or "").lower()
+        try:
+            port = parsed.port
+        except (ValueError, TypeError):
+            # Raised by urlparse when port is invalid or out of range (e.g. 99999)
+            return False
     else:
         # Check if IPv6 literal like [::1]:8000 or [::1]
         if target.startswith("["):
@@ -83,20 +99,52 @@ def is_loopback_allowed(target: str) -> bool:
                 return False
             hostname = target[1:bracket_end].lower()
             remainder = target[bracket_end + 1:]
-            if remainder and not remainder.startswith(":"):
-                return False
-        else:
-            # IPv4 or hostname like 127.0.0.1:8000 or localhost
-            # If target has multiple colons without brackets (e.g. raw ::1), handle it
-            if target.count(":") > 1:
-                hostname = target.lower()
+            if remainder:
+                if not remainder.startswith(":"):
+                    return False
+                try:
+                    port = int(remainder[1:])
+                except ValueError:
+                    return False
             else:
-                hostname = target.split(":")[0].strip().lower()
+                port = None
+        else:
+            if target.count(":") == 1:
+                parts = target.split(":")
+                hostname = parts[0].strip().lower()
+                try:
+                    port = int(parts[1])
+                except ValueError:
+                    return False
+            elif target.count(":") > 1:
+                # Raw IPv6 literal without brackets
+                hostname = target.strip().lower()
+                port = None
+            else:
+                hostname = target.strip().lower()
+                port = None
+
+    # Validate port bounds if a port was specified
+    if port is not None and not (1 <= port <= 65535):
+        return False
 
     if not hostname or hostname == "0.0.0.0":
         return False
 
-    return (hostname in ALLOWED_LOOPBACK_HOSTS) or (hostname in CONTAINER_ALLOWED_HOSTS)
+    # Check IP literals with ipaddress module to enforce true loopback
+    try:
+        ip = ipaddress.ip_address(hostname)
+        return ip.is_loopback
+    except ValueError:
+        # Not an IP address literal, validate hostname
+        if hostname == "localhost":
+            return True
+        if hostname in CONTAINER_ALLOWED_HOSTS:
+            if hostname in CONTAINER_SERVICE_PORTS and port is not None:
+                if port not in CONTAINER_SERVICE_PORTS[hostname]:
+                    return False
+            return True
+        return False
 
 
 def assert_loopback_safe(target: str) -> None:

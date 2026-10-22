@@ -125,6 +125,13 @@ def poll_run(base: str, run_id: str, timeout: float, debug: bool = False) -> dic
     return None
 
 
+BENCHMARK_SCENARIOS = (
+    "payment-response-lost",
+    "duplicate-payment-webhook",
+    "partial-persistence-failure",
+)
+
+
 def normalize_evaluation_assertions(assertions: list[dict]) -> list[tuple[str, str, str, str]]:
     normalized = []
     for a in assertions:
@@ -141,7 +148,9 @@ def run_benchmark(base: str, timeout: float, debug: bool, measure_determinism: b
     print("=" * 60)
     print("Faultline Integration Reliability Benchmark (Spec §17.4)")
     print("=" * 60)
-    scenarios_data = api_json(f"{base}/api/scenarios")["scenarios"]
+    all_scenarios = api_json(f"{base}/api/scenarios")["scenarios"]
+    seeded = [s for s in all_scenarios if s.get("id") in BENCHMARK_SCENARIOS]
+    scenarios_data = seeded if seeded else all_scenarios
     results = []
     defects_caught = 0
     total_defects = len(scenarios_data)
@@ -162,17 +171,21 @@ def run_benchmark(base: str, timeout: float, debug: bool, measure_determinism: b
         res_v = poll_run(base, sub_v["run_id"], timeout, debug)
 
         assertions_v = res_v.get("assertions", []) if res_v else []
-        failed_assertions = {a.get("name") for a in assertions_v if a.get("status") == "failed"}
-        vuln_completed = bool(res_v and res_v.get("status") == "completed")
-
-        # Specific defect verification: must fail with the expected primary assertion
-        if vuln_completed and res_v.get("verdict") == "failed":
-            if not expected_primary or not assertions_v or expected_primary in failed_assertions:
-                vuln_detected = True
-            else:
-                vuln_detected = False
-        else:
-            vuln_detected = False
+        failed_assertions = {
+            assertion.get("name")
+            for assertion in assertions_v
+            if assertion.get("status") == "failed"
+        }
+        vuln_completed = bool(
+            res_v is not None
+            and res_v.get("status") == "completed"
+        )
+        vuln_detected = bool(
+            expected_primary
+            and vuln_completed
+            and res_v.get("verdict") == "failed"
+            and expected_primary in failed_assertions
+        )
 
         if vuln_detected:
             defects_caught += 1
@@ -226,8 +239,8 @@ def run_benchmark(base: str, timeout: float, debug: bool, measure_determinism: b
     scenarios_fully_verified = sum(1 for r in results if r["defect_caught"] and r["fix_verified"])
 
     print(f"Defect Detection Rate:   {detection_rate:.1f}% ({defects_caught}/{total_defects} caught)")
-    print(f"False Positive Rate:     {fixed_fail_rate:.1f}% ({fixed_verification_failures}/{total_defects})")
-    print(f"Fixed Verification Rate: {fixed_pass_rate:.1f}% ({fixes_verified}/{total_defects} passed)")
+    print(f"Fixed Verification Pass Rate:    {fixed_pass_rate:.1f}% ({fixes_verified}/{total_defects} passed)")
+    print(f"Fixed Verification Failure Rate: {fixed_fail_rate:.1f}% ({fixed_verification_failures}/{total_defects})")
     if measure_determinism and determinism_total > 0:
         det_rate = (determinism_matches / determinism_total) * 100
         print(f"Evaluator Determinism:   {det_rate:.1f}% ({determinism_matches}/{determinism_total} repeated runs matched)")

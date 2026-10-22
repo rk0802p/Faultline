@@ -43,7 +43,7 @@
 
 ### Architecture & Infrastructure Note
 - **Core Engine:** Built purely with Python 3.10+ standard library and SQLite WAL mode. Background tasks execute asynchronously via in-process threads, requiring zero third-party dependencies.
-- **Sidecar Infrastructure (Docker Compose):** Redis and Shopify Toxiproxy containers are provided for local multi-container demonstration and network proxy exploration. The core scenarios run directly against deterministic application-level adapters to ensure 100% reproducible test outcomes without external daemon dependencies.
+- **Sidecar Infrastructure (Docker Compose):** Redis and Shopify Toxiproxy containers are provided as optional demonstration infrastructure. The core engine executes runs asynchronously via in-process threads and deterministic application-level adapters to guarantee reproducible outcomes without requiring external daemons.
 
 ---
 
@@ -52,7 +52,7 @@
 - **Controlled Failure Injection (Spec §7):** Simulates lost responses after commitment, duplicated delivery of payment webhooks, and partial persistence failures after payment captures.
 - **Deterministic Invariant Verification (Spec §9):** Evaluates multi-dimensional domain assertions (`no_duplicate_charge`, `idempotent_webhook_processing`, `charge_compensated_on_failure`) directly against recorded evidence trails.
 - **Execution Timeline & Point-in-Time State Reconstruction (Spec §6.3 & §15):** Step-by-step playback, event scrubbing, and incremental snapshots (`state_snapshots`) allowing zero-side-effect state inspection.
-- **Checkpoint Branching (Spec §4.55 & §25.2):** Fork execution from any historical state snapshot to explore alternative retry configurations or remediation logic while keeping the parent run immutable.
+- **Checkpoint Branching (Spec §4.55 & §25.2):** Create a linked branch run with recorded checkpoint snapshot context and validated scenario/implementation overrides to explore remediation logic while preserving parent run immutability.
 - **OpenTelemetry Distributed Tracing & W3C Trace Context (Spec §11.5 & §14):** End-to-end span hierarchy (scenario root, HTTP client, fault interceptor, invariant evaluator, environment cleanup) with outgoing `traceparent` headers and OTLP-compliant JSON endpoints (`/api/runs/:runId/telemetry` and `/api/runs/:runId/traces`).
 - **Regression Suites & Baseline Diffing (Spec §6.10 & §14):** Group scenarios into regression suites (`test_suites`), execute synchronous or background suite runs, designate baseline runs, and detect regression states (`stable_pass`, `regression_resolved`, `regression_introduced`, `stable_failure`).
 - **Automated Workflow Discovery (Spec §6.7):** Import OpenAPI 3.0 / Swagger specs to automatically discover endpoints, map dependency topologies, and generate integration test scenarios.
@@ -100,8 +100,8 @@ This starts:
 - `control-plane`: API, Web Dashboard, and Runner bound to `127.0.0.1:8000`
 - `checkout-service`: Standalone checkout microservice bound to `127.0.0.1:8766`
 - `payment-provider`: Standalone payment provider microservice bound to `127.0.0.1:8767`
-- `toxiproxy`: Shopify Toxiproxy network proxy bound to `127.0.0.1:8474`
-- `redis`: Redis cache & queue container bound to `127.0.0.1:6379`
+- `toxiproxy`: Optional Shopify Toxiproxy network proxy bound to `127.0.0.1:8474`
+- `redis`: Optional Redis demonstration container bound to `127.0.0.1:6379`
 
 *Note: All container ports are explicitly bound to `127.0.0.1` to prevent unintentional exposure on external host interfaces.*
 
@@ -136,7 +136,7 @@ python -m faultline.cli run --suite critical-integrations --implementation fixed
 python -m faultline.cli benchmark
 ```
 
-**Benchmark Output:**
+**Illustrative Benchmark Output:**
 ```text
 ============================================================
 Faultline Integration Reliability Benchmark (Spec §17.4)
@@ -153,11 +153,11 @@ Benchmark Results across 3 Integration Scenarios:
       Vulnerable run: PASS (defect caught)
       Fixed run:      PASS (verified)
 ------------------------------------------------------------
-Defect Detection Rate:   100.0% (3/3 caught)
-False Positive Rate:     0.0% (0/3)
-Fixed Verification Rate: 100.0% (3/3 passed)
-Evaluator Determinism:   NOT MEASURED (use --measure-determinism)
-Scenarios Verified:      3/3 consistent outcomes
+Defect Detection Rate:           100.0% (3/3 caught)
+Fixed Verification Pass Rate:    100.0% (3/3 passed)
+Fixed Verification Failure Rate: 0.0% (0/3)
+Evaluator Determinism:           NOT MEASURED (use --measure-determinism)
+Scenarios Verified:              3/3 consistent outcomes
 ============================================================
 Benchmark PASSED: All seeded integration defects detected and verified.
 ```
@@ -257,7 +257,7 @@ A runnable reference demo is available at [`examples/checkout_demo.py`](examples
 | `GET` | `/api/runs` | List historical scenario runs |
 | `GET` | `/api/runs/:runId` | Retrieve run details, assertions, and summary |
 | `POST` | `/api/runs/:runId/cancel` | Cancel an active or queued run |
-| `POST` | `/api/runs/:runId/branch` | Fork a new run from a specific state snapshot |
+| `POST` | `/api/runs/:runId/branch` | Create a linked branch run with checkpoint snapshot context and validated overrides |
 | `POST` | `/api/runs/:runId/baseline` | Designate a run as regression baseline |
 | `GET` | `/api/runs/:runId/events` | List ordered execution events for a run |
 | `GET` | `/api/runs/:runId/assertions` | List invariant evaluation results |

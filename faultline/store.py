@@ -17,7 +17,8 @@ from .schema import SUPPORTED_FAULTS, validate_scenario, validate_template_param
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = Path(os.environ.get("FAULTLINE_DATA_DIR", ROOT / "data"))
+DEFAULT_DATA_DIR = ROOT / "data" if (ROOT / "scenarios").is_dir() else Path.cwd() / "data"
+DATA_DIR = Path(os.environ.get("FAULTLINE_DATA_DIR", DEFAULT_DATA_DIR))
 DB_PATH = DATA_DIR / "faultline.sqlite3"
 SYSTEM_START_TIME = time.time()
 
@@ -213,6 +214,8 @@ def initialize() -> None:
             db.execute("ALTER TABLE runs ADD COLUMN trace_id TEXT")
         if "is_baseline" not in run_columns:
             db.execute("ALTER TABLE runs ADD COLUMN is_baseline INTEGER NOT NULL DEFAULT 0")
+        if "definition_override_json" not in run_columns:
+            db.execute("ALTER TABLE runs ADD COLUMN definition_override_json TEXT")
         db.execute(
             "INSERT OR IGNORE INTO projects VALUES (?, ?, ?, ?)",
             ("faultline-demo", "Checkout reliability lab", "Local, isolated checkout integration environment.", now()),
@@ -369,6 +372,20 @@ def list_projects() -> list[dict[str, Any]]:
         return [dict(row) for row in db.execute("SELECT * FROM projects ORDER BY name")]
 
 
+def create_project(project_id: str, name: str, description: str = "") -> None:
+    with database() as db:
+        db.execute(
+            "INSERT INTO projects (id, name, description, created_at) VALUES (?, ?, ?, ?)",
+            (project_id, name, description, now()),
+        )
+
+
+def get_project(project_id: str) -> dict[str, Any] | None:
+    with database() as db:
+        row = db.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
+        return dict(row) if row else None
+
+
 def list_scenarios() -> list[dict[str, Any]]:
     with database() as db:
         rows = db.execute("SELECT * FROM scenarios ORDER BY name").fetchall()
@@ -421,16 +438,18 @@ def create_run(
     parent_run_id: str | None = None,
     forked_from_snapshot_id: int | None = None,
     trace_id: str | None = None,
+    definition_override: dict[str, Any] | None = None,
 ) -> None:
     if not trace_id:
         trace_id = uuid4().hex
+    override_json = json.dumps(definition_override) if definition_override is not None else None
     with database() as db:
         db.execute(
             """INSERT INTO runs(
                 id, scenario_id, scenario_version, implementation, status, started_at,
-                parent_run_id, forked_from_snapshot_id, trace_id, is_baseline
-            ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, 0)""",
-            (run_id, scenario_id, scenario_version, implementation, now(), parent_run_id, forked_from_snapshot_id, trace_id),
+                parent_run_id, forked_from_snapshot_id, trace_id, is_baseline, definition_override_json
+            ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, 0, ?)""",
+            (run_id, scenario_id, scenario_version, implementation, now(), parent_run_id, forked_from_snapshot_id, trace_id, override_json),
         )
 
 
@@ -525,7 +544,14 @@ def get_run(run_id: str) -> dict[str, Any] | None:
         ).fetchall()
         result = dict(row)
         result["summary"] = json.loads(result.pop("summary_json"))
-        result["scenario"] = json.loads(scenario["definition_json"])
+        override_raw = result.pop("definition_override_json", None)
+        if override_raw:
+            try:
+                result["scenario"] = json.loads(override_raw)
+            except Exception:
+                result["scenario"] = json.loads(scenario["definition_json"]) if scenario else {}
+        else:
+            result["scenario"] = json.loads(scenario["definition_json"]) if scenario else {}
         cleanup_raw = result.pop("cleanup_json", None)
         cleanup_data = {}
         if cleanup_raw:
@@ -592,6 +618,7 @@ def instantiate_template(
     scenario_id: str,
     name: str | None = None,
     parameters: dict[str, Any] | None = None,
+    project_id: str = "faultline-demo",
 ) -> dict[str, Any]:
     tpl = get_template(template_id)
     if not tpl:
@@ -605,10 +632,11 @@ def instantiate_template(
         for k, v in parameters.items():
             definition[k] = v
     validate_scenario(definition)
-    create_scenario(scenario_id, "faultline-demo", definition)
+    create_scenario(scenario_id, project_id, definition)
     return {
         "scenario_id": scenario_id,
         "template_id": template_id,
+        "project_id": project_id,
         "definition": definition,
         "expected_invariants": tpl["expected_invariants"],
         "cleanup_strategy": tpl["cleanup_strategy"],
@@ -627,6 +655,12 @@ def get_reproduction_bundle(run_id: str) -> dict[str, Any] | None:
             "note": "Replays the recorded scenario against the local deterministic test services.",
         },
     }
+    if run.get("parent_run_id"):
+        bundle["branch"] = {
+            "parent_run_id": run["parent_run_id"],
+            "forked_from_snapshot_id": run.get("forked_from_snapshot_id"),
+            "effective_scenario": run.get("scenario"),
+        }
     return security.redact_sensitive(bundle)
 
 

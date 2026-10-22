@@ -33,6 +33,11 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def read_json_payload(self, max_bytes: int = 16_384) -> dict[str, Any] | None:
+        te = self.headers.get("Transfer-Encoding")
+        if te and te.strip().lower() != "identity":
+            self.respond(501, {"error": f"unsupported Transfer-Encoding: {te}"})
+            return None
+
         raw_len = self.headers.get("Content-Length", "0")
         try:
             length = int(raw_len)
@@ -262,7 +267,8 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                     branched_run = engine.branch_run(run_id, snapshot_seq, overrides)
                     self.respond(201, {"run": branched_run})
                 except ValueError as exc:
-                    self.respond(404, {"error": str(exc)})
+                    code = 404 if "not found" in str(exc).lower() else 400
+                    self.respond(code, {"error": str(exc)})
                 return
             baseline_match = re.fullmatch(r"/api/runs/([^/]+)/baseline", path)
             if baseline_match:
@@ -357,8 +363,9 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 scenario_id = payload.get("scenario_id") or f"scenario-{uuid4().hex[:6]}"
                 name = payload.get("name")
                 parameters = payload.get("parameters")
-                instance = store.instantiate_template(template_id, scenario_id, name, parameters)
-                store.record_audit_event("faultline-demo", "developer", "TEMPLATE_INSTANTIATED", "scenario", scenario_id, {"template_id": template_id})
+                project_id = payload.get("project_id", "faultline-demo")
+                instance = store.instantiate_template(template_id, scenario_id, name, parameters, project_id=project_id)
+                store.record_audit_event(project_id, "developer", "TEMPLATE_INSTANTIATED", "scenario", scenario_id, {"template_id": template_id})
                 self.respond(201, {"instance": instance})
                 return
             if path == "/api/scenarios/import-incident":

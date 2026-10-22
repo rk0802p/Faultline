@@ -2,12 +2,21 @@
  * Faultline — A laboratory for software failures
  * Client Application Logic
  * Raycast-style Command Palette + PostHog-inspired technical personality
- * Scenario-driven, generic, and decoupled from hardcoded workflows.
+ * Scenario-driven, generic, and decoupled from demo-specific workflows.
  */
 
-// Global selector helpers
+// Global DOM selector helpers
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+
+// Strict API Client Resolution: require window.api from api.js
+const api = (typeof window !== "undefined" && window.api)
+  ? window.api
+  : (typeof globalThis !== "undefined" && globalThis.api ? globalThis.api : null);
+
+if (!api) {
+  console.error("Faultline initialization error: Centralized API client (api.js) was not found.");
+}
 
 // Application State
 const state = {
@@ -16,6 +25,9 @@ const state = {
   scenarios: [],
   scenariosLoading: false,
   scenariosError: null,
+  suites: [],
+  supportedFaults: {},
+  workflowSteps: [],
   runs: [],
   selectedRunId: null,
   currentRun: null,
@@ -36,82 +48,6 @@ const state = {
     selectedIndex: 0,
     filteredItems: [],
   },
-};
-
-// =========================================================
-// API CLIENT RESOLUTION
-// =========================================================
-// Resolves the centralized API client defined in api.js,
-// with safe fallback for any execution environment.
-const apiClient = (typeof window !== "undefined" && window.api)
-  ? window.api
-  : (typeof api !== "undefined" ? api : null);
-
-/**
- * Fallback request helper in case api.js is not loaded
- */
-async function fallbackRequest(path, options = {}) {
-  if (apiClient && typeof apiClient.request === "function") {
-    return apiClient.request(path, options);
-  }
-  const headers = {
-    "Content-Type": "application/json",
-    ...(options.headers || {}),
-  };
-  let body = options.body;
-  if (body !== undefined && typeof body === "object" && !(body instanceof FormData)) {
-    body = JSON.stringify(body);
-  }
-  const response = await fetch(path, { ...options, headers, body });
-  if (response.status === 204) return null;
-  const text = await response.text();
-  let parsed;
-  try {
-    parsed = text ? JSON.parse(text) : {};
-  } catch {
-    parsed = { raw: text };
-  }
-  if (!response.ok) {
-    const message = parsed.error || `HTTP ${response.status} ${response.statusText}`;
-    throw new Error(message);
-  }
-  return parsed;
-}
-
-// Proxy object guaranteeing all API operations route through centralized contracts
-const apiService = {
-  getScenarios: () => (apiClient ? apiClient.getScenarios() : fallbackRequest("/api/scenarios")),
-  getScenario: (id) => (apiClient ? apiClient.getScenario(id) : fallbackRequest(`/api/scenarios/${encodeURIComponent(id)}`)),
-  createScenario: (def) => (apiClient ? apiClient.createScenario(def) : fallbackRequest("/api/scenarios", { method: "POST", body: { definition: def } })),
-  saveScenarioVersion: (id, def) => (apiClient ? apiClient.saveScenarioVersion(id, def) : fallbackRequest(`/api/scenarios/${encodeURIComponent(id)}/versions`, { method: "POST", body: { definition: def } })),
-  validateScenario: (def) => (apiClient ? apiClient.validateScenario(def) : fallbackRequest("/api/scenarios/validate", { method: "POST", body: { definition: def } })),
-  generateFromGaps: (pId) => (apiClient ? apiClient.generateFromGaps(pId) : fallbackRequest("/api/scenarios/generate-from-gaps", { method: "POST", body: { project_id: pId } })),
-
-  getRuns: () => (apiClient ? apiClient.getRuns() : fallbackRequest("/api/runs")),
-  getRun: (id) => (apiClient ? apiClient.getRun(id) : fallbackRequest(`/api/runs/${encodeURIComponent(id)}`)),
-  launchRun: (scId, impl) => (apiClient ? apiClient.launchRun(scId, impl) : fallbackRequest("/api/runs", { method: "POST", body: { scenario_id: scId, implementation: impl } })),
-  cancelRun: (id) => (apiClient ? apiClient.cancelRun(id) : fallbackRequest(`/api/runs/${encodeURIComponent(id)}/cancel`, { method: "POST", body: {} })),
-  branchRun: (id, overrides) => (apiClient ? apiClient.branchRun(id, overrides) : fallbackRequest(`/api/runs/${encodeURIComponent(id)}/branch`, { method: "POST", body: { overrides } })),
-  setBaseline: (id) => (apiClient ? apiClient.setBaseline(id) : fallbackRequest(`/api/runs/${encodeURIComponent(id)}/baseline`, { method: "POST" })),
-  diffRuns: (idA, idB) => (apiClient ? apiClient.diffRuns(idA, idB) : fallbackRequest(`/api/runs/${encodeURIComponent(idA)}/diff/${encodeURIComponent(idB)}`)),
-  getTelemetry: (id) => (apiClient ? apiClient.getTelemetry(id) : fallbackRequest(`/api/runs/${encodeURIComponent(id)}/telemetry`)),
-
-  getAnnotations: (id) => (apiClient ? apiClient.getAnnotations(id) : fallbackRequest(`/api/runs/${encodeURIComponent(id)}/annotations`)),
-  addAnnotation: (id, author, comment) => (apiClient ? apiClient.addAnnotation(id, author, comment) : fallbackRequest(`/api/runs/${encodeURIComponent(id)}/annotations`, { method: "POST", body: { author, comment } })),
-  getTasks: (id) => (apiClient ? apiClient.getTasks(id) : fallbackRequest(`/api/runs/${encodeURIComponent(id)}/tasks`)),
-  addTask: (id, title, prio, assignee) => (apiClient ? apiClient.addTask(id, title, prio, assignee) : fallbackRequest(`/api/runs/${encodeURIComponent(id)}/tasks`, { method: "POST", body: { title, priority: prio, assignee } })),
-  updateTask: (tId, status) => (apiClient ? apiClient.updateTask(tId, status) : fallbackRequest(`/api/tasks/${encodeURIComponent(tId)}`, { method: "PATCH", body: { status } })),
-
-  getSuite: (sId) => (apiClient ? apiClient.getSuite(sId) : fallbackRequest(`/api/suites/${encodeURIComponent(sId)}`)),
-  getTemplates: () => (apiClient ? apiClient.getTemplates() : fallbackRequest("/api/templates")),
-  instantiateTemplate: (tId, scId) => (apiClient ? apiClient.instantiateTemplate(tId, scId) : fallbackRequest(`/api/templates/${encodeURIComponent(tId)}/instantiate`, { method: "POST", body: { scenario_id: scId } })),
-
-  getCoverage: () => (apiClient ? apiClient.getCoverage() : fallbackRequest("/api/coverage")),
-  getMetrics: () => (apiClient ? apiClient.getMetrics() : fallbackRequest("/api/metrics")),
-  getProjects: () => (apiClient ? apiClient.getProjects() : fallbackRequest("/api/projects")),
-  getAuditEvents: (pId) => (apiClient ? apiClient.getAuditEvents(pId) : fallbackRequest(`/api/projects/${encodeURIComponent(pId)}/audit-events`)),
-  pruneRuns: (pId, days, keep, dry) => (apiClient ? apiClient.pruneRuns(pId, days, keep, dry) : fallbackRequest(`/api/projects/${encodeURIComponent(pId)}/prune`, { method: "POST", body: { max_age_days: days, keep_baselines: keep, dry_run: dry } })),
-  importOpenApi: (spec) => (apiClient ? apiClient.importOpenApi(spec) : fallbackRequest("/api/workflows/import-openapi", { method: "POST", headers: { "Content-Type": "application/json" }, body: spec })),
 };
 
 // Utility string escaping
@@ -204,25 +140,39 @@ function setupViewNavigation() {
 
 // =========================================================
 // RAYCAST-STYLE COMMAND PALETTE (⌘K / Ctrl+K)
-// SCENARIO-DRIVEN DYNAMIC ACTIONS
+// DYNAMIC SUITES & SCENARIOS FROM BACKEND
 // =========================================================
 function getCommandItems() {
   const items = [
-    // Navigation
+    // Generic Navigation
     { group: "Navigation", title: "Go to Overview (The Control Room)", shortcut: "G O", action: () => switchView("overview") },
     { group: "Navigation", title: "Go to Experiment Studio", shortcut: "G S", action: () => switchView("studio") },
     { group: "Navigation", title: "Go to Live Run Timeline", shortcut: "G L", action: () => switchView("liverun") },
     { group: "Navigation", title: "Go to Run Investigation", shortcut: "G I", action: () => switchView("investigation") },
     { group: "Navigation", title: "Go to Reliability Map & Coverage", shortcut: "G M", action: () => switchView("map") },
 
-    // Primary Actions
-    { group: "Actions", title: "Run Critical Integrations Suite (Fixed)", shortcut: "R S", action: () => runSuite("fixed") },
-    { group: "Actions", title: "Run Critical Integrations Suite (Vulnerable)", shortcut: "R V", action: () => runSuite("vulnerable") },
-    { group: "Actions", title: "Generate Scenarios from Coverage Gaps", shortcut: "G G", action: () => $("#generate-gaps-btn")?.click() },
-    { group: "Actions", title: "Open Operational Metrics", shortcut: "O M", action: () => $("#open-metrics-btn")?.click() },
-    { group: "Actions", title: "Open Retention Pruning Policy", shortcut: "O P", action: () => $("#open-prune-btn")?.click() },
-    { group: "Actions", title: "Open Governance Audit Log", shortcut: "O A", action: () => $("#open-audit-btn")?.click() },
+    // Core Platform Tools
+    { group: "Tools", title: "Generate Scenarios from Coverage Gaps", shortcut: "G G", action: () => $("#generate-gaps-btn")?.click() },
+    { group: "Tools", title: "Open Operational Metrics", shortcut: "O M", action: () => $("#open-metrics-btn")?.click() },
+    { group: "Tools", title: "Open Retention Pruning Policy", shortcut: "O P", action: () => $("#open-prune-btn")?.click() },
+    { group: "Tools", title: "Open Governance Audit Log", shortcut: "O A", action: () => $("#open-audit-btn")?.click() },
   ];
+
+  // Dynamically Generated Test Suite Actions
+  if (state.suites && state.suites.length > 0) {
+    state.suites.forEach((suite) => {
+      items.push({
+        group: "Test Suites",
+        title: `Run Suite '${suite.name}' (Fixed)`,
+        action: () => runSuite(suite.id, "fixed"),
+      });
+      items.push({
+        group: "Test Suites",
+        title: `Run Suite '${suite.name}' (Vulnerable)`,
+        action: () => runSuite(suite.id, "vulnerable"),
+      });
+    });
+  }
 
   // Dynamic Scenarios from Backend Registry
   if (state.scenarios && state.scenarios.length > 0) {
@@ -471,7 +421,7 @@ function updateMetricsRibbon() {
 
 async function refreshRuns() {
   try {
-    const res = await apiService.getRuns();
+    const res = await api.getRuns();
     state.runs = res.runs || [];
     renderHistory();
     await refreshCoverage();
@@ -490,7 +440,7 @@ async function launchRun(implementation, scenarioId) {
 
     const scenarioName = scenario.name || scenario.id;
     toast(`Launching ${scenarioName} (${implementation})...`);
-    const res = await apiService.launchRun(scenario.id, implementation);
+    const res = await api.launchRun(scenario.id, implementation);
     const runId = res.run_id;
 
     state.selectedRunId = runId;
@@ -510,7 +460,7 @@ function schedulePoll(runId) {
   if (state.pollTimer) window.clearTimeout(state.pollTimer);
   state.pollTimer = window.setTimeout(async () => {
     try {
-      const { run } = await apiService.getRun(runId);
+      const { run } = await api.getRun(runId);
       if (state.selectedRunId === runId) renderRun(run);
       if (["completed", "failed", "cancelled", "timed_out"].includes(run.status)) {
         await refreshRuns();
@@ -528,7 +478,7 @@ function schedulePoll(runId) {
 // =========================================================
 async function openRun(runId) {
   try {
-    const { run } = await apiService.getRun(runId);
+    const { run } = await api.getRun(runId);
     if (!run) throw new Error("Run not found");
     state.selectedRunId = runId;
     state.currentRun = run;
@@ -572,7 +522,7 @@ function renderRun(run) {
     `;
   }
 
-  // Generic Side-Effect Ledger Strip
+  // Side-Effect Ledger Strip: supports both specific and generic side-effects
   const summary = run.summary || {};
   const charges = summary.charges || [];
   const refunds = summary.refunds || [];
@@ -803,26 +753,40 @@ function jumpToFirstViolation() {
 }
 
 // =========================================================
-// CRITICAL INTEGRATIONS SUITE
+// TEST SUITES EXECUTION
 // =========================================================
-async function runSuite(implementation) {
+async function refreshSuites() {
+  try {
+    const res = await api.getSuites();
+    state.suites = res.suites || [];
+  } catch (err) {
+    state.suites = [];
+  }
+}
+
+async function runSuite(suiteId, implementation) {
   const buttons = $$(".suite-run-btn");
   buttons.forEach((b) => { b.disabled = true; });
   try {
-    toast(`Starting Critical Integrations Suite (${implementation})...`);
-    const { suite } = await apiService.getSuite("critical-integrations");
+    const targetSuiteId = suiteId || state.suites[0]?.id;
+    if (!targetSuiteId) {
+      toast("No test suites available to execute.");
+      return;
+    }
+    const { suite } = await api.getSuite(targetSuiteId);
+    toast(`Starting Suite '${suite.name}' (${implementation})...`);
     switchView("liverun");
     for (const scId of suite.scenarios) {
       await launchRun(implementation, scId);
       for (let i = 0; i < 40; i++) {
         await new Promise((r) => setTimeout(r, 200));
-        const { run } = await apiService.getRun(state.selectedRunId);
+        const { run } = await api.getRun(state.selectedRunId);
         if (["completed", "failed", "cancelled", "timed_out"].includes(run.status)) {
           break;
         }
       }
     }
-    toast(`Critical Integrations Suite (${implementation}) completed!`);
+    toast(`Suite '${suite.name}' (${implementation}) completed!`);
   } catch (err) {
     toast(`Suite error: ${err.message}`);
   } finally {
@@ -832,35 +796,89 @@ async function runSuite(implementation) {
 
 // =========================================================
 // SCENARIO STUDIO & PIPELINE DESIGNER
+// GENERIC BLANK EDITOR WITH BACKEND-PROVIDED FAULTS
 // =========================================================
+async function loadSupportedFaults() {
+  try {
+    const res = await api.getSupportedFaults();
+    state.supportedFaults = res.faults || {};
+    state.workflowSteps = res.workflow_steps || [];
+
+    const faultSelect = $("#editor-fault-select");
+    if (faultSelect) {
+      faultSelect.innerHTML = '<option value="">Select a supported failure mode...</option>' +
+        Object.entries(state.supportedFaults).map(([fKey, fData]) =>
+          `<option value="${escapeHtml(fKey)}">${escapeHtml(fKey)} — ${escapeHtml(fData.description || '')}</option>`
+        ).join("");
+    }
+  } catch (err) {
+    console.warn("Could not load backend supported faults:", err.message);
+  }
+}
+
 function setScenarioEditor() {
   const select = $("#scenario-select");
   if (!select) return;
   const selected = state.scenarios.find((item) => item.id === select.value);
-  const definition = selected?.definition || {
+
+  // If no scenario selected, start with a neutral, blank editor (no hardcoded payment defaults)
+  const definition = selected ? selected.definition : {
     scenario_version: 1,
-    name: "new-scenario",
+    name: "",
     description: "",
-    fault: "payment_response_lost_after_commit",
-    retries: 1,
-    assertion: "service_recovers",
+    fault: "",
+    timeout_seconds: 15,
   };
-  state.editorDefinition = definition;
+
+  state.editorDefinition = { ...definition };
+
   $$("[data-field]").forEach((input) => {
     const field = input.dataset.field;
     input.value = definition[field] ?? (field === "timeout_seconds" ? 15 : "");
   });
+
+  const faultSelect = $("#editor-fault-select");
+  if (faultSelect) {
+    faultSelect.value = definition.fault || "";
+  }
+
   updateWorkflowCanvas(definition);
   updateScenarioPreview();
+
   const saveBtn = $("#save-scenario");
   if (saveBtn) saveBtn.textContent = selected ? "Save new version" : "Create scenario";
+}
+
+function onFaultSelectChange(e) {
+  const chosenFault = e.target.value;
+  if (!state.editorDefinition) return;
+  state.editorDefinition.fault = chosenFault;
+
+  const faultMeta = state.supportedFaults[chosenFault];
+  if (faultMeta) {
+    if (faultMeta.primary_assertion) {
+      state.editorDefinition.assertion = faultMeta.primary_assertion;
+    }
+    if (faultMeta.defaults) {
+      Object.assign(state.editorDefinition, faultMeta.defaults);
+      $$("[data-field]").forEach((input) => {
+        const field = input.dataset.field;
+        if (state.editorDefinition[field] !== undefined) {
+          input.value = state.editorDefinition[field];
+        }
+      });
+    }
+  }
+
+  updateWorkflowCanvas(state.editorDefinition);
+  updateScenarioPreview();
 }
 
 function updateWorkflowCanvas(definition) {
   const canvas = $("#workflow-canvas");
   if (!canvas) return;
 
-  // Generic Step Handler: if the scenario defines workflow steps, render them dynamically
+  // 1. Generic Workflow Steps: render directly from definition steps if present
   const steps = definition?.workflow || definition?.steps;
   if (Array.isArray(steps) && steps.length > 0) {
     canvas.innerHTML = steps.map((step, idx) => {
@@ -878,31 +896,38 @@ function updateWorkflowCanvas(definition) {
     return;
   }
 
-  // Fallback / standard reference workflows
-  const fault = typeof definition === "string" ? definition : definition?.fault;
+  // 2. If a recognized fault is selected, render its target execution pipeline
+  const fault = definition?.fault;
   if (fault === "duplicate_payment_webhook") {
     canvas.innerHTML = `
-      <li><span>1</span><div><strong>Webhook delivers payment event</strong><small>Sends payment.succeeded webhook</small></div></li>
-      <li><span>2</span><div><strong>Checkout starts fulfillment</strong><small>Records order fulfillment side-effect</small></div></li>
-      <li class="workflow-fault"><span>3</span><div><strong>Duplicate webhook redelivery</strong><small>Simulates network redelivery of same event</small></div></li>
-      <li><span>4</span><div><strong>Checkout verifies deduplication</strong><small>Idempotently ignores duplicate event</small></div></li>
-      <li><span>5</span><div><strong>Evaluate invariants</strong><small>Checks single fulfillment &amp; terminal state</small></div></li>
+      <li><span>1</span><div><strong>Deliver payment event</strong><small>Sends webhook event payload</small></div></li>
+      <li><span>2</span><div><strong>Start fulfillment</strong><small>Records service fulfillment</small></div></li>
+      <li class="workflow-fault"><span>3</span><div><strong>Duplicate redelivery</strong><small>Simulates network redelivery</small></div></li>
+      <li><span>4</span><div><strong>Verify deduplication</strong><small>Idempotently handles event</small></div></li>
+      <li><span>5</span><div><strong>Evaluate invariants</strong><small>Checks single fulfillment state</small></div></li>
     `;
   } else if (fault === "persistence_failure_after_payment") {
     canvas.innerHTML = `
-      <li><span>1</span><div><strong>Checkout starts payment</strong><small>Sends charge request to provider</small></div></li>
-      <li><span>2</span><div><strong>Provider commits charge</strong><small>Payment provider ledger records $42.00</small></div></li>
-      <li class="workflow-fault"><span>3</span><div><strong>Database persistence fails</strong><small>Simulates checkout DB commit failure</small></div></li>
-      <li><span>4</span><div><strong>Checkout runs compensation</strong><small>Issues compensating refund to provider</small></div></li>
-      <li><span>5</span><div><strong>Evaluate invariants</strong><small>Checks zero orphaned charges &amp; terminal state</small></div></li>
+      <li><span>1</span><div><strong>Start transaction</strong><small>Sends charge request</small></div></li>
+      <li><span>2</span><div><strong>Provider commits</strong><small>Ledger records operation</small></div></li>
+      <li class="workflow-fault"><span>3</span><div><strong>Database write fails</strong><small>Simulates DB commit failure</small></div></li>
+      <li><span>4</span><div><strong>Trigger compensation</strong><small>Issues compensating refund</small></div></li>
+      <li><span>5</span><div><strong>Evaluate invariants</strong><small>Checks zero orphaned charges</small></div></li>
+    `;
+  } else if (fault === "payment_response_lost_after_commit") {
+    canvas.innerHTML = `
+      <li><span>1</span><div><strong>Dispatch request</strong><small>Sends request with idempotency key</small></div></li>
+      <li><span>2</span><div><strong>Provider commits</strong><small>Upstream service records operation</small></div></li>
+      <li class="workflow-fault"><span>3</span><div><strong>Drop response</strong><small>Simulates unknown outcome fault</small></div></li>
+      <li><span>4</span><div><strong>Client retries</strong><small>Executes configured retries</small></div></li>
+      <li><span>5</span><div><strong>Evaluate invariants</strong><small>Checks idempotent outcome</small></div></li>
     `;
   } else {
+    // 3. Neutral empty state when no compatible workflow is configured
     canvas.innerHTML = `
-      <li><span>1</span><div><strong>Checkout starts payment</strong><small>Uses the order and amount above</small></div></li>
-      <li><span>2</span><div><strong>Provider commits charge</strong><small>Local test provider records side-effect</small></div></li>
-      <li class="workflow-fault"><span>3</span><div><strong>Drop provider response</strong><small>Simulates an unknown payment outcome</small></div></li>
-      <li><span>4</span><div><strong>Checkout retries</strong><small>Runs the configured retry count</small></div></li>
-      <li><span>5</span><div><strong>Evaluate invariants</strong><small>Checks duplicate charges and terminal state</small></div></li>
+      <li class="empty-workflow-notice" style="list-style:none;padding:24px 16px;text-align:center;color:var(--ink-400);font-size:12px;border:1px dashed var(--border-subtle);border-radius:var(--radius-sm)">
+        Select a registered scenario or choose a failure mode to visualize its execution pipeline.
+      </li>
     `;
   }
 }
@@ -912,7 +937,9 @@ function updateScenarioPreview() {
   const definition = { ...state.editorDefinition };
   $$("[data-field]").forEach((input) => {
     const field = input.dataset.field;
-    definition[field] = input.type === "number" ? Number(input.value) : input.value;
+    if (input.value !== "") {
+      definition[field] = input.type === "number" ? Number(input.value) : input.value;
+    }
   });
   state.editorDefinition = definition;
   const jsonEl = $("#scenario-json");
@@ -925,14 +952,14 @@ async function submitScenario(save) {
     updateScenarioPreview();
     const definition = state.editorDefinition;
     if (!save) {
-      const result = await apiService.validateScenario(definition);
+      const result = await api.validateScenario(definition);
       if (feedback) feedback.textContent = result.valid ? "Definition is valid." : "Definition is invalid.";
       return;
     }
     const selected = $("#scenario-select")?.value;
     const result = selected
-      ? await apiService.saveScenarioVersion(selected, definition)
-      : await apiService.createScenario(definition);
+      ? await api.saveScenarioVersion(selected, definition)
+      : await api.createScenario(definition);
 
     if (feedback) feedback.textContent = `Saved ${selected ? `version ${result.version}` : "version 1"}.`;
     await refreshScenarios();
@@ -954,7 +981,7 @@ async function refreshScenarios() {
   const grid = $(".scenarios-grid");
 
   try {
-    const res = await apiService.getScenarios();
+    const res = await api.getScenarios();
     state.scenarios = res.scenarios || [];
     state.scenariosLoading = false;
 
@@ -1000,7 +1027,7 @@ async function refreshScenarios() {
           `;
         }).join("");
 
-        // Re-bind quick launch buttons
+        // Bind quick launch buttons
         grid.querySelectorAll(".run-button").forEach((btn) => {
           btn.addEventListener("click", () => launchRun(btn.dataset.implementation, btn.dataset.scenario));
         });
@@ -1027,7 +1054,7 @@ async function loadRunTelemetry(runId) {
 
   try {
     listEl.innerHTML = '<span style="font-size:11px;color:var(--ink-400)">Loading OpenTelemetry trace spans...</span>';
-    const data = await apiService.getTelemetry(runId);
+    const data = await api.getTelemetry(runId);
     traceIdEl.textContent = data.traceId;
     if (countEl) countEl.textContent = String(data.spanCount);
 
@@ -1095,7 +1122,7 @@ async function executeRunDiff() {
     return;
   }
   try {
-    const { diff } = await apiService.diffRuns(state.selectedRunId, baselineId);
+    const { diff } = await api.diffRuns(state.selectedRunId, baselineId);
     renderDiff(diff);
   } catch (err) {
     toast(`Diff error: ${err.message}`);
@@ -1144,7 +1171,7 @@ function renderDiff(diff) {
 // =========================================================
 async function refreshCoverage() {
   try {
-    const data = await apiService.getCoverage();
+    const data = await api.getCoverage();
     renderCoverage(data);
   } catch {}
 }
@@ -1206,7 +1233,7 @@ async function loadTemplates() {
   const container = $("#template-grid");
   if (!container) return;
   try {
-    const { templates } = await apiService.getTemplates();
+    const { templates } = await api.getTemplates();
     container.innerHTML = templates.map((tpl) => `
       <article class="scenario-card" style="display:flex;flex-direction:column;justify-content:space-between">
         <div>
@@ -1231,7 +1258,7 @@ async function loadTemplates() {
         const scId = `${templateId.replace("-tpl", "")}-${Date.now().toString(36)}`;
         try {
           btn.disabled = true;
-          await apiService.instantiateTemplate(templateId, scId);
+          await api.instantiateTemplate(templateId, scId);
           toast(`Created scenario '${scId}' from template!`);
           await refreshScenarios();
           switchView("studio");
@@ -1257,7 +1284,7 @@ async function loadTemplates() {
 // =========================================================
 async function loadAnnotations(runId) {
   try {
-    const { annotations } = await apiService.getAnnotations(runId);
+    const { annotations } = await api.getAnnotations(runId);
     state.annotations = annotations || [];
     renderAnnotations();
   } catch {}
@@ -1289,7 +1316,7 @@ async function handleAddAnnotation(event) {
   const comment = textInput?.value.trim();
   if (!comment) return;
   try {
-    const { annotation } = await apiService.addAnnotation(
+    const { annotation } = await api.addAnnotation(
       state.selectedRunId,
       authorInput?.value.trim() || "Developer",
       comment
@@ -1305,7 +1332,7 @@ async function handleAddAnnotation(event) {
 
 async function loadTasks(runId) {
   try {
-    const { tasks } = await apiService.getTasks(runId);
+    const { tasks } = await api.getTasks(runId);
     state.tasks = tasks || [];
     renderTasks();
   } catch {}
@@ -1332,7 +1359,7 @@ function renderTasks() {
       const taskId = e.target.dataset.taskId;
       const newStatus = e.target.checked ? "resolved" : "open";
       try {
-        await apiService.updateTask(taskId, newStatus);
+        await api.updateTask(taskId, newStatus);
         const task = state.tasks.find((t) => t.id === taskId);
         if (task) task.status = newStatus;
         renderTasks();
@@ -1352,7 +1379,7 @@ async function handleAddTask(event) {
   const title = titleInput?.value.trim();
   if (!title) return;
   try {
-    const { task } = await apiService.addTask(
+    const { task } = await api.addTask(
       state.selectedRunId,
       title,
       prioSelect?.value || "medium",
@@ -1380,7 +1407,7 @@ function setupBranching() {
     try {
       btn.disabled = true;
       toast("Branching execution from checkpoint...");
-      const { run } = await apiService.branchRun(state.selectedRunId, { implementation: impl.trim().toLowerCase() });
+      const { run } = await api.branchRun(state.selectedRunId, { implementation: impl.trim().toLowerCase() });
       toast(`Branched new run: ${run.id.slice(0, 8)}`);
       await refreshRuns();
       await openRun(run.id);
@@ -1400,7 +1427,7 @@ function setupBaseline() {
     if (!state.selectedRunId) return;
     try {
       btn.disabled = true;
-      await apiService.setBaseline(state.selectedRunId);
+      await api.setBaseline(state.selectedRunId);
       toast("Run designated as baseline 🎯");
       await refreshRuns();
     } catch (err) {
@@ -1426,7 +1453,7 @@ function setupOpenApiImporter() {
     try {
       btn.disabled = true;
       btn.textContent = "Analyzing...";
-      const { workflow } = await apiService.importOpenApi(raw);
+      const { workflow } = await api.importOpenApi(raw);
       results.hidden = false;
       results.innerHTML = `
         <div style="background:var(--surface-subtle);border:1px solid var(--border-subtle);border-radius:var(--radius-sm);padding:12px">
@@ -1457,7 +1484,7 @@ function setupGenerateFromGaps() {
     try {
       btn.disabled = true;
       btn.textContent = "Analyzing gaps...";
-      const { count } = await apiService.generateFromGaps(state.activeProjectId);
+      const { count } = await api.generateFromGaps(state.activeProjectId);
       if (count > 0) {
         toast(`Generated ${count} new scenario(s) from coverage gaps!`);
         await refreshScenarios();
@@ -1504,7 +1531,7 @@ function setupModals() {
     try {
       const content = $("#metrics-content");
       if (content) content.innerHTML = '<span style="font-size:11px;color:var(--ink-400)">Loading metrics...</span>';
-      const m = await apiService.getMetrics();
+      const m = await api.getMetrics();
       const r = m.runs || {};
       const a = m.assertions || {};
       const w = m.worker_health || {};
@@ -1550,7 +1577,7 @@ function setupModals() {
     const list = $("#audit-log-list");
     if (!list) return;
     try {
-      const { audit_events } = await apiService.getAuditEvents(state.activeProjectId);
+      const { audit_events } = await api.getAuditEvents(state.activeProjectId);
       if (!audit_events.length) {
         list.innerHTML = '<span style="font-size:11px;color:var(--ink-400)">No audit events recorded yet.</span>';
         return;
@@ -1592,7 +1619,7 @@ function setupModals() {
       const days = parseInt($("#prune-days-input")?.value, 10) || 30;
       const keepBaselines = $("#prune-keep-baselines")?.checked ?? true;
       const dryRun = $("#prune-dry-run")?.checked ?? false;
-      const res = await apiService.pruneRuns(state.activeProjectId, days, keepBaselines, dryRun);
+      const res = await api.pruneRuns(state.activeProjectId, days, keepBaselines, dryRun);
       const resultsDiv = $("#prune-results");
       if (resultsDiv) {
         resultsDiv.hidden = false;
@@ -1613,6 +1640,11 @@ function setupModals() {
 // INITIALIZATION
 // =========================================================
 async function initialize() {
+  if (!api) {
+    toast("Fatal error: Faultline API client failed to initialize.");
+    return;
+  }
+
   setupViewNavigation();
   setupCommandPalette();
   setupBranching();
@@ -1634,17 +1666,18 @@ async function initialize() {
   });
 
   $$(".suite-run-btn").forEach((btn) => {
-    btn.addEventListener("click", () => runSuite(btn.dataset.implementation));
+    btn.addEventListener("click", () => runSuite(state.suites[0]?.id, btn.dataset.implementation));
   });
 
   $("#refresh-button")?.addEventListener("click", async () => {
-    await Promise.all([refreshRuns(), refreshCoverage(), refreshScenarios()]);
+    await Promise.all([refreshRuns(), refreshCoverage(), refreshScenarios(), refreshSuites()]);
     toast("Platform state refreshed");
   });
 
   $("#history-refresh")?.addEventListener("click", () => refreshRuns());
 
   $("#scenario-select")?.addEventListener("change", setScenarioEditor);
+  $("#editor-fault-select")?.addEventListener("change", onFaultSelectChange);
   $("#validate-scenario")?.addEventListener("click", () => submitScenario(false));
   $("#save-scenario")?.addEventListener("click", () => submitScenario(true));
   $$("[data-field]").forEach((input) => input.addEventListener("input", updateScenarioPreview));
@@ -1739,7 +1772,7 @@ async function initialize() {
     const runId = e.currentTarget.dataset.runId;
     if (!runId) return;
     try {
-      await apiService.cancelRun(runId);
+      await api.cancelRun(runId);
       toast("Cancellation requested");
       await openRun(runId);
     } catch (err) {
@@ -1750,18 +1783,24 @@ async function initialize() {
   // Discover Projects & Load Initial Data
   try {
     try {
-      const projRes = await apiService.getProjects();
+      const projRes = await api.getProjects();
       if (projRes?.projects?.length) {
         state.activeProjectId = projRes.projects[0].id;
       }
     } catch {}
 
-    await Promise.all([refreshScenarios(), refreshRuns(), refreshCoverage(), loadTemplates()]);
-    if (state.scenarios.length) {
-      const select = $("#scenario-select");
-      if (select) select.value = state.scenarios[0].id;
-      setScenarioEditor();
-    }
+    await Promise.all([
+      loadSupportedFaults(),
+      refreshSuites(),
+      refreshScenarios(),
+      refreshRuns(),
+      refreshCoverage(),
+      loadTemplates(),
+    ]);
+
+    // Initial Studio state starts neutral / blank unless a scenario is chosen
+    setScenarioEditor();
+
     if (state.runs.length) {
       await openRun(state.runs[0].id);
     }

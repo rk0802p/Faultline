@@ -333,13 +333,19 @@
                     Description
                     <input data-field="description" maxlength="240" placeholder="Explain what failure mode this tests...">
                   </label>
-                  <label>
-                    Order ID
-                    <input data-field="order_id" maxlength="80" placeholder="order-001">
+                  <label class="full-width">
+                    Injected Fault Type
+                    <select data-field="fault" id="editor-fault-select" style="padding:6px 10px;border-radius:var(--radius-sm);border:1px solid var(--border-subtle);font-size:12px;background:#fff">
+                      <option value="">Select a supported failure mode...</option>
+                    </select>
                   </label>
                   <label>
-                    Charge Amount (cents)
-                    <input data-field="amount_cents" type="number" min="1" step="1">
+                    Target Step / Resource ID
+                    <input data-field="order_id" maxlength="80" placeholder="e.g. order-001 or target-id">
+                  </label>
+                  <label>
+                    Amount / Payload Magnitude
+                    <input data-field="amount_cents" type="number" min="1" step="1" placeholder="e.g. 2500">
                   </label>
                   <label>
                     Retry Attempts

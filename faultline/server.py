@@ -13,7 +13,7 @@ from uuid import uuid4
 from . import engine, importer, security, store
 from .adapters import start_local_services
 from .engine import submit
-from .schema import SUPPORTED_FAULTS, validate_scenario
+from .schema import SUPPORTED_FAULTS, VALID_WORKFLOW_STEPS, validate_scenario
 
 
 WEB_ROOT = Path(__file__).resolve().parent / "web"
@@ -128,6 +128,8 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             scenario_id = path.split("/")[3]
             versions = store.scenario_versions(scenario_id)
             self.respond(200, {"versions": versions}) if versions else self.respond(404, {"error": "scenario not found"})
+        elif path in {"/api/scenarios/supported-faults", "/api/schema/faults"}:
+            self.respond(200, {"faults": SUPPORTED_FAULTS, "workflow_steps": sorted(list(VALID_WORKFLOW_STEPS))})
         elif re.fullmatch(r"/api/scenarios/[^/]+", path):
             scenario_id = path.split("/")[3]
             scenario = store.get_scenario(scenario_id)

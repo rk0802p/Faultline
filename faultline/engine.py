@@ -1,5 +1,7 @@
 """Background scenario execution for the local checkout environment."""
 
+import errno
+import http.client
 import json
 import logging
 import socket
@@ -496,7 +498,16 @@ class StepRunnerRegistry:
 
 
 MAX_REDIRECTS = 5
+MAX_RESPONSE_BYTES_DEFAULT = 1_048_576  # 1 MB response reading ceiling
 BLOCKED_REQUEST_HEADERS = {"host", "transfer-encoding", "connection", "upgrade"}
+SENSITIVE_REDIRECT_HEADERS = {
+    "authorization",
+    "cookie",
+    "cookie2",
+    "proxy-authorization",
+    "x-api-key",
+    "x-auth-token",
+}
 SAFE_RESPONSE_HEADERS = {"content-type", "content-length", "server", "location", "date", "x-request-id", "etag"}
 
 
@@ -577,10 +588,46 @@ def _build_http_payload(step: dict[str, Any]) -> tuple[bytes | None, str | None,
     return raw_body, content_type, headers
 
 
-def _capture_response_summary(body_bytes: bytes, max_len: int = 500) -> tuple[int, str, bool]:
+def _read_bounded_response(
+    resp: http.client.HTTPResponse,
+    max_bytes: int = MAX_RESPONSE_BYTES_DEFAULT,
+) -> tuple[bytes, int, bool]:
+    """Reads response body in bounded chunks up to max_bytes.
+
+    Returns (captured_bytes, total_bytes_read, was_truncated).
+    """
+    chunks: list[bytes] = []
+    total_read = 0
+    was_truncated = False
+    chunk_size = 65536  # 64 KB
+
+    while True:
+        to_read = min(chunk_size, max_bytes - total_read + 1)
+        chunk = resp.read(to_read)
+        if not chunk:
+            break
+        total_read += len(chunk)
+        if total_read > max_bytes:
+            overflow = total_read - max_bytes
+            if len(chunk) > overflow:
+                chunks.append(chunk[:-overflow])
+            was_truncated = True
+            break
+        chunks.append(chunk)
+
+    captured = b"".join(chunks)
+    return captured, total_read, was_truncated
+
+
+def _capture_response_summary(
+    body_bytes: bytes,
+    total_bytes_read: int | None = None,
+    body_truncated: bool = False,
+    max_len: int = 500,
+) -> tuple[int, str, bool]:
     """Returns total size, redacted snippet, and whether truncated."""
-    size = len(body_bytes)
-    truncated = size > max_len
+    size = total_bytes_read if total_bytes_read is not None else len(body_bytes)
+    truncated = body_truncated or (size > max_len)
     snippet = body_bytes[:max_len].decode("utf-8", errors="replace")
     redacted = security.redact_sensitive(snippet)
     return size, redacted, truncated
@@ -599,7 +646,8 @@ def _execute_http_request_with_redirects(
     timeout: float,
     allowed_statuses: set[int],
     max_redirects: int = MAX_REDIRECTS,
-) -> tuple[int, dict[str, str], bytes, float, list[dict[str, Any]]]:
+    max_response_bytes: int = MAX_RESPONSE_BYTES_DEFAULT,
+) -> tuple[int, dict[str, str], bytes, float, list[dict[str, Any]], bool, int]:
     """Executes HTTP request, validating destinations and handling redirects securely."""
     curr_scheme = scheme
     curr_host = host
@@ -630,7 +678,7 @@ def _execute_http_request_with_redirects(
         try:
             conn.request(curr_method, curr_path, body=curr_body, headers=curr_headers)
             resp = conn.getresponse()
-            body_bytes = resp.read()
+            body_bytes, total_read, body_truncated = _read_bounded_response(resp, max_bytes=max_response_bytes)
             elapsed = time.monotonic() - t0
             status_code = resp.status
             resp_headers = {k.lower(): v for k, v in resp.getheaders()}
@@ -639,10 +687,18 @@ def _execute_http_request_with_redirects(
                 _active_connections.pop(run_id, None)
             conn.close()
 
+        if body_truncated:
+            store.record_event(run_id, "HTTP_RESPONSE_BODY_LIMIT_EXCEEDED", {
+                "step_id": step_id,
+                "url": curr_url,
+                "max_response_bytes": max_response_bytes,
+                "bytes_read": total_read,
+            })
+
         if status_code in {301, 302, 303, 307, 308}:
             loc = resp_headers.get("location")
             if not loc:
-                return status_code, resp_headers, body_bytes, elapsed, redirect_history
+                return status_code, resp_headers, body_bytes, elapsed, redirect_history, body_truncated, total_read
 
             if redirect_count >= max_redirects:
                 store.record_event(run_id, "HTTP_REDIRECT_LIMIT_EXCEEDED", {
@@ -664,18 +720,21 @@ def _execute_http_request_with_redirects(
             # Revalidate loopback on target URL
             security.assert_loopback_safe(target_url)
 
-            # Strip credentials if scheme/host/port changed (cross-origin)
+            # Case-insensitive credential stripping if origin (scheme/host/port) changed
             if (next_scheme, next_host, next_port) != (curr_scheme, curr_host, curr_port):
-                curr_headers.pop("authorization", None)
-                curr_headers.pop("cookie", None)
-                curr_headers.pop("x-api-key", None)
+                curr_headers = {
+                    k: v for k, v in curr_headers.items()
+                    if k.lower() not in SENSITIVE_REDIRECT_HEADERS
+                }
 
             # Standard RFC 7231 method changes: 301, 302, 303 switch to GET and drop body
             if status_code in {301, 302, 303}:
                 curr_method = "GET"
                 curr_body = None
-                curr_headers.pop("content-length", None)
-                curr_headers.pop("content-type", None)
+                curr_headers = {
+                    k: v for k, v in curr_headers.items()
+                    if k.lower() not in {"content-length", "content-type"}
+                }
 
             redirect_entry = {
                 "from_url": curr_url,
@@ -695,7 +754,7 @@ def _execute_http_request_with_redirects(
             curr_path = next_path
             continue
 
-        return status_code, resp_headers, body_bytes, elapsed, redirect_history
+        return status_code, resp_headers, body_bytes, elapsed, redirect_history, body_truncated, total_read
 
 
 def _execute_http_step(
@@ -728,6 +787,7 @@ def _execute_http_step(
         step_config.get("idempotent", method in {"GET", "HEAD", "PUT", "DELETE"})
     )
     configured_retries = int(step.get("retries", step_config.get("retries", 1 if implementation == "fixed" else 0)))
+    max_response_bytes = int(step.get("max_response_bytes") or step_config.get("max_response_bytes") or MAX_RESPONSE_BYTES_DEFAULT)
 
     if inject_fault and fault_type == "http_timeout":
         fault_config = step.get("fault_config") or {}
@@ -751,15 +811,18 @@ def _execute_http_step(
 
         t0 = time.monotonic()
         timed_out = False
-        conn = _create_http_connection(scheme, host, port, timeout=client_timeout)
+        conn = _create_http_connection(scheme, host, port, timeout=3.0)
         with _active_lock:
             _active_connections[run_id] = conn
         try:
+            conn.connect()
+            if conn.sock:
+                conn.sock.settimeout(client_timeout)
             conn.request(method, path, body=raw_body, headers=fault_headers)
             resp = conn.getresponse()
-            resp_body = resp.read()
+            captured, total_read, was_truncated = _read_bounded_response(resp, max_bytes=max_response_bytes)
             elapsed = time.monotonic() - t0
-            size, snippet, truncated = _capture_response_summary(resp_body)
+            size, snippet, truncated = _capture_response_summary(captured, total_bytes_read=total_read, body_truncated=was_truncated)
             # Target completed without timing out! (e.g. ignored fault headers)
             store.record_event(run_id, "HTTP_FAULT_ACTIVATION_FAILED", {
                 "step_id": step_id,
@@ -774,6 +837,7 @@ def _execute_http_step(
                 "attempt": 1,
                 "elapsed_seconds": round(elapsed, 4),
                 "response_size_bytes": size,
+                "headers": {k.lower(): v for k, v in resp.getheaders() if k.lower() in SAFE_RESPONSE_HEADERS},
                 "body_snippet": snippet,
                 "body_truncated": truncated,
                 "recovered": False,
@@ -791,7 +855,70 @@ def _execute_http_step(
                 "fault_activated": False,
                 "simulated": False,
             }
-        except (TimeoutError, socket.timeout, OSError) as exc:
+        except ssl.SSLError as exc:
+            t_elapsed = round(time.monotonic() - t0, 4)
+            store.record_event(run_id, "HTTP_TLS_ERROR", {
+                "step_id": step_id,
+                "target": f"{scheme}://{host}:{port}{path}",
+                "elapsed_seconds": t_elapsed,
+                "error": type(exc).__name__,
+                "details": str(exc),
+            })
+            store.record_event(run_id, "STEP_FAILED", {
+                "step_id": step_id,
+                "error": f"TLS verification error connecting to {scheme}://{host}:{port}{path}: {exc}",
+                "evidence": "HTTP_TLS_ERROR",
+            })
+            return False, {
+                "step_id": step_id,
+                "type": "http_result",
+                "status": "tls_error",
+                "fault_activated": False,
+                "simulated": False,
+            }
+        except ConnectionRefusedError as exc:
+            t_elapsed = round(time.monotonic() - t0, 4)
+            store.record_event(run_id, "HTTP_CONNECTION_REFUSED", {
+                "step_id": step_id,
+                "target": f"{scheme}://{host}:{port}{path}",
+                "elapsed_seconds": t_elapsed,
+                "error": type(exc).__name__,
+                "details": str(exc),
+            })
+            store.record_event(run_id, "STEP_FAILED", {
+                "step_id": step_id,
+                "error": f"Connection refused connecting to {scheme}://{host}:{port}{path}",
+                "evidence": "HTTP_CONNECTION_REFUSED",
+            })
+            return False, {
+                "step_id": step_id,
+                "type": "http_result",
+                "status": "connection_refused",
+                "fault_activated": False,
+                "simulated": False,
+            }
+        except (ConnectionError, http.client.RemoteDisconnected) as exc:
+            t_elapsed = round(time.monotonic() - t0, 4)
+            store.record_event(run_id, "HTTP_CONNECTION_FAILED", {
+                "step_id": step_id,
+                "target": f"{scheme}://{host}:{port}{path}",
+                "elapsed_seconds": t_elapsed,
+                "error": type(exc).__name__,
+                "details": str(exc),
+            })
+            store.record_event(run_id, "STEP_FAILED", {
+                "step_id": step_id,
+                "error": f"Connection error connecting to {scheme}://{host}:{port}{path}: {exc}",
+                "evidence": "HTTP_CONNECTION_FAILED",
+            })
+            return False, {
+                "step_id": step_id,
+                "type": "http_result",
+                "status": "connection_failed",
+                "fault_activated": False,
+                "simulated": False,
+            }
+        except (TimeoutError, socket.timeout) as exc:
             timed_out = True
             t_elapsed = round(time.monotonic() - t0, 4)
             store.record_event(run_id, "HTTP_TIMEOUT_OBSERVED", {
@@ -802,6 +929,39 @@ def _execute_http_step(
                 "elapsed_seconds": t_elapsed,
                 "error": type(exc).__name__,
             })
+        except OSError as exc:
+            if getattr(exc, "errno", None) in (errno.ETIMEDOUT, 10060):
+                timed_out = True
+                t_elapsed = round(time.monotonic() - t0, 4)
+                store.record_event(run_id, "HTTP_TIMEOUT_OBSERVED", {
+                    "step_id": step_id,
+                    "method": method,
+                    "target": f"{scheme}://{host}:{port}{path}",
+                    "client_timeout_seconds": client_timeout,
+                    "elapsed_seconds": t_elapsed,
+                    "error": type(exc).__name__,
+                })
+            else:
+                t_elapsed = round(time.monotonic() - t0, 4)
+                store.record_event(run_id, "HTTP_NETWORK_ERROR", {
+                    "step_id": step_id,
+                    "target": f"{scheme}://{host}:{port}{path}",
+                    "elapsed_seconds": t_elapsed,
+                    "error": type(exc).__name__,
+                    "details": str(exc),
+                })
+                store.record_event(run_id, "STEP_FAILED", {
+                    "step_id": step_id,
+                    "error": f"Network error connecting to {scheme}://{host}:{port}{path}: {exc}",
+                    "evidence": "HTTP_NETWORK_ERROR",
+                })
+                return False, {
+                    "step_id": step_id,
+                    "type": "http_result",
+                    "status": "network_error",
+                    "fault_activated": False,
+                    "simulated": False,
+                }
         finally:
             with _active_lock:
                 _active_connections.pop(run_id, None)
@@ -838,20 +998,110 @@ def _execute_http_step(
                     "body": sanitized_body,
                     "attempt": 2,
                 })
-                retry_status, retry_headers, retry_body, retry_elapsed, _ = _execute_http_request_with_redirects(
-                    run_id=run_id,
-                    step_id=step_id,
-                    scheme=scheme,
-                    host=host,
-                    port=port,
-                    path=path,
-                    method=method,
-                    headers=base_headers,
-                    raw_body=raw_body,
-                    timeout=3.0,
-                    allowed_statuses=allowed_statuses,
-                )
-                size, snippet, truncated = _capture_response_summary(retry_body)
+                try:
+                    retry_status, retry_headers, retry_body, retry_elapsed, _, retry_truncated, retry_total_read = _execute_http_request_with_redirects(
+                        run_id=run_id,
+                        step_id=step_id,
+                        scheme=scheme,
+                        host=host,
+                        port=port,
+                        path=path,
+                        method=method,
+                        headers=base_headers,
+                        raw_body=raw_body,
+                        timeout=3.0,
+                        allowed_statuses=allowed_statuses,
+                        max_response_bytes=max_response_bytes,
+                    )
+                except ssl.SSLError as exc:
+                    store.record_event(run_id, "HTTP_TLS_ERROR", {
+                        "step_id": step_id,
+                        "target": f"{scheme}://{host}:{port}{path}",
+                        "error": type(exc).__name__,
+                        "details": str(exc),
+                    })
+                    store.record_event(run_id, "STEP_FAILED", {
+                        "step_id": step_id,
+                        "error": f"TLS verification error during retry to {scheme}://{host}:{port}{path}: {exc}",
+                        "evidence": "HTTP_TLS_ERROR",
+                    })
+                    return False, {
+                        "step_id": step_id,
+                        "type": "http_result",
+                        "status": "tls_error",
+                        "fault_activated": True,
+                        "simulated": False,
+                    }
+                except ConnectionRefusedError as exc:
+                    store.record_event(run_id, "HTTP_CONNECTION_REFUSED", {
+                        "step_id": step_id,
+                        "target": f"{scheme}://{host}:{port}{path}",
+                        "error": type(exc).__name__,
+                    })
+                    store.record_event(run_id, "STEP_FAILED", {
+                        "step_id": step_id,
+                        "error": f"Connection refused during retry to {scheme}://{host}:{port}{path}",
+                        "evidence": "HTTP_CONNECTION_REFUSED",
+                    })
+                    return False, {
+                        "step_id": step_id,
+                        "type": "http_result",
+                        "status": "connection_refused",
+                        "fault_activated": True,
+                        "simulated": False,
+                    }
+                except (ConnectionError, http.client.RemoteDisconnected) as exc:
+                    store.record_event(run_id, "HTTP_CONNECTION_FAILED", {
+                        "step_id": step_id,
+                        "target": f"{scheme}://{host}:{port}{path}",
+                        "error": type(exc).__name__,
+                        "details": str(exc),
+                    })
+                    store.record_event(run_id, "STEP_FAILED", {
+                        "step_id": step_id,
+                        "error": f"Connection error during retry to {scheme}://{host}:{port}{path}: {exc}",
+                        "evidence": "HTTP_CONNECTION_FAILED",
+                    })
+                    return False, {
+                        "step_id": step_id,
+                        "type": "http_result",
+                        "status": "connection_failed",
+                        "fault_activated": True,
+                        "simulated": False,
+                    }
+                except (TimeoutError, socket.timeout) as exc:
+                    store.record_event(run_id, "HTTP_TIMEOUT_OBSERVED", {
+                        "step_id": step_id,
+                        "target": f"{scheme}://{host}:{port}{path}",
+                        "error": type(exc).__name__,
+                    })
+                    store.record_event(run_id, "STEP_FAILED", {
+                        "step_id": step_id,
+                        "error": f"Retry to {scheme}://{host}:{port}{path} timed out",
+                        "evidence": "HTTP_TIMEOUT_OBSERVED",
+                    })
+                    return False, {
+                        "step_id": step_id,
+                        "type": "http_result",
+                        "status": "timed_out",
+                        "fault_activated": True,
+                        "simulated": False,
+                    }
+                except Exception as exc:
+                    store.record_event(run_id, "STEP_FAILED", {
+                        "step_id": step_id,
+                        "error": f"Retry request to {scheme}://{host}:{port}{path} failed: {exc}",
+                        "evidence": "HTTP_RETRY_FAILED",
+                    })
+                    return False, {
+                        "step_id": step_id,
+                        "type": "http_result",
+                        "status": "retry_failed",
+                        "fault_activated": True,
+                        "simulated": False,
+                    }
+
+                size, snippet, truncated = _capture_response_summary(retry_body, total_bytes_read=retry_total_read, body_truncated=retry_truncated)
                 safe_resp_headers = {k: v for k, v in retry_headers.items() if k in SAFE_RESPONSE_HEADERS}
                 store.record_event(run_id, "HTTP_RESPONSE_RECEIVED", {
                     "step_id": step_id,
@@ -890,20 +1140,124 @@ def _execute_http_step(
         "attempt": 1,
     })
     step_timeout = float(step.get("timeout_seconds", step_config.get("timeout_seconds", 3.0)))
-    status_code, resp_headers, body_bytes, elapsed, _ = _execute_http_request_with_redirects(
-        run_id=run_id,
-        step_id=step_id,
-        scheme=scheme,
-        host=host,
-        port=port,
-        path=path,
-        method=method,
-        headers=base_headers,
-        raw_body=raw_body,
-        timeout=step_timeout,
-        allowed_statuses=allowed_statuses,
-    )
-    size, snippet, truncated = _capture_response_summary(body_bytes)
+    try:
+        status_code, resp_headers, body_bytes, elapsed, _, body_truncated, total_read = _execute_http_request_with_redirects(
+            run_id=run_id,
+            step_id=step_id,
+            scheme=scheme,
+            host=host,
+            port=port,
+            path=path,
+            method=method,
+            headers=base_headers,
+            raw_body=raw_body,
+            timeout=step_timeout,
+            allowed_statuses=allowed_statuses,
+            max_response_bytes=max_response_bytes,
+        )
+    except ssl.SSLError as exc:
+        store.record_event(run_id, "HTTP_TLS_ERROR", {
+            "step_id": step_id,
+            "target": f"{scheme}://{host}:{port}{path}",
+            "error": type(exc).__name__,
+            "details": str(exc),
+        })
+        store.record_event(run_id, "STEP_FAILED", {
+            "step_id": step_id,
+            "error": f"TLS verification error connecting to {scheme}://{host}:{port}{path}: {exc}",
+            "evidence": "HTTP_TLS_ERROR",
+        })
+        return False, {
+            "step_id": step_id,
+            "type": "http_result",
+            "status": "tls_error",
+            "simulated": False,
+        }
+    except ConnectionRefusedError as exc:
+        store.record_event(run_id, "HTTP_CONNECTION_REFUSED", {
+            "step_id": step_id,
+            "target": f"{scheme}://{host}:{port}{path}",
+            "error": type(exc).__name__,
+            "details": str(exc),
+        })
+        store.record_event(run_id, "STEP_FAILED", {
+            "step_id": step_id,
+            "error": f"Connection refused connecting to {scheme}://{host}:{port}{path}",
+            "evidence": "HTTP_CONNECTION_REFUSED",
+        })
+        return False, {
+            "step_id": step_id,
+            "type": "http_result",
+            "status": "connection_refused",
+            "simulated": False,
+        }
+    except (ConnectionError, http.client.RemoteDisconnected) as exc:
+        store.record_event(run_id, "HTTP_CONNECTION_FAILED", {
+            "step_id": step_id,
+            "target": f"{scheme}://{host}:{port}{path}",
+            "error": type(exc).__name__,
+            "details": str(exc),
+        })
+        store.record_event(run_id, "STEP_FAILED", {
+            "step_id": step_id,
+            "error": f"Connection error connecting to {scheme}://{host}:{port}{path}: {exc}",
+            "evidence": "HTTP_CONNECTION_FAILED",
+        })
+        return False, {
+            "step_id": step_id,
+            "type": "http_result",
+            "status": "connection_failed",
+            "simulated": False,
+        }
+    except (TimeoutError, socket.timeout) as exc:
+        store.record_event(run_id, "HTTP_TIMEOUT_OBSERVED", {
+            "step_id": step_id,
+            "target": f"{scheme}://{host}:{port}{path}",
+            "error": type(exc).__name__,
+        })
+        store.record_event(run_id, "STEP_FAILED", {
+            "step_id": step_id,
+            "error": f"Request to {scheme}://{host}:{port}{path} timed out after {step_timeout}s",
+            "evidence": "HTTP_TIMEOUT_OBSERVED",
+        })
+        return False, {
+            "step_id": step_id,
+            "type": "http_result",
+            "status": "timed_out",
+            "simulated": False,
+        }
+    except (ValueError, PermissionError) as exc:
+        store.record_event(run_id, "STEP_FAILED", {
+            "step_id": step_id,
+            "error": str(exc),
+            "evidence": "HTTP_SECURITY_VIOLATION",
+        })
+        return False, {
+            "step_id": step_id,
+            "type": "http_result",
+            "status": "security_violation",
+            "simulated": False,
+        }
+    except OSError as exc:
+        store.record_event(run_id, "HTTP_NETWORK_ERROR", {
+            "step_id": step_id,
+            "target": f"{scheme}://{host}:{port}{path}",
+            "error": type(exc).__name__,
+            "details": str(exc),
+        })
+        store.record_event(run_id, "STEP_FAILED", {
+            "step_id": step_id,
+            "error": f"Network error connecting to {scheme}://{host}:{port}{path}: {exc}",
+            "evidence": "HTTP_NETWORK_ERROR",
+        })
+        return False, {
+            "step_id": step_id,
+            "type": "http_result",
+            "status": "network_error",
+            "simulated": False,
+        }
+
+    size, snippet, truncated = _capture_response_summary(body_bytes, total_bytes_read=total_read, body_truncated=body_truncated)
     safe_resp_headers = {k: v for k, v in resp_headers.items() if k in SAFE_RESPONSE_HEADERS}
     store.record_event(run_id, "HTTP_RESPONSE_RECEIVED", {
         "step_id": step_id,

@@ -25,6 +25,12 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "cryptography>=41.0.0",
+]
+
 [project.scripts]
 faultline = "faultline.cli:main"
 faultline-server = "faultline.server:main"

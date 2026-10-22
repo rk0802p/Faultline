@@ -1707,10 +1707,13 @@ class FaultlinePlatformTests(unittest.TestCase):
         import tempfile
         import ssl
         from http.server import HTTPServer, BaseHTTPRequestHandler
-        from cryptography import x509
-        from cryptography.x509.oid import NameOID
-        from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import rsa
+        try:
+            from cryptography import x509
+            from cryptography.x509.oid import NameOID
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import rsa
+        except ImportError:
+            self.skipTest("cryptography library not installed (install with 'pip install .[test]')")
         import datetime
         import ipaddress
         from faultline.engine import _create_http_connection
@@ -1786,6 +1789,234 @@ class FaultlinePlatformTests(unittest.TestCase):
                 os.remove(key_path)
             except OSError:
                 pass
+
+    def test_refused_connection_not_counted_as_timeout_activation(self) -> None:
+        """Prove that a connection refusal (e.g. port closed) does NOT count as a timeout fault activation."""
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            unused_port = s.getsockname()[1]
+        sc_id = f"refused-conn-{uuid4().hex[:6]}"
+        scenario_def = {
+            "scenario_version": 1,
+            "name": sc_id,
+            "fault": "http_timeout",
+            "assertion": "all_steps_succeeded_or_handled",
+            "timeout_seconds": 10,
+            "workflow": [
+                {
+                    "id": "step_closed_port",
+                    "name": "Call Closed Port",
+                    "type": "http.get",
+                    "host": "127.0.0.1",
+                    "port": unused_port,
+                    "path": "/closed",
+                }
+            ],
+            "target_step": "step_closed_port",
+        }
+        status, res = self.request("POST", "/api/scenarios", {"definition": scenario_def})
+        self.assertEqual(status, 201)
+
+        run = self.launch_and_wait("vulnerable", sc_id)
+        assertions = {a["name"]: a for a in run.get("assertions", [])}
+        # Fault activation MUST evaluate to failed
+        self.assertEqual(assertions.get("fault_activation_confirmed", {}).get("status"), "failed")
+
+        events = run.get("events", [])
+        event_types = [e["type"] for e in events]
+        self.assertIn("HTTP_CONNECTION_REFUSED", event_types)
+        self.assertNotIn("HTTP_TIMEOUT_OBSERVED", event_types)
+
+    def test_invalid_tls_certificate_not_counted_as_timeout_activation(self) -> None:
+        """Prove that an untrusted TLS certificate handshake failure does NOT count as timeout activation."""
+        try:
+            from cryptography import x509
+            from cryptography.x509.oid import NameOID
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import rsa
+            import datetime
+            import ipaddress
+        except ImportError:
+            self.skipTest("cryptography not installed")
+
+        # Create self-signed cert
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+        san = x509.SubjectAlternativeName([x509.IPAddress(ipaddress.IPv4Address("127.0.0.1"))])
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(name)
+            .issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(2002)
+            .not_valid_before(datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1))
+            .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1))
+            .add_extension(san, critical=False)
+            .sign(key, hashes.SHA256())
+        )
+        with tempfile.NamedTemporaryFile("wb", delete=False, suffix=".pem") as cert_file, \
+             tempfile.NamedTemporaryFile("wb", delete=False, suffix=".key") as key_file:
+            cert_file.write(cert.public_bytes(serialization.Encoding.PEM))
+            key_file.write(key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            ))
+            cert_path, key_path = cert_file.name, key_file.name
+
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        import ssl
+        class TLSHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+            def log_message(self, *args): pass
+
+        httpd = HTTPServer(("127.0.0.1", 0), TLSHandler)
+        server_port = httpd.server_address[1]
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
+        httpd.socket = ssl_ctx.wrap_socket(httpd.socket, server_side=True)
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+
+        try:
+            sc_id = f"untrusted-tls-{uuid4().hex[:6]}"
+            scenario_def = {
+                "scenario_version": 1,
+                "name": sc_id,
+                "fault": "http_timeout",
+                "assertion": "all_steps_succeeded_or_handled",
+                "timeout_seconds": 10,
+                "workflow": [
+                    {
+                        "id": "step_tls_call",
+                        "name": "Call Untrusted TLS",
+                        "type": "http.get",
+                        "scheme": "https",
+                        "host": "127.0.0.1",
+                        "port": server_port,
+                        "path": "/test",
+                    }
+                ],
+                "target_step": "step_tls_call",
+            }
+            status, res = self.request("POST", "/api/scenarios", {"definition": scenario_def})
+            self.assertEqual(status, 201)
+
+            run = self.launch_and_wait("vulnerable", sc_id)
+            assertions = {a["name"]: a for a in run.get("assertions", [])}
+            # Fault activation MUST evaluate to failed
+            self.assertEqual(assertions.get("fault_activation_confirmed", {}).get("status"), "failed")
+
+            events = run.get("events", [])
+            event_types = [e["type"] for e in events]
+            self.assertIn("HTTP_TLS_ERROR", event_types)
+            self.assertNotIn("HTTP_TIMEOUT_OBSERVED", event_types)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            try:
+                os.remove(cert_path)
+                os.remove(key_path)
+            except OSError:
+                pass
+
+    def test_cross_origin_redirect_case_insensitive_credential_stripping(self) -> None:
+        """Verify cross-origin redirect case-insensitively strips credentials (Authorization, COOKIE, X-Api-Key)."""
+        from faultline.engine import _execute_http_request_with_redirects
+        from unittest.mock import patch, MagicMock
+
+        run_id = f"test-ci-strip-{uuid4().hex[:6]}"
+        store.create_run(run_id, "payment-response-lost", 1, "fixed")
+
+        # Response 1: 302 redirect from port 8766 to port 8767 (cross-origin)
+        mock_resp_redirect = MagicMock()
+        mock_resp_redirect.status = 302
+        mock_resp_redirect.getheaders.return_value = [("Location", "http://127.0.0.1:8767/landing")]
+        mock_resp_redirect.read.return_value = b""
+
+        # Response 2: 200 OK at port 8767
+        mock_resp_landing = MagicMock()
+        mock_resp_landing.status = 200
+        mock_resp_landing.getheaders.return_value = [("Content-Type", "application/json")]
+        mock_resp_landing.read.return_value = b'{"status":"arrived"}'
+
+        requests_received: list[dict[str, Any]] = []
+
+        def fake_create_connection(scheme, host, port, timeout):
+            mock_conn = MagicMock()
+            def fake_request(method, path, body=None, headers=None):
+                requests_received.append({
+                    "port": port,
+                    "path": path,
+                    "headers": dict(headers or {}),
+                })
+            mock_conn.request = fake_request
+            if port == 8766:
+                mock_conn.getresponse.return_value = mock_resp_redirect
+            else:
+                mock_conn.getresponse.return_value = mock_resp_landing
+            return mock_conn
+
+        with patch("faultline.engine._create_http_connection", side_effect=fake_create_connection):
+            status_code, resp_headers, body, elapsed, redirects, truncated, total_read = _execute_http_request_with_redirects(
+                run_id=run_id,
+                step_id="step_ci_strip",
+                scheme="http",
+                host="127.0.0.1",
+                port=8766,
+                path="/start",
+                method="GET",
+                headers={
+                    "Authorization": "Bearer sensitive-secret-jwt",
+                    "COOKIE": "session=xyz123",
+                    "X-Api-Key": "sk_live_verysecret",
+                    "X-Custom-Trace": "preserve-this-header",
+                },
+                raw_body=None,
+                timeout=2.0,
+                allowed_statuses={200},
+            )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(len(requests_received), 2)
+
+        # First request on port 8766 has all headers
+        first_headers = requests_received[0]["headers"]
+        self.assertIn("Authorization", first_headers)
+        self.assertIn("COOKIE", first_headers)
+        self.assertIn("X-Api-Key", first_headers)
+
+        # Second request on port 8767 MUST NOT contain any sensitive credentials
+        second_headers = requests_received[1]["headers"]
+        second_keys_lower = {k.lower() for k in second_headers.keys()}
+        self.assertNotIn("authorization", second_keys_lower)
+        self.assertNotIn("cookie", second_keys_lower)
+        self.assertNotIn("x-api-key", second_keys_lower)
+        self.assertEqual(second_headers.get("X-Custom-Trace"), "preserve-this-header")
+
+    def test_bounded_response_body_and_truncation(self) -> None:
+        """Verify response body read honors max_response_bytes ceiling and records truncation."""
+        from faultline.engine import _read_bounded_response, _capture_response_summary
+        from unittest.mock import MagicMock
+
+        mock_resp = MagicMock()
+        # Returns 100 bytes first chunk, 100 bytes second chunk, then empty (total 200 bytes)
+        mock_resp.read.side_effect = [b"A" * 100, b"B" * 100, b""]
+
+        # Limit to 120 bytes
+        captured, total_read, was_truncated = _read_bounded_response(mock_resp, max_bytes=120)
+        self.assertEqual(len(captured), 120)
+        self.assertTrue(was_truncated)
+        self.assertGreater(total_read, 120)
+
+        # Summary reports truncation
+        size, snippet, truncated = _capture_response_summary(captured, total_bytes_read=total_read, body_truncated=was_truncated)
+        self.assertTrue(truncated)
+        self.assertEqual(size, total_read)
 
 
 if __name__ == "__main__":

@@ -2,9 +2,17 @@
 
 Ensures the control plane, store, gap generator, and CLI share an authoritative
 definition of supported faults, primary invariants, and parameter schemas.
+Supports both reference payment integrations and extensible, generic workflows.
 """
 
 from typing import Any
+
+
+PAYMENT_FAULTS: set[str] = {
+    "payment_response_lost_after_commit",
+    "duplicate_payment_webhook",
+    "persistence_failure_after_payment",
+}
 
 
 SUPPORTED_FAULTS: dict[str, dict[str, Any]] = {
@@ -12,16 +20,49 @@ SUPPORTED_FAULTS: dict[str, dict[str, Any]] = {
         "primary_assertion": "no_duplicate_charge",
         "description": "Provider commits charge, but response is dropped before checkout receives it.",
         "defaults": {"retries": 1},
+        "category": "payment",
+        "parameter_schema": {
+            "order_id": {"type": "string", "label": "Order ID", "placeholder": "order-001"},
+            "amount_cents": {"type": "integer", "label": "Charge Amount (cents)", "min": 1},
+            "retries": {"type": "integer", "label": "Retry Attempts", "min": 0, "max": 3},
+            "timeout_seconds": {"type": "integer", "label": "Run Timeout (seconds)", "min": 2, "max": 60},
+        },
     },
     "duplicate_payment_webhook": {
         "primary_assertion": "idempotent_webhook_processing",
         "description": "Network redelivery of payment succeeded webhook.",
         "defaults": {"webhook_deliveries": 2, "delay_ms": 100},
+        "category": "webhook",
+        "parameter_schema": {
+            "order_id": {"type": "string", "label": "Order ID", "placeholder": "order-001"},
+            "amount_cents": {"type": "integer", "label": "Charge Amount (cents)", "min": 1},
+            "webhook_deliveries": {"type": "integer", "label": "Webhook Deliveries", "min": 2, "max": 5},
+            "delay_ms": {"type": "integer", "label": "Delivery Delay (ms)", "min": 0, "max": 5000},
+            "timeout_seconds": {"type": "integer", "label": "Run Timeout (seconds)", "min": 2, "max": 60},
+        },
     },
     "persistence_failure_after_payment": {
         "primary_assertion": "charge_compensated_on_failure",
         "description": "Database write fails after payment commit; requires compensating refund.",
         "defaults": {"retries": 0, "compensate": True},
+        "category": "storage",
+        "parameter_schema": {
+            "order_id": {"type": "string", "label": "Order ID", "placeholder": "order-001"},
+            "amount_cents": {"type": "integer", "label": "Charge Amount (cents)", "min": 1},
+            "retries": {"type": "integer", "label": "Retry Attempts", "min": 0, "max": 3},
+            "timeout_seconds": {"type": "integer", "label": "Run Timeout (seconds)", "min": 2, "max": 60},
+        },
+    },
+    "http_timeout": {
+        "primary_assertion": "all_steps_succeeded_or_handled",
+        "description": "Simulates controlled HTTP timeout against an approved service endpoint.",
+        "defaults": {"timeout_ms": 1500},
+        "category": "network",
+        "parameter_schema": {
+            "target_service": {"type": "string", "label": "Target Service", "placeholder": "e.g. checkout-service"},
+            "timeout_ms": {"type": "integer", "label": "Timeout Duration (ms)", "min": 100, "max": 30000},
+            "timeout_seconds": {"type": "integer", "label": "Run Timeout (seconds)", "min": 2, "max": 60},
+        },
     },
 }
 
@@ -47,9 +88,26 @@ def validate_scenario(definition: dict[str, Any]) -> None:
     if fault not in SUPPORTED_FAULTS:
         raise ValueError(f"unsupported fault type: '{fault}'. Supported: {list(SUPPORTED_FAULTS.keys())}")
 
+    workflow = definition.get("workflow")
+    valid_step_ids = set(VALID_WORKFLOW_STEPS)
+    if workflow is not None:
+        if not isinstance(workflow, list):
+            raise ValueError("workflow must be a list of step definitions")
+        seen_step_ids = set()
+        for idx, step in enumerate(workflow):
+            if not isinstance(step, dict):
+                raise ValueError(f"workflow step #{idx+1} must be an object")
+            step_id = step.get("id")
+            if not step_id or not isinstance(step_id, str):
+                raise ValueError(f"workflow step #{idx+1} missing valid 'id'")
+            if step_id in seen_step_ids:
+                raise ValueError(f"duplicate workflow step id '{step_id}'")
+            seen_step_ids.add(step_id)
+            valid_step_ids.add(step_id)
+
     target_step = definition.get("target_step")
-    if target_step is not None and target_step not in VALID_WORKFLOW_STEPS:
-        raise ValueError(f"unsupported target_step: '{target_step}'. Valid steps: {sorted(VALID_WORKFLOW_STEPS)}")
+    if target_step is not None and target_step not in valid_step_ids:
+        raise ValueError(f"unsupported target_step: '{target_step}'. Valid steps: {sorted(valid_step_ids)}")
 
     expected_assertion = SUPPORTED_FAULTS[fault]["primary_assertion"]
     if definition.get("assertion") != expected_assertion:
@@ -61,23 +119,31 @@ def validate_scenario(definition: dict[str, Any]) -> None:
     if not isinstance(definition.get("name"), str) or not definition["name"].strip():
         raise ValueError("scenario name is required")
 
-    if not isinstance(definition.get("order_id"), str) or not definition["order_id"].strip():
-        raise ValueError("order_id is required")
+    # Payment-specific schema validations: only required when fault is a payment fault
+    if fault in PAYMENT_FAULTS:
+        if not isinstance(definition.get("order_id"), str) or not definition["order_id"].strip():
+            raise ValueError("order_id is required")
 
-    if type(definition.get("amount_cents")) is not int or definition["amount_cents"] < 1:
-        raise ValueError("amount_cents must be a positive integer")
+        if type(definition.get("amount_cents")) is not int or definition["amount_cents"] < 1:
+            raise ValueError("amount_cents must be a positive integer")
 
-    if fault in {"payment_response_lost_after_commit", "persistence_failure_after_payment"}:
-        retries = definition.get("retries")
-        if type(retries) is not int or not 0 <= retries <= 3:
-            raise ValueError("retries must be an integer between 0 and 3")
-    elif fault == "duplicate_payment_webhook":
-        deliveries = definition.get("webhook_deliveries", 2)
-        if type(deliveries) is not int or not 2 <= deliveries <= 5:
-            raise ValueError("webhook_deliveries must be an integer between 2 and 5")
-        delay = definition.get("delay_ms", 100)
-        if type(delay) is not int or not 0 <= delay <= 5000:
-            raise ValueError("delay_ms must be an integer between 0 and 5000")
+        if fault in {"payment_response_lost_after_commit", "persistence_failure_after_payment"}:
+            retries = definition.get("retries")
+            if type(retries) is not int or not 0 <= retries <= 3:
+                raise ValueError("retries must be an integer between 0 and 3")
+        elif fault == "duplicate_payment_webhook":
+            deliveries = definition.get("webhook_deliveries", 2)
+            if type(deliveries) is not int or not 2 <= deliveries <= 5:
+                raise ValueError("webhook_deliveries must be an integer between 2 and 5")
+            delay = definition.get("delay_ms", 100)
+            if type(delay) is not int or not 0 <= delay <= 5000:
+                raise ValueError("delay_ms must be an integer between 0 and 5000")
+    else:
+        # Generic / non-payment fault validations
+        if "timeout_ms" in definition:
+            t_ms = definition["timeout_ms"]
+            if type(t_ms) is not int or not 100 <= t_ms <= 30000:
+                raise ValueError("timeout_ms must be an integer between 100 and 30000")
 
     timeout = definition.get("timeout_seconds", 15)
     if type(timeout) is not int or not 2 <= timeout <= 60:

@@ -1306,6 +1306,101 @@ class FaultlinePlatformTests(unittest.TestCase):
                 f"Template {t_id} expected_invariants do not match emitted run assertions",
             )
 
+    def test_unknown_fault_fails_closed_in_engine(self) -> None:
+        """Verify engine fails closed on unknown fault type without falling back to payment execution."""
+        from faultline import engine
+        from faultline.adapters import provider, checkout_service
+
+        run_id = f"test-unknown-fault-{uuid4().hex[:6]}"
+        bad_scenario = {
+            "name": "unsupported-fault-run",
+            "scenario_version": 1,
+            "fault": "unsupported_unknown_fault",
+            "assertion": "some_assertion",
+        }
+        store.create_run(run_id, "payment-response-lost", 1, "vulnerable")
+
+        # Execute run directly
+        engine.execute_run(run_id, bad_scenario, "vulnerable")
+
+        run = store.get_run(run_id)
+        self.assertEqual(run["status"], "failed")
+        self.assertEqual(run["verdict"], "error")
+        self.assertIn("unsupported fault type 'unsupported_unknown_fault'", run.get("error", ""))
+
+        # Verify no payment side-effects occurred
+        self.assertEqual(provider.ledger(run_id), [])
+        self.assertEqual(checkout_service.ledger(run_id), [])
+
+        # Verify events
+        event_types = [e["type"] for e in run.get("events", [])]
+        self.assertIn("RUN_EXECUTION_FAILED", event_types)
+        self.assertNotIn("ASSERTIONS_EVALUATED", event_types)
+
+    def test_generic_non_payment_scenario_execution(self) -> None:
+        """Verify non-payment scenario (e.g. http_timeout with workflow steps) validates and executes cleanly."""
+        from faultline import engine
+
+        generic_def = {
+            "scenario_version": 1,
+            "name": "generic-service-timeout",
+            "description": "Simulate network timeout on generic downstream HTTP service",
+            "fault": "http_timeout",
+            "assertion": "all_steps_succeeded_or_handled",
+            "timeout_seconds": 10,
+            "timeout_ms": 1500,
+            "workflow": [
+                {"id": "auth_token", "name": "Fetch Auth Token", "type": "http.post"},
+                {"id": "call_service", "name": "Call Downstream Service", "type": "http.get"},
+                {"id": "save_record", "name": "Persist Response Record", "type": "db.write"},
+            ],
+            "target_step": "call_service",
+        }
+
+        # 1. Validates cleanly without payment fields (order_id, amount_cents)
+        server.validate_scenario(generic_def)
+
+        # 2. Register scenario via API
+        sc_id = f"gen-scen-{uuid4().hex[:6]}"
+        status, res = self.request("POST", "/api/scenarios", {
+            "definition": {**generic_def, "name": sc_id},
+        })
+        self.assertEqual(status, 201)
+
+        # 3. Execute in vulnerable mode -> fails assertion due to simulated unhandled timeout
+        vuln_run = self.launch_and_wait("vulnerable", sc_id)
+        self.assertEqual(vuln_run["verdict"], "failed")
+        vuln_events = [e["type"] for e in vuln_run.get("events", [])]
+        self.assertIn("FAULT_INJECTED", vuln_events)
+        self.assertIn("STEP_FAILED", vuln_events)
+
+        # 4. Execute in fixed mode -> recovers and passes
+        fixed_run = self.launch_and_wait("fixed", sc_id)
+        self.assertEqual(fixed_run["verdict"], "passed")
+        fixed_events = [e["type"] for e in fixed_run.get("events", [])]
+        self.assertIn("FAULT_INJECTED", fixed_events)
+        self.assertIn("STEP_RETRY", fixed_events)
+        self.assertIn("STEP_COMPLETED", fixed_events)
+
+        # Invariants
+        assertions = {a["name"]: a["status"] for a in fixed_run["assertions"]}
+        self.assertEqual(assertions.get("fault_activation_confirmed"), "passed")
+        self.assertEqual(assertions.get("all_steps_succeeded_or_handled"), "passed")
+
+    def test_prohibited_ports_security_enforcement(self) -> None:
+        """Verify that loopback security check rejects dangerous/privileged service ports."""
+        from faultline import security
+
+        # Prohibited ports (SSH, Telnet, SMTP, DNS, SMB, etc.) must be rejected
+        for port in [21, 22, 23, 25, 53, 110, 135, 139, 445]:
+            self.assertFalse(security.is_loopback_allowed("127.0.0.1", port=port), f"Port {port} should be prohibited")
+            self.assertFalse(security.is_loopback_allowed("localhost", port=port), f"Port {port} should be prohibited")
+
+        # Approved application ports should be permitted
+        self.assertTrue(security.is_loopback_allowed("127.0.0.1", port=8000))
+        self.assertTrue(security.is_loopback_allowed("127.0.0.1", port=8080))
+        self.assertTrue(security.is_loopback_allowed("localhost", port=3000))
+
 
 if __name__ == "__main__":
     unittest.main()

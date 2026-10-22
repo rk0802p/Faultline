@@ -339,22 +339,24 @@
                       <option value="">Select a supported failure mode...</option>
                     </select>
                   </label>
-                  <label>
-                    Target Step / Resource ID
-                    <input data-field="order_id" maxlength="80" placeholder="e.g. order-001 or target-id">
-                  </label>
-                  <label>
-                    Amount / Payload Magnitude
-                    <input data-field="amount_cents" type="number" min="1" step="1" placeholder="e.g. 2500">
-                  </label>
-                  <label>
-                    Retry Attempts
-                    <input data-field="retries" type="number" min="0" max="3" step="1">
-                  </label>
-                  <label>
-                    Run Timeout (seconds)
-                    <input data-field="timeout_seconds" type="number" min="2" max="60" step="1">
-                  </label>
+                  <div id="dynamic-editor-fields" style="display:contents">
+                    <label>
+                      Target Step / Resource ID
+                      <input data-field="order_id" maxlength="80" placeholder="e.g. order-001 or target-id">
+                    </label>
+                    <label>
+                      Amount / Payload Magnitude
+                      <input data-field="amount_cents" type="number" min="1" step="1" placeholder="e.g. 2500">
+                    </label>
+                    <label>
+                      Retry Attempts
+                      <input data-field="retries" type="number" min="0" max="3" step="1">
+                    </label>
+                    <label>
+                      Run Timeout (seconds)
+                      <input data-field="timeout_seconds" type="number" min="2" max="60" step="1">
+                    </label>
+                  </div>
                 </div>
 
                 <div style="display:flex;gap:10px;align-items:center;margin-top:16px">

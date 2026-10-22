@@ -230,11 +230,12 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             cancel_match = re.fullmatch(r"/api/runs/([^/]+)/cancel", path)
             if cancel_match:
                 run_id = cancel_match.group(1)
+                run = store.get_run(run_id)
+                proj_id = (run.get("project_id") if run else None) or store.default_project_id()
                 if engine.cancel(run_id):
-                    store.record_audit_event("faultline-demo", "developer", "RUN_CANCEL_REQUESTED", "run", run_id, {})
+                    store.record_audit_event(proj_id, "developer", "RUN_CANCEL_REQUESTED", "run", run_id, {})
                     self.respond(202, {"run_id": run_id, "status": "cancel_requested"})
                 else:
-                    run = store.get_run(run_id)
                     self.respond(409, {"error": "run is not cancellable", "status": run["status"] if run else "not_found"})
                 return
             prune_match = re.fullmatch(r"/api/projects/([^/]+)/prune", path)
@@ -332,13 +333,16 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                     raise ValueError("comment is required")
                 seq = payload.get("sequence_number")
                 annotation = store.add_annotation(run_id, author, comment, seq)
-                store.record_audit_event("faultline-demo", author, "ANNOTATION_ADDED", "run", run_id, {"comment": comment[:80]})
+                run = store.get_run(run_id)
+                proj_id = (run.get("project_id") if run else None) or store.default_project_id()
+                store.record_audit_event(proj_id, author, "ANNOTATION_ADDED", "run", run_id, {"comment": comment[:80]})
                 self.respond(201, {"annotation": annotation})
                 return
             task_match = re.fullmatch(r"/api/runs/([^/]+)/tasks", path)
             if task_match:
                 run_id = task_match.group(1)
-                if not store.get_run(run_id):
+                run = store.get_run(run_id)
+                if not run:
                     self.respond(404, {"error": "run not found"})
                     return
                 title = payload.get("title", "").strip()
@@ -347,20 +351,22 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 description = payload.get("description", "")
                 priority = payload.get("priority", "medium")
                 assignee = payload.get("assignee", "Developer")
-                task = store.create_task("faultline-demo", run_id, title, description, priority, assignee)
-                store.record_audit_event("faultline-demo", assignee, "TASK_CREATED", "task", task["id"], {"title": title, "priority": priority})
+                proj_id = payload.get("project_id") or run.get("project_id") or store.default_project_id()
+                task = store.create_task(proj_id, run_id, title, description, priority, assignee)
+                store.record_audit_event(proj_id, assignee, "TASK_CREATED", "task", task["id"], {"title": title, "priority": priority})
                 self.respond(201, {"task": task})
                 return
             if path == "/api/scenarios/generate-from-gaps":
-                project_id = payload.get("project_id", "faultline-demo")
+                project_id = payload.get("project_id") or store.default_project_id()
                 generated = store.generate_scenarios_from_gaps(project_id)
                 store.record_audit_event(project_id, "developer", "SCENARIOS_GENERATED_FROM_GAPS", "project", project_id, {"count": len(generated)})
                 self.respond(201, {"generated": generated, "count": len(generated)})
                 return
             if path == "/api/workflows/import-openapi":
                 spec_data = payload.get("spec") or payload.get("spec_text") or payload
+                project_id = payload.get("project_id") or store.default_project_id()
                 workflow = importer.import_openapi_spec(spec_data)
-                store.record_audit_event("faultline-demo", "developer", "OPENAPI_IMPORTED", "api", workflow["title"], {"endpoints": workflow["endpoints_count"]})
+                store.record_audit_event(project_id, "developer", "OPENAPI_IMPORTED", "api", workflow["title"], {"endpoints": workflow["endpoints_count"]})
                 self.respond(200, {"workflow": workflow})
                 return
             template_match = re.fullmatch(r"/api/templates/([^/]+)/instantiate", path)
@@ -369,7 +375,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 scenario_id = payload.get("scenario_id") or f"scenario-{uuid4().hex[:6]}"
                 name = payload.get("name")
                 parameters = payload.get("parameters")
-                project_id = payload.get("project_id", "faultline-demo")
+                project_id = payload.get("project_id") or store.default_project_id()
                 instance = store.instantiate_template(template_id, scenario_id, name, parameters, project_id=project_id)
                 store.record_audit_event(project_id, "developer", "TEMPLATE_INSTANTIATED", "scenario", scenario_id, {"template_id": template_id})
                 self.respond(201, {"instance": instance})
@@ -402,7 +408,8 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 if any(item["id"] == scenario_id for item in store.list_scenarios()):
                     scenario_id = f"{scenario_id}-{uuid4().hex[:4]}"
                 definition["name"] = scenario_id
-                store.create_scenario(scenario_id, "faultline-demo", definition)
+                project_id = payload.get("project_id") or store.default_project_id()
+                store.create_scenario(scenario_id, project_id, definition)
                 self.respond(201, {"scenario_id": scenario_id, "version": 1, "definition": definition})
                 return
             if path == "/api/scenarios/validate":
@@ -415,8 +422,9 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 validate_scenario(definition)
                 scenario_id = re.sub(r"[^a-z0-9]+", "-", definition["name"].lower()).strip("-")[:64]
                 if any(item["id"] == scenario_id for item in store.list_scenarios()): raise ValueError("scenario name already exists")
-                store.create_scenario(scenario_id, "faultline-demo", definition)
-                store.record_audit_event("faultline-demo", "developer", "SCENARIO_CREATED", "scenario", scenario_id, {})
+                project_id = payload.get("project_id") or store.default_project_id()
+                store.create_scenario(scenario_id, project_id, definition)
+                store.record_audit_event(project_id, "developer", "SCENARIO_CREATED", "scenario", scenario_id, {})
                 self.respond(201, {"scenario_id": scenario_id, "version": 1})
                 return
             if path == "/api/suites":
@@ -428,19 +436,22 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 scenarios = payload.get("scenarios", [])
                 if not isinstance(scenarios, list) or not scenarios:
                     raise ValueError("scenarios must be a non-empty list of scenario IDs")
-                store.create_suite(suite_id, payload.get("project_id", "faultline-demo"), name, description, scenarios)
-                store.record_audit_event("faultline-demo", "developer", "SUITE_CREATED", "suite", suite_id, {"scenarios": scenarios})
+                project_id = payload.get("project_id") or store.default_project_id()
+                store.create_suite(suite_id, project_id, name, description, scenarios)
+                store.record_audit_event(project_id, "developer", "SUITE_CREATED", "suite", suite_id, {"scenarios": scenarios})
                 self.respond(201, {"suite_id": suite_id})
                 return
             version_match = re.fullmatch(r"/api/scenarios/([^/]+)/versions", path)
             if version_match:
                 scenario_id = version_match.group(1)
-                if not any(item["id"] == scenario_id for item in store.list_scenarios()):
+                sc = next((item for item in store.list_scenarios() if item["id"] == scenario_id), None)
+                if not sc:
                     self.respond(404, {"error": "scenario not found"}); return
                 definition = payload.get("definition")
                 validate_scenario(definition)
                 version = store.add_scenario_version(scenario_id, definition)
-                store.record_audit_event("faultline-demo", "developer", "SCENARIO_VERSIONED", "scenario", scenario_id, {"version": version})
+                proj_id = sc.get("project_id") or store.default_project_id()
+                store.record_audit_event(proj_id, "developer", "SCENARIO_VERSIONED", "scenario", scenario_id, {"version": version})
                 self.respond(201, {"scenario_id": scenario_id, "version": version})
                 return
             scenario_id = payload.get("scenario_id", "payment-response-lost")
@@ -455,7 +466,8 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             run_id = str(uuid4())
             store.create_run(run_id, scenario_id, scenario["version"], implementation)
             store.record_event(run_id, "RUN_QUEUED", {"scenario_id": scenario_id})
-            store.record_audit_event("faultline-demo", "developer", "RUN_SUBMITTED", "run", run_id, {"scenario_id": scenario_id, "implementation": implementation})
+            proj_id = payload.get("project_id") or scenario.get("project_id") or store.default_project_id()
+            store.record_audit_event(proj_id, "developer", "RUN_SUBMITTED", "run", run_id, {"scenario_id": scenario_id, "implementation": implementation})
             submit(run_id, scenario["definition"], implementation)
             logger.info("submitted run_id=%s scenario=%s implementation=%s", run_id, scenario_id, implementation)
             self.respond(202, {"run_id": run_id, "status": "queued"})
@@ -480,7 +492,8 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 priority=payload.get("priority"),
             )
             if updated:
-                store.record_audit_event("faultline-demo", updated.get("assignee", "developer"), "TASK_UPDATED", "task", task_id, payload)
+                proj_id = updated.get("project_id") or store.default_project_id()
+                store.record_audit_event(proj_id, updated.get("assignee", "developer"), "TASK_UPDATED", "task", task_id, payload)
                 self.respond(200, {"task": updated})
             else:
                 self.respond(404, {"error": "task not found"})

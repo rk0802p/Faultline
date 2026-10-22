@@ -42,6 +42,9 @@ CONTAINER_SERVICE_PORTS: dict[str, set[int]] = {
     "redis": {6379},
 }
 
+# Dangerous / privileged ports prohibited from automated test targeting
+PROHIBITED_PORTS: set[int] = {21, 22, 23, 25, 53, 110, 135, 137, 138, 139, 445}
+
 
 def redact_sensitive(obj: Any) -> Any:
     """Best-effort recursive redaction for common sensitive keys and pattern-matching strings."""
@@ -139,6 +142,10 @@ def is_loopback_allowed(target: str, port: int | None = None) -> bool:
             return False
 
     if not hostname or hostname == "0.0.0.0":
+        return False
+
+    # Enforce strict prohibited port restrictions for all loopback destinations
+    if effective_port is not None and effective_port in PROHIBITED_PORTS:
         return False
 
     # Check IP literals with ipaddress module to enforce true loopback

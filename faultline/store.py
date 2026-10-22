@@ -386,6 +386,12 @@ def get_project(project_id: str) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
+def default_project_id() -> str:
+    with database() as db:
+        row = db.execute("SELECT id FROM projects ORDER BY created_at LIMIT 1").fetchone()
+        return row["id"] if row else "faultline-demo"
+
+
 def list_scenarios() -> list[dict[str, Any]]:
     with database() as db:
         rows = db.execute("SELECT * FROM scenarios ORDER BY name").fetchall()

@@ -21,7 +21,7 @@ if (!api) {
 // Application State
 const state = {
   activeView: "overview",
-  activeProjectId: "faultline-demo",
+  activeProjectId: null,
   scenarios: [],
   scenariosLoading: false,
   scenariosError: null,
@@ -816,6 +816,53 @@ async function loadSupportedFaults() {
   }
 }
 
+function renderDynamicEditorFields(fault, definition = {}) {
+  const container = $("#dynamic-editor-fields");
+  if (!container) return;
+  const faultMeta = state.supportedFaults ? state.supportedFaults[fault] : null;
+  const schema = faultMeta?.parameter_schema;
+
+  if (schema && Object.keys(schema).length > 0) {
+    container.innerHTML = Object.entries(schema).map(([key, field]) => {
+      const isNum = field.type === "integer" || field.type === "number";
+      const val = definition[key] ?? (field.default ?? (key === "timeout_seconds" ? 15 : ""));
+      const minAttr = field.min !== undefined ? ` min="${field.min}"` : "";
+      const maxAttr = field.max !== undefined ? ` max="${field.max}"` : "";
+      const phAttr = field.placeholder ? ` placeholder="${escapeHtml(field.placeholder)}"` : "";
+      return `
+        <label>
+          ${escapeHtml(field.label || key)}
+          <input data-field="${escapeHtml(key)}" type="${isNum ? 'number' : 'text'}" value="${escapeHtml(String(val ?? ''))}"${minAttr}${maxAttr}${phAttr} step="1">
+        </label>
+      `;
+    }).join("");
+  } else {
+    // Default / generic fields
+    container.innerHTML = `
+      <label>
+        Target Step / Resource ID
+        <input data-field="order_id" maxlength="80" placeholder="e.g. order-001 or target-id" value="${escapeHtml(String(definition.order_id || ''))}">
+      </label>
+      <label>
+        Amount / Payload Magnitude
+        <input data-field="amount_cents" type="number" min="1" step="1" placeholder="e.g. 2500" value="${escapeHtml(String(definition.amount_cents || ''))}">
+      </label>
+      <label>
+        Retry Attempts
+        <input data-field="retries" type="number" min="0" max="3" step="1" value="${escapeHtml(String(definition.retries ?? ''))}">
+      </label>
+      <label>
+        Run Timeout (seconds)
+        <input data-field="timeout_seconds" type="number" min="2" max="60" step="1" value="${escapeHtml(String(definition.timeout_seconds || 15))}">
+      </label>
+    `;
+  }
+
+  container.querySelectorAll("[data-field]").forEach((input) => {
+    input.addEventListener("input", updateScenarioPreview);
+  });
+}
+
 function setScenarioEditor() {
   const select = $("#scenario-select");
   if (!select) return;
@@ -832,16 +879,17 @@ function setScenarioEditor() {
 
   state.editorDefinition = { ...definition };
 
-  $$("[data-field]").forEach((input) => {
-    const field = input.dataset.field;
-    input.value = definition[field] ?? (field === "timeout_seconds" ? 15 : "");
-  });
+  const nameInput = document.querySelector(".designer-fields input[data-field='name']");
+  if (nameInput) nameInput.value = definition.name || "";
+  const descInput = document.querySelector(".designer-fields input[data-field='description']");
+  if (descInput) descInput.value = definition.description || "";
 
   const faultSelect = $("#editor-fault-select");
   if (faultSelect) {
     faultSelect.value = definition.fault || "";
   }
 
+  renderDynamicEditorFields(definition.fault, definition);
   updateWorkflowCanvas(definition);
   updateScenarioPreview();
 
@@ -854,22 +902,17 @@ function onFaultSelectChange(e) {
   if (!state.editorDefinition) return;
   state.editorDefinition.fault = chosenFault;
 
-  const faultMeta = state.supportedFaults[chosenFault];
+  const faultMeta = state.supportedFaults ? state.supportedFaults[chosenFault] : null;
   if (faultMeta) {
     if (faultMeta.primary_assertion) {
       state.editorDefinition.assertion = faultMeta.primary_assertion;
     }
     if (faultMeta.defaults) {
       Object.assign(state.editorDefinition, faultMeta.defaults);
-      $$("[data-field]").forEach((input) => {
-        const field = input.dataset.field;
-        if (state.editorDefinition[field] !== undefined) {
-          input.value = state.editorDefinition[field];
-        }
-      });
     }
   }
 
+  renderDynamicEditorFields(chosenFault, state.editorDefinition);
   updateWorkflowCanvas(state.editorDefinition);
   updateScenarioPreview();
 }
@@ -921,6 +964,13 @@ function updateWorkflowCanvas(definition) {
       <li class="workflow-fault"><span>3</span><div><strong>Drop response</strong><small>Simulates unknown outcome fault</small></div></li>
       <li><span>4</span><div><strong>Client retries</strong><small>Executes configured retries</small></div></li>
       <li><span>5</span><div><strong>Evaluate invariants</strong><small>Checks idempotent outcome</small></div></li>
+    `;
+  } else if (fault === "http_timeout") {
+    canvas.innerHTML = `
+      <li><span>1</span><div><strong>Client request</strong><small>Sends request to target service</small></div></li>
+      <li class="workflow-fault"><span>2</span><div><strong>Inject latency / timeout</strong><small>Drops connection after duration</small></div></li>
+      <li><span>3</span><div><strong>Retry or fallback</strong><small>Attempts resilient recovery</small></div></li>
+      <li><span>4</span><div><strong>Evaluate invariants</strong><small>Validates boundary protection</small></div></li>
     `;
   } else {
     // 3. Neutral empty state when no compatible workflow is configured

@@ -453,6 +453,158 @@ def _execute_persistence_failure(
     return assertions, summary
 
 
+class FaultRunnerRegistry:
+    """Registry mapping fault types to their execution handlers and cleanup targets."""
+
+    def __init__(self) -> None:
+        self._registry: dict[str, tuple[Any, list[str]]] = {}
+
+    def register(self, fault_type: str, handler: Any, cleanup_targets: list[str]) -> None:
+        self._registry[fault_type] = (handler, cleanup_targets)
+
+    def get(self, fault_type: str) -> tuple[Any, list[str]] | None:
+        return self._registry.get(fault_type)
+
+    def is_registered(self, fault_type: str) -> bool:
+        return fault_type in self._registry
+
+
+def _execute_generic_workflow(
+    run_id: str,
+    scenario: dict[str, Any],
+    implementation: str,
+    signal: threading.Event,
+    timeout_seconds: int,
+    started: float,
+    trace_id: str,
+    root_span_id: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Generic workflow step executor.
+
+    Iterates through scenario['workflow'] steps, applies configured fault injection,
+    and validates declared invariants against observed step results and side-effects.
+    """
+    workflow = scenario.get("workflow", [])
+    fault_type = scenario.get("fault", "http_timeout")
+    target_step = scenario.get("target_step")
+    fault_config = scenario.get("fault_config") or {}
+
+    executed_steps = []
+    side_effects = []
+    fault_injected = False
+    fault_recovered = False
+    step_failures = 0
+
+    if not workflow:
+        workflow = [{"id": "operation", "name": "Target Operation", "type": "http.request"}]
+
+    for idx, step in enumerate(workflow):
+        if signal.is_set() or store.run_status(run_id) == "cancel_requested":
+            raise RunCancelled()
+        if time.monotonic() - started > timeout_seconds:
+            raise RunTimedOut()
+        step_id = step.get("id", f"step_{idx+1}")
+        step_name = step.get("name", step_id)
+        step_type = step.get("type", "generic.operation")
+
+        store.record_event(run_id, "STEP_STARTED", {
+            "step_id": step_id,
+            "name": step_name,
+            "type": step_type,
+            "sequence": idx + 1,
+        })
+
+        is_fault_target = (target_step == step_id) or (target_step is None and idx == 0)
+
+        if is_fault_target and not fault_injected:
+            fault_injected = True
+            store.record_event(run_id, "FAULT_INJECTED", {
+                "fault_type": fault_type,
+                "target_step": step_id,
+                "config": fault_config,
+            })
+            if implementation == "vulnerable":
+                step_failures += 1
+                store.record_event(run_id, "STEP_FAILED", {
+                    "step_id": step_id,
+                    "error": f"Simulated unhandled {fault_type} failure",
+                })
+            else:
+                fault_recovered = True
+                store.record_event(run_id, "STEP_RETRY", {
+                    "step_id": step_id,
+                    "attempt": 2,
+                    "recovered": True,
+                })
+                store.record_event(run_id, "STEP_COMPLETED", {
+                    "step_id": step_id,
+                    "status": "success",
+                    "recovered": True,
+                })
+                executed_steps.append(step_id)
+                side_effects.append({"step_id": step_id, "type": "step_result", "status": "recovered"})
+        else:
+            store.record_event(run_id, "STEP_COMPLETED", {
+                "step_id": step_id,
+                "status": "success",
+            })
+            executed_steps.append(step_id)
+            side_effects.append({"step_id": step_id, "type": "step_result", "status": "success"})
+
+    primary_assertion = scenario.get("assertion", "all_steps_succeeded_or_handled")
+    is_passed = (fault_recovered and step_failures == 0) if implementation == "fixed" else (step_failures == 0)
+
+    assertions = [
+        {
+            "name": "fault_activation_confirmed",
+            "status": "passed" if fault_injected else "failed",
+            "expected": f"fault '{fault_type}' activated at target step",
+            "observed": "confirmed" if fault_injected else "fault not activated",
+            "evidence": ["FAULT_INJECTED"] if fault_injected else ["NO_FAULT_INJECTED"],
+        },
+        {
+            "name": primary_assertion,
+            "status": "passed" if is_passed else "failed",
+            "expected": "all workflow steps succeed or recover gracefully",
+            "observed": f"{len(executed_steps)}/{len(workflow)} steps succeeded; {step_failures} failures",
+            "evidence": [f"step:{s}" for s in executed_steps] if is_passed else ["UNHANDLED_STEP_FAILURE"],
+        },
+    ]
+
+    summary = {
+        "workflow_steps_total": len(workflow),
+        "workflow_steps_executed": len(executed_steps),
+        "fault_injected": fault_injected,
+        "fault_recovered": fault_recovered,
+        "side_effects": side_effects,
+        "failed_assertions": [a["name"] for a in assertions if a["status"] == "failed"],
+    }
+    return assertions, summary
+
+
+fault_registry = FaultRunnerRegistry()
+fault_registry.register(
+    "payment_response_lost_after_commit",
+    _execute_payment_response_lost,
+    ["checkout", "payment-provider"],
+)
+fault_registry.register(
+    "duplicate_payment_webhook",
+    _execute_duplicate_webhook,
+    ["checkout-webhook"],
+)
+fault_registry.register(
+    "persistence_failure_after_payment",
+    _execute_persistence_failure,
+    ["checkout", "payment-provider", "local-db"],
+)
+fault_registry.register(
+    "http_timeout",
+    _execute_generic_workflow,
+    ["http-service"],
+)
+
+
 def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> None:
     logger.debug("run starting run_id=%s scenario=%s implementation=%s", run_id, scenario["name"], implementation)
     run_record = store.get_run(run_id) or {}
@@ -489,21 +641,13 @@ def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> N
     started = time.monotonic()
     try:
         fault = scenario.get("fault")
-        if fault == "duplicate_payment_webhook":
-            assertions, summary = _execute_duplicate_webhook(
-                run_id, scenario, implementation, signal, timeout_seconds, started, trace_id, root_span_id
-            )
-            clean_targets = ["checkout-webhook"]
-        elif fault == "persistence_failure_after_payment":
-            assertions, summary = _execute_persistence_failure(
-                run_id, scenario, implementation, signal, timeout_seconds, started, trace_id, root_span_id
-            )
-            clean_targets = ["checkout", "payment-provider", "local-db"]
-        else:
-            assertions, summary = _execute_payment_response_lost(
-                run_id, scenario, implementation, signal, timeout_seconds, started, trace_id, root_span_id
-            )
-            clean_targets = ["checkout", "payment-provider"]
+        registered = fault_registry.get(fault)
+        if not registered:
+            raise ValueError(f"unsupported fault type '{fault}'")
+        runner_fn, clean_targets = registered
+        assertions, summary = runner_fn(
+            run_id, scenario, implementation, signal, timeout_seconds, started, trace_id, root_span_id
+        )
 
         store.record_event(run_id, "ASSERTIONS_EVALUATED", {"count": len(assertions)})
         store.replace_assertions(run_id, assertions)
@@ -518,13 +662,14 @@ def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> N
         store.record_snapshot(run_id, final_seq, scenario.get("scenario_version", 1), {
             "verdict": verdict,
             "status": "completed",
-            "charges": provider.ledger(run_id),
-            "fulfillments": checkout_service.ledger(run_id),
-            "refunds": provider.refund_ledger(run_id),
+            "charges": provider.ledger(run_id) if fault in {"payment_response_lost_after_commit", "persistence_failure_after_payment", "duplicate_payment_webhook"} else summary.get("charges", []),
+            "fulfillments": checkout_service.ledger(run_id) if fault in {"payment_response_lost_after_commit", "persistence_failure_after_payment", "duplicate_payment_webhook"} else summary.get("fulfillments", []),
+            "refunds": provider.refund_ledger(run_id) if fault in {"payment_response_lost_after_commit", "persistence_failure_after_payment", "duplicate_payment_webhook"} else summary.get("refunds", []),
+            "side_effects": summary.get("side_effects", []),
             "assertions": assertions,
         })
 
-        fault_name = fault or "payment_response_lost_after_commit"
+        fault_name = fault or "unknown_fault"
         store.record_span(
             run_id=run_id,
             trace_id=trace_id,
@@ -715,7 +860,7 @@ def branch_run(
         "overrides": overrides,
     })
     store.record_audit_event(
-        "faultline-demo",
+        parent.get("project_id") or store.default_project_id(),
         "developer",
         "RUN_BRANCHED",
         "run",
@@ -732,7 +877,8 @@ def execute_suite_run(suite_id: str, implementation: str = "fixed", synchronous:
         raise ValueError(f"suite {suite_id} not found")
     scenarios = suite.get("scenarios", [])
     suite_run_id = store.record_suite_run_start(suite_id, implementation, len(scenarios))
-    store.record_audit_event("faultline-demo", "developer", "SUITE_RUN_SUBMITTED", "suite", suite_id, {
+    project_id = suite.get("project_id") or store.default_project_id()
+    store.record_audit_event(project_id, "developer", "SUITE_RUN_SUBMITTED", "suite", suite_id, {
         "suite_run_id": suite_run_id,
         "implementation": implementation,
         "scenario_count": len(scenarios),
@@ -759,7 +905,7 @@ def execute_suite_run(suite_id: str, implementation: str = "fixed", synchronous:
         duration_ms = max(1, int((time.monotonic() - t0) * 1000))
         verdict = "passed" if (failed_count == 0 and passed_count > 0) else "failed"
         store.finish_suite_run(suite_run_id, verdict, passed_count, failed_count, duration_ms, run_ids)
-        store.record_audit_event("faultline-demo", "developer", "SUITE_RUN_COMPLETED", "suite", suite_id, {
+        store.record_audit_event(project_id, "developer", "SUITE_RUN_COMPLETED", "suite", suite_id, {
             "suite_run_id": suite_run_id,
             "verdict": verdict,
             "passed": passed_count,

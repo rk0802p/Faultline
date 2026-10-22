@@ -83,13 +83,6 @@ fault_schema_registry.register(
 SUPPORTED_FAULTS: dict[str, dict[str, Any]] = fault_schema_registry._faults
 VALID_WORKFLOW_STEPS: set[str] = fault_schema_registry._legacy_steps
 
-# Backward-compatibility alias
-PAYMENT_FAULTS: set[str] = {
-    "payment_response_lost_after_commit",
-    "duplicate_payment_webhook",
-    "persistence_failure_after_payment",
-}
-
 
 def register_fault_schema(
     fault_name: str,
@@ -274,3 +267,16 @@ def validate_template_parameters(schema: dict[str, Any], parameters: dict[str, A
         elif expected_type == "boolean":
             if not isinstance(value, bool):
                 raise ValueError(f"parameter '{key}' must be a boolean, got {type(value).__name__}")
+
+
+def __getattr__(name: str) -> Any:
+    if name == "PAYMENT_FAULTS":
+        import warnings
+        from .integrations.payment import PAYMENT_FAULTS
+        warnings.warn(
+            "PAYMENT_FAULTS in faultline.schema is deprecated; import from faultline.integrations.payment instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return PAYMENT_FAULTS
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")

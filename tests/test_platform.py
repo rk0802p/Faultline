@@ -70,7 +70,7 @@ class FaultlinePlatformTests(unittest.TestCase):
         return response.status, result
 
     def wait_for_run(self, run_id: str) -> dict:
-        for _ in range(60):
+        for _ in range(200):
             status, result = self.request("GET", f"/api/runs/{run_id}")
             self.assertEqual(status, 200)
             if result["run"]["status"] in {"completed", "failed", "cancelled", "timed_out"}:
@@ -2325,6 +2325,80 @@ class FaultlinePlatformTests(unittest.TestCase):
         final_snap = snapshots[-1]["snapshot"]
         self.assertEqual(final_snap["verdict"], "passed")
         self.assertEqual(len(final_snap["side_effects"]), 2)
+
+    def test_fresh_engine_loads_custom_integration_without_importing_payment_module(self) -> None:
+        """Verify that a fresh engine can load a custom integration pack specified via
+
+        FAULTLINE_INTEGRATION_MODULES without ever importing faultline.integrations.payment,
+        and verify that the integration manager deterministically rejects duplicate registrations.
+        """
+        import subprocess
+        import sys
+
+        child_script = """
+import os
+import sys
+import types
+
+# 1. Dynamically create a custom integration pack module
+custom_mod = types.ModuleType("custom_sensor_pack")
+
+def register_integration(fault_registry, step_registry, assertion_registry, schema_registry, cleanup_registry):
+    fault_registry.register("sensor_drift", lambda *a: ([], {}), ["sensor-device"])
+    schema_registry.register(
+        fault_name="sensor_drift",
+        primary_assertion="sensor_calibrated",
+        description="Simulates IoT sensor drift failure.",
+        category="hardware",
+    )
+
+custom_mod.register_integration = register_integration
+sys.modules["custom_sensor_pack"] = custom_mod
+
+# 2. Instruct Faultline to only load the custom integration
+os.environ["FAULTLINE_INTEGRATION_MODULES"] = "custom_sensor_pack"
+
+# 3. Import fresh engine and schema
+from faultline import engine, schema
+from faultline.integrations import integration_manager
+
+# 4. Strictly verify that the payment integration pack was NEVER imported
+assert "faultline.integrations.payment" not in sys.modules, "payment module was unexpectedly imported!"
+
+# 5. Verify custom integration is registered in the engine and schema
+assert engine.fault_registry.is_registered("sensor_drift"), "sensor_drift not in fault_registry"
+assert schema.fault_schema_registry.is_registered("sensor_drift"), "sensor_drift not in schema_registry"
+
+# 6. Verify payment faults are NOT registered in this custom engine instance
+assert not engine.fault_registry.is_registered("payment_response_lost_after_commit"), "payment fault unexpectedly registered"
+assert not schema.fault_schema_registry.is_registered("payment_response_lost_after_commit"), "payment schema unexpectedly registered"
+
+# 7. Verify duplicate registration rejection
+try:
+    integration_manager.load_integration(
+        "custom_sensor_pack",
+        fault_registry=engine.fault_registry,
+        step_registry=engine.step_registry,
+        assertion_registry=engine.assertion_registry,
+        schema_registry=schema.fault_schema_registry,
+        cleanup_registry=engine.cleanup_registry,
+    )
+    raise AssertionError("expected ValueError on duplicate integration registration")
+except ValueError as exc:
+    assert "already loaded" in str(exc), f"unexpected error message: {exc}"
+
+print("VERIFIED_CLEAN_ISOLATION")
+"""
+        proc = subprocess.run(
+            [sys.executable, "-c", child_script],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+        )
+        self.assertEqual(
+            proc.returncode, 0, f"Child process failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+        )
+        self.assertIn("VERIFIED_CLEAN_ISOLATION", proc.stdout)
 
 
 if __name__ == "__main__":

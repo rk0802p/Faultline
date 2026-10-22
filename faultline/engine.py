@@ -1172,7 +1172,11 @@ fault_registry.register(
     ["http-service"],
 )
 
+import os
 from .integrations import register_all_integrations
+
+_env_mods = os.environ.get("FAULTLINE_INTEGRATION_MODULES")
+_default_modules = [m.strip() for m in _env_mods.split(",") if m.strip()] if _env_mods is not None else None
 
 register_all_integrations(
     fault_registry=fault_registry,
@@ -1180,12 +1184,7 @@ register_all_integrations(
     assertion_registry=assertion_registry,
     schema_registry=fault_schema_registry,
     cleanup_registry=cleanup_registry,
-)
-
-from .integrations.payment import (
-    _execute_payment_response_lost,
-    _execute_duplicate_webhook,
-    _execute_persistence_failure,
+    modules=_default_modules,
 )
 
 

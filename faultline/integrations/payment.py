@@ -527,3 +527,6 @@ def register_payment_integration(
     cleanup_registry.register("payment-provider", cleanup_payment)
     cleanup_registry.register("checkout-webhook", cleanup_payment)
     cleanup_registry.register("local-db", cleanup_payment)
+
+
+register_integration = register_payment_integration

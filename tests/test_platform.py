@@ -700,6 +700,68 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertIn("orders", state)
         self.assertIn("charges", state)
 
+    def test_all_supported_fault_assertion_combinations(self) -> None:
+        """Verify that every supported fault/assertion combination validates cleanly, and mismatches fail."""
+        valid_defs = [
+            {
+                "scenario_version": 1,
+                "name": "test-valid-1",
+                "order_id": "ord-1",
+                "amount_cents": 1000,
+                "fault": "payment_response_lost_after_commit",
+                "assertion": "no_duplicate_charge",
+                "retries": 1,
+            },
+            {
+                "scenario_version": 1,
+                "name": "test-valid-2",
+                "order_id": "ord-2",
+                "amount_cents": 2000,
+                "fault": "duplicate_payment_webhook",
+                "assertion": "idempotent_webhook_processing",
+                "webhook_deliveries": 2,
+                "delay_ms": 100,
+            },
+            {
+                "scenario_version": 1,
+                "name": "test-valid-3",
+                "order_id": "ord-3",
+                "amount_cents": 3000,
+                "fault": "persistence_failure_after_payment",
+                "assertion": "charge_compensated_on_failure",
+                "retries": 0,
+            },
+        ]
+        for d in valid_defs:
+            server.validate_scenario(d)
+
+        # Mismatched assertion raises ValueError
+        mismatched = dict(valid_defs[0])
+        mismatched["assertion"] = "idempotent_webhook_processing"
+        with self.assertRaises(ValueError):
+            server.validate_scenario(mismatched)
+
+        # Unsupported fault raises ValueError
+        bad_fault = dict(valid_defs[0])
+        bad_fault["fault"] = "nonexistent_fault"
+        with self.assertRaises(ValueError):
+            server.validate_scenario(bad_fault)
+
+    def test_invalid_template_parameters_leaves_no_database_record(self) -> None:
+        """Verify that template instantiation failure leaves no partial scenario record in database."""
+        sc_id = f"inst-bad-atomic-{uuid4().hex[:6]}"
+        status, res = self.request("POST", "/api/templates/payment-response-lost-tpl/instantiate", {
+            "scenario_id": sc_id,
+            "parameters": {"retries": 999},
+        })
+        self.assertEqual(status, 400)
+        self.assertIsNone(store.get_scenario(sc_id))
+        with store.database() as db:
+            row = db.execute("SELECT id FROM scenarios WHERE id=?", (sc_id,)).fetchone()
+            self.assertIsNone(row)
+            ver_row = db.execute("SELECT scenario_id FROM scenario_versions WHERE scenario_id=?", (sc_id,)).fetchone()
+            self.assertIsNone(ver_row)
+
     def test_generate_scenarios_from_coverage_gaps(self) -> None:
         status, result = self.request("POST", "/api/scenarios/generate-from-gaps", {"project_id": "faultline-demo"})
         self.assertEqual(status, 201)
@@ -712,6 +774,11 @@ class FaultlinePlatformTests(unittest.TestCase):
             self.assertIn(sc_def["fault"], server.SUPPORTED_FAULTS)
             expected_assertion = server.SUPPORTED_FAULTS[sc_def["fault"]]["primary_assertion"]
             self.assertEqual(sc_def["assertion"], expected_assertion)
+
+        # Repeated generation must not create duplicates
+        status2, result2 = self.request("POST", "/api/scenarios/generate-from-gaps", {"project_id": "faultline-demo"})
+        self.assertEqual(status2, 201)
+        self.assertEqual(result2["generated"], [])
 
     def test_opentelemetry_traces_and_telemetry_endpoint(self) -> None:
         run = self.launch_and_wait("fixed", "payment-response-lost")

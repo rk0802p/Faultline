@@ -298,7 +298,7 @@ node --check faultline/web/app.js
 ### GitHub Actions CI Workflow
 The CI pipeline (`.github/workflows/ci.yml`) runs on every push and pull request:
 1. Python bytecode compilation (`compileall`) and client JavaScript validation (`node --check`).
-2. Complete unit, platform, and SDK test suite execution (68 tests).
+2. Complete unit, platform, and SDK test suite execution (70+ passing tests).
 3. Live platform daemon startup.
 4. Critical Integrations regression suite execution with JUnit XML report generation.
 5. Automated defect benchmark execution verifying 100% detection rate.
@@ -311,6 +311,6 @@ The CI pipeline (`.github/workflows/ci.yml`) runs on every push and pull request
 ## Safety and Security Posture (Spec §16)
 
 - **Loopback & Container Destination Boundary:** Outbound network destinations are enforced strictly at connection boundaries (`assert_loopback_safe()`). Only loopback (`127.0.0.1`, `localhost`, `::1`) or explicitly configured container host aliases (`FAULTLINE_ALLOWED_HOSTS`) are accepted. The wildcard bind address (`0.0.0.0`), unsupported schemes (`ftp://`, `file://`), embedded credentials, and arbitrary external URLs are rejected with `PermissionError`.
-- **Local vs. Container Mode:** In local development, the server binds strictly to `127.0.0.1`. In Docker Compose, `FAULTLINE_ALLOW_EXTERNAL=1` permits binding to `0.0.0.0` exclusively within the private Docker bridge network, while container ports are bound to host `127.0.0.1`.
+- **Local vs. Container Mode:** In local development, the server listener binds strictly to `127.0.0.1`. In container environments (such as Docker Compose), `FAULTLINE_BIND_ALL=1` (or `FAULTLINE_ALLOW_EXTERNAL=1`) permits the HTTP server listener to bind to `0.0.0.0` within the private container bridge network. This setting governs the listener interface only; outbound destination calls remain strictly restricted to loopback and configured internal container service ports.
 - **Best-Effort Sensitive Data Redaction:** Diagnostic payloads and event streams undergo recursive pattern-based redaction for recognized tokens (`Bearer`, `sk_live_*`, `pk_test_*`), passwords, credentials, and payment card numbers (`[REDACTED_PAN]`). Review redaction coverage before introducing sensitive production data.
 - **Append-Only Audit Logging:** Scenario version mutations, run submissions, cancellations, and data retention pruning emit immutable entries into `audit_events`.

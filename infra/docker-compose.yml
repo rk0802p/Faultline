@@ -13,6 +13,7 @@ services:
       - ../data:/app/data
     environment:
       - FAULTLINE_DATA_DIR=/app/data
+      - FAULTLINE_BIND_ALL=1
       - FAULTLINE_ALLOW_EXTERNAL=1
       - FAULTLINE_NO_EMBEDDED_SERVICES=1
       - CHECKOUT_HOST=checkout-service

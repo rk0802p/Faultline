@@ -509,9 +509,9 @@ def main() -> int:
     parser.add_argument("--no-embedded-services", action="store_true", help="disable embedded checkout and payment services for multi-container deployments")
     args = parser.parse_args()
 
-    allow_external = os.environ.get("FAULTLINE_ALLOW_EXTERNAL") == "1"
-    if args.host not in {"127.0.0.1", "localhost"} and not (allow_external and args.host == "0.0.0.0"):
-        parser.error("the initial release is local-only; bind to loopback (or set FAULTLINE_ALLOW_EXTERNAL=1 for containerized setups)")
+    bind_all = os.environ.get("FAULTLINE_BIND_ALL") == "1" or os.environ.get("FAULTLINE_ALLOW_EXTERNAL") == "1"
+    if args.host not in {"127.0.0.1", "localhost", "::1"} and not (bind_all and args.host == "0.0.0.0"):
+        parser.error("the initial release is local-only; bind to loopback (or set FAULTLINE_BIND_ALL=1 for containerized setups)")
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",

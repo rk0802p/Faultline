@@ -29,7 +29,7 @@ def main() -> int:
     args = parser.parse_args()
 
     print("=" * 68)
-    print("  FAULTLINE INTEGRATION RESILIENCE DEMO — CHECKOUT & PAYMENT RECOVERY")
+    print("  FAULTLINE INTEGRATION RESILIENCE DEMO - CHECKOUT & PAYMENT RECOVERY")
     print("=" * 68)
 
     client = FaultlineClient(base_url=args.base_url)

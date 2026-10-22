@@ -383,6 +383,24 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertGreater(summary["total_applicable"], 0)
         self.assertGreaterEqual(summary["coverage_percentage"], 0)
 
+        # Verify latest-run policy: a failing run after a passing run transitions cell to defect_exposed
+        sc_id = "duplicate-payment-webhook"
+        pass_run = self.launch_and_wait("fixed", sc_id)
+        self.assertEqual(pass_run["verdict"], "passed")
+        status, data_pass = self.request("GET", "/api/coverage")
+        self.assertEqual(status, 200)
+        matching_cells = [c for r in data_pass["matrix"] if r["step"]["id"] == "webhook_delivery" for c in r["cells"] if c["fault_id"] == "duplicate_payment_webhook"]
+        self.assertTrue(matching_cells)
+        self.assertEqual(matching_cells[0]["status"], "passed")
+
+        fail_run = self.launch_and_wait("vulnerable", sc_id)
+        self.assertEqual(fail_run["verdict"], "failed")
+        status, data_fail = self.request("GET", "/api/coverage")
+        self.assertEqual(status, 200)
+        matching_cells_after = [c for r in data_fail["matrix"] if r["step"]["id"] == "webhook_delivery" for c in r["cells"] if c["fault_id"] == "duplicate_payment_webhook"]
+        self.assertTrue(matching_cells_after)
+        self.assertEqual(matching_cells_after[0]["status"], "defect_exposed")
+
     def test_run_annotations_lifecycle(self) -> None:
         run = self.launch_and_wait("vulnerable", "payment-response-lost")
         run_id = run["id"]
@@ -826,7 +844,15 @@ class FaultlinePlatformTests(unittest.TestCase):
         })
         self.assertEqual(status, 400)
 
-        # 3. Valid branch from checkpoint snapshot with 'fixed' override and scenario override
+        # 3. Non-existent snapshot sequence rejected with 404 (no silent fallback)
+        status, bad_seq = self.request("POST", f"/api/runs/{parent_id}/branch", {
+            "snapshot_sequence": 9999,
+            "overrides": {"implementation": "fixed"},
+        })
+        self.assertEqual(status, 404)
+        self.assertIn("not found", bad_seq.get("error", "").lower())
+
+        # 4. Valid branch from checkpoint snapshot with 'fixed' override and scenario override
         branch_payload = {
             "snapshot_sequence": 1,
             "overrides": {
@@ -842,7 +868,7 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertEqual(branched["implementation"], "fixed")
         self.assertEqual(branched["scenario"]["retries"], 2)
 
-        # 4. Reproduction bundle captures branch metadata and effective overrides
+        # 5. Reproduction bundle captures branch metadata and effective overrides
         status, repro_data = self.request("GET", f"/api/runs/{branched['id']}/reproduce")
         self.assertEqual(status, 200)
         bundle = repro_data
@@ -851,12 +877,12 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertEqual(bundle["branch"]["forked_from_snapshot_id"], 1)
         self.assertEqual(bundle["branch"]["effective_scenario"]["retries"], 2)
 
-        # 5. Await completion of branched run
+        # 6. Await completion of branched run
         final_branched = self.wait_for_run(branched["id"])
         self.assertEqual(final_branched["verdict"], "passed")
         self.assertEqual(final_branched["scenario"]["retries"], 2)
 
-        # 6. Verify parent run remains unchanged
+        # 7. Verify parent run remains unchanged
         status, parent_check = self.request("GET", f"/api/runs/{parent_id}")
         self.assertEqual(status, 200)
         self.assertEqual(parent_check["run"]["verdict"], "failed")
@@ -1186,6 +1212,16 @@ class FaultlinePlatformTests(unittest.TestCase):
             self.assertTrue(security.is_loopback_allowed("redis:6379"))
             self.assertFalse(security.is_loopback_allowed("redis:80"))
 
+            # Explicit port argument enforcement
+            self.assertTrue(security.is_loopback_allowed("checkout-service", port=8766))
+            self.assertFalse(security.is_loopback_allowed("checkout-service", port=9000))
+            self.assertFalse(security.is_loopback_allowed("checkout-service"))
+            security.assert_loopback_safe("checkout-service", port=8766)
+            with self.assertRaises(PermissionError):
+                security.assert_loopback_safe("checkout-service", port=9000)
+            with self.assertRaises(PermissionError):
+                security.assert_loopback_safe("checkout-service")
+
         # 8. assert_loopback_safe raises PermissionError
         with self.assertRaises(PermissionError):
             security.assert_loopback_safe("http://evil.com")
@@ -1229,6 +1265,30 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertEqual(sanitized["nested"]["card_number"], "[REDACTED]")
         self.assertEqual(sanitized["nested"]["safe_list"][0], "item1")
         self.assertIn("[REDACTED]", sanitized["nested"]["safe_list"][1])
+
+    def test_template_expected_invariants_match_actual_run_assertions(self) -> None:
+        """Verify that every template's expected_invariants exactly matches the assertions emitted by a completed run."""
+        status, tpl_data = self.request("GET", "/api/templates")
+        self.assertEqual(status, 200)
+        templates = tpl_data["templates"]
+        self.assertGreaterEqual(len(templates), 3)
+
+        for tpl in templates:
+            t_id = tpl["id"]
+            inst_sc_id = f"tpl-inv-check-{uuid4().hex[:6]}"
+            inst_status, _ = self.request("POST", f"/api/templates/{t_id}/instantiate", {
+                "scenario_id": inst_sc_id,
+            })
+            self.assertEqual(inst_status, 201)
+            # Run the instantiated scenario in fixed mode
+            run = self.launch_and_wait("fixed", inst_sc_id)
+            self.assertEqual(run["verdict"], "passed", f"Scenario {inst_sc_id} from {t_id} failed in fixed mode")
+            emitted_names = [a["name"] for a in run["assertions"]]
+            self.assertEqual(
+                tpl["expected_invariants"],
+                emitted_names,
+                f"Template {t_id} expected_invariants do not match emitted run assertions",
+            )
 
 
 if __name__ == "__main__":

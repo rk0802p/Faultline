@@ -148,9 +148,12 @@ def run_benchmark(base: str, timeout: float, debug: bool, measure_determinism: b
     print("=" * 60)
     print("Faultline Integration Reliability Benchmark (Spec §17.4)")
     print("=" * 60)
-    all_scenarios = api_json(f"{base}/api/scenarios")["scenarios"]
-    seeded = [s for s in all_scenarios if s.get("id") in BENCHMARK_SCENARIOS]
-    scenarios_data = seeded if seeded else all_scenarios
+    all_scenarios_map = {s.get("id"): s for s in api_json(f"{base}/api/scenarios")["scenarios"]}
+    missing = [sc_id for sc_id in BENCHMARK_SCENARIOS if sc_id not in all_scenarios_map]
+    if missing:
+        print(f"Error: required benchmark scenario(s) missing from server: {', '.join(missing)}", file=sys.stderr)
+        return 1
+    scenarios_data = [all_scenarios_map[sc_id] for sc_id in BENCHMARK_SCENARIOS]
     results = []
     defects_caught = 0
     total_defects = len(scenarios_data)

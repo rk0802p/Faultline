@@ -109,7 +109,7 @@ def _execute_payment_response_lost(
     store.record_event(run_id, "CHECKOUT_HTTP_REQUEST", {"method": "POST", "path": "/v1/checkout", "body": json.loads(body)})
     if signal.is_set():
         raise RunCancelled()
-    security.assert_loopback_safe(adapters.CHECKOUT_HOST)
+    security.assert_loopback_safe(adapters.CHECKOUT_HOST, adapters.CHECKOUT_PORT)
     connection = HTTPConnection(adapters.CHECKOUT_HOST, adapters.CHECKOUT_PORT, timeout=timeout_seconds + 2)
     with _active_lock:
         _active_connections[run_id] = connection
@@ -238,7 +238,7 @@ def _execute_duplicate_webhook(
             "body": json.loads(body),
         })
 
-        security.assert_loopback_safe(adapters.CHECKOUT_HOST)
+        security.assert_loopback_safe(adapters.CHECKOUT_HOST, adapters.CHECKOUT_PORT)
         connection = HTTPConnection(adapters.CHECKOUT_HOST, adapters.CHECKOUT_PORT, timeout=timeout_seconds + 2)
         with _active_lock:
             _active_connections[run_id] = connection
@@ -356,7 +356,7 @@ def _execute_persistence_failure(
     store.record_event(run_id, "CHECKOUT_HTTP_REQUEST", {"method": "POST", "path": "/v1/checkout", "body": json.loads(body)})
     if signal.is_set():
         raise RunCancelled()
-    security.assert_loopback_safe(adapters.CHECKOUT_HOST)
+    security.assert_loopback_safe(adapters.CHECKOUT_HOST, adapters.CHECKOUT_PORT)
     connection = HTTPConnection(adapters.CHECKOUT_HOST, adapters.CHECKOUT_PORT, timeout=timeout_seconds + 2)
     with _active_lock:
         _active_connections[run_id] = connection
@@ -473,7 +473,10 @@ def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> N
         with _active_lock:
             _active_runs.pop(run_id, None)
         return
-    store.record_event(run_id, "RUN_STARTED", {"implementation": implementation})
+    start_payload = {"implementation": implementation}
+    if scenario.get("target_step"):
+        start_payload["target_step"] = scenario["target_step"]
+    store.record_event(run_id, "RUN_STARTED", start_payload)
     store.record_snapshot(run_id, 1, scenario.get("scenario_version", 1), {
         "verdict": "pending",
         "status": "running",
@@ -684,16 +687,16 @@ def branch_run(
     validate_scenario(scenario)
 
     snaps = store.get_snapshots(parent_run_id)
-    if snaps:
-        if snapshot_sequence is not None:
-            target_snap = next((s for s in snaps if s["sequence"] == snapshot_sequence), None) or snaps[-1]
-            snapshot_sequence = target_snap["sequence"]
-        else:
-            target_snap = snaps[-1]
-            snapshot_sequence = target_snap["sequence"]
+    if snapshot_sequence is not None:
+        target_snap = next((s for s in snaps if s["sequence"] == snapshot_sequence), None)
+        if target_snap is None:
+            raise ValueError(f"snapshot sequence {snapshot_sequence} not found for run {parent_run_id}")
+    elif snaps:
+        target_snap = snaps[-1]
+        snapshot_sequence = target_snap["sequence"]
     else:
         target_snap = None
-        snapshot_sequence = snapshot_sequence or 1
+        snapshot_sequence = 1
 
     branch_run_id = str(uuid4())
     store.create_run(

@@ -26,6 +26,15 @@ SUPPORTED_FAULTS: dict[str, dict[str, Any]] = {
 }
 
 
+VALID_WORKFLOW_STEPS: set[str] = {
+    "initiate_checkout",
+    "process_payment",
+    "order_persistence",
+    "webhook_delivery",
+    "reconciliation_refund",
+}
+
+
 def validate_scenario(definition: dict[str, Any]) -> None:
     """Validates that a scenario definition conforms strictly to supported failure testing constraints."""
     if not isinstance(definition, dict):
@@ -37,6 +46,10 @@ def validate_scenario(definition: dict[str, Any]) -> None:
     fault = definition.get("fault")
     if fault not in SUPPORTED_FAULTS:
         raise ValueError(f"unsupported fault type: '{fault}'. Supported: {list(SUPPORTED_FAULTS.keys())}")
+
+    target_step = definition.get("target_step")
+    if target_step is not None and target_step not in VALID_WORKFLOW_STEPS:
+        raise ValueError(f"unsupported target_step: '{target_step}'. Valid steps: {sorted(VALID_WORKFLOW_STEPS)}")
 
     expected_assertion = SUPPORTED_FAULTS[fault]["primary_assertion"]
     if definition.get("assertion") != expected_assertion:

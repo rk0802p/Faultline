@@ -335,7 +335,7 @@ class CheckoutHandler(BaseHTTPRequestHandler):
                 })
                 store.record_event(run_id, "PAYMENT_HTTP_REQUEST", {"method": "POST", "path": "/v1/charges", "attempt": attempt + 1,
                                                                         "body": json.loads(request_body)})
-                security.assert_loopback_safe(PAYMENT_HOST)
+                security.assert_loopback_safe(PAYMENT_HOST, PAYMENT_PORT)
                 connection = HTTPConnection(PAYMENT_HOST, PAYMENT_PORT, timeout=min(3, remaining))
                 try:
                     headers = {"Content-Type": "application/json"}
@@ -370,7 +370,7 @@ class CheckoutHandler(BaseHTTPRequestHandler):
                         "order_id": order_id,
                         "charge_id": charge["id"],
                     })
-                    security.assert_loopback_safe(PAYMENT_HOST)
+                    security.assert_loopback_safe(PAYMENT_HOST, PAYMENT_PORT)
                     refund_conn = HTTPConnection(PAYMENT_HOST, PAYMENT_PORT, timeout=min(3, max(1, remaining)))
                     try:
                         refund_body = json.dumps({

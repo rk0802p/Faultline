@@ -203,19 +203,19 @@ class FaultlineCliTests(unittest.TestCase):
     def test_cli_benchmark_command_executes_suite_and_reports_metrics(self) -> None:
         scenarios_response = {
             "scenarios": [
-                {"id": "sc-1", "definition": {"fault": "payment_response_lost_after_commit"}}
+                {"id": "payment-response-lost", "definition": {"fault": "payment_response_lost_after_commit", "assertion": "no_duplicate_charge"}},
+                {"id": "duplicate-payment-webhook", "definition": {"fault": "duplicate_payment_webhook", "assertion": "idempotent_webhook_processing"}},
+                {"id": "partial-persistence-failure", "definition": {"fault": "partial_persistence_failure", "assertion": "charge_compensated_on_failure"}},
             ]
         }
-        vuln_assertions = [{"name": "no_duplicate_charge", "status": "failed", "expected": "1", "observed": "2"}]
-        fixed_assertions = [{"name": "no_duplicate_charge", "status": "passed", "expected": "1", "observed": "1"}]
-        run_v_res = {"run": {"status": "completed", "verdict": "failed", "assertions": vuln_assertions}}
-        run_f_res = {"run": {"status": "completed", "verdict": "passed", "assertions": fixed_assertions}}
-        api_responses = [
-            scenarios_response,
-            {"run_id": "r-v"},
-            {"run_id": "r-f"},
-        ]
-        poll_responses = [run_v_res["run"], run_f_res["run"]]
+        api_responses = [scenarios_response]
+        poll_responses = []
+        for sc in scenarios_response["scenarios"]:
+            as_name = sc["definition"]["assertion"]
+            api_responses.append({"run_id": f"r-v-{sc['id']}"})
+            poll_responses.append({"status": "completed", "verdict": "failed", "assertions": [{"name": as_name, "status": "failed", "expected": "1", "observed": "2"}]})
+            api_responses.append({"run_id": f"r-f-{sc['id']}"})
+            poll_responses.append({"status": "completed", "verdict": "passed", "assertions": [{"name": as_name, "status": "passed", "expected": "1", "observed": "1"}]})
 
         stdout, stderr = io.StringIO(), io.StringIO()
         args = ["faultline.cli", "benchmark"]
@@ -227,26 +227,29 @@ class FaultlineCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Faultline Integration Reliability Benchmark", stdout.getvalue())
         self.assertIn("Defect Detection Rate:   100.0%", stdout.getvalue())
+        self.assertIn("Fixed Verification Pass Rate:    100.0%", stdout.getvalue())
         self.assertIn("Evaluator Determinism:   NOT MEASURED", stdout.getvalue())
         self.assertIn("Benchmark PASSED", stdout.getvalue())
 
     def test_cli_benchmark_fails_when_fixed_run_times_out_or_fails(self) -> None:
         scenarios_response = {
             "scenarios": [
-                {"id": "sc-1", "definition": {"fault": "payment_response_lost_after_commit"}}
+                {"id": "payment-response-lost", "definition": {"fault": "payment_response_lost_after_commit", "assertion": "no_duplicate_charge"}},
+                {"id": "duplicate-payment-webhook", "definition": {"fault": "duplicate_payment_webhook", "assertion": "idempotent_webhook_processing"}},
+                {"id": "partial-persistence-failure", "definition": {"fault": "partial_persistence_failure", "assertion": "charge_compensated_on_failure"}},
             ]
         }
-        api_responses = [
-            scenarios_response,
-            {"run_id": "r-v"},
-            {"run_id": "r-f"},
-        ]
-        vuln_assertions = [{"name": "no_duplicate_charge", "status": "failed", "expected": "1", "observed": "2"}]
-        # Vulnerable run catches defect, but fixed run times out (poll_run returns None)
-        poll_responses = [
-            {"status": "completed", "verdict": "failed", "assertions": vuln_assertions},
-            None,
-        ]
+        api_responses = [scenarios_response]
+        poll_responses = []
+        for i, sc in enumerate(scenarios_response["scenarios"]):
+            as_name = sc["definition"]["assertion"]
+            api_responses.append({"run_id": f"r-v-{sc['id']}"})
+            poll_responses.append({"status": "completed", "verdict": "failed", "assertions": [{"name": as_name, "status": "failed", "expected": "1", "observed": "2"}]})
+            api_responses.append({"run_id": f"r-f-{sc['id']}"})
+            if i == 0:
+                poll_responses.append(None)
+            else:
+                poll_responses.append({"status": "completed", "verdict": "passed", "assertions": [{"name": as_name, "status": "passed", "expected": "1", "observed": "1"}]})
 
         stdout, stderr = io.StringIO(), io.StringIO()
         args = ["faultline.cli", "benchmark"]
@@ -256,28 +259,27 @@ class FaultlineCliTests(unittest.TestCase):
                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             code = cli.main()
         self.assertEqual(code, 1)
-        self.assertIn("Fixed Verification Failure Rate: 100.0% (1/1)", stdout.getvalue())
+        self.assertIn("Fixed Verification Failure Rate: 33.3% (1/3)", stdout.getvalue())
         self.assertIn("Benchmark FAILED", stdout.getvalue())
 
     def test_cli_benchmark_measure_determinism_flag(self) -> None:
         scenarios_response = {
             "scenarios": [
-                {"id": "sc-1", "definition": {"fault": "payment_response_lost_after_commit"}}
+                {"id": "payment-response-lost", "definition": {"fault": "payment_response_lost_after_commit", "assertion": "no_duplicate_charge"}},
+                {"id": "duplicate-payment-webhook", "definition": {"fault": "duplicate_payment_webhook", "assertion": "idempotent_webhook_processing"}},
+                {"id": "partial-persistence-failure", "definition": {"fault": "partial_persistence_failure", "assertion": "charge_compensated_on_failure"}},
             ]
         }
-        api_responses = [
-            scenarios_response,
-            {"run_id": "r-v"},
-            {"run_id": "r-f1"},
-            {"run_id": "r-f2"},
-        ]
-        vuln_assertions = [{"name": "no_duplicate_charge", "status": "failed", "expected": "1", "observed": "2"}]
-        fixed_assertions = [{"name": "no_duplicate_charge", "status": "passed", "expected": "1", "observed": "1"}]
-        poll_responses = [
-            {"status": "completed", "verdict": "failed", "assertions": vuln_assertions},
-            {"status": "completed", "verdict": "passed", "assertions": fixed_assertions},
-            {"status": "completed", "verdict": "passed", "assertions": fixed_assertions},
-        ]
+        api_responses = [scenarios_response]
+        poll_responses = []
+        for sc in scenarios_response["scenarios"]:
+            as_name = sc["definition"]["assertion"]
+            api_responses.append({"run_id": f"r-v-{sc['id']}"})
+            poll_responses.append({"status": "completed", "verdict": "failed", "assertions": [{"name": as_name, "status": "failed", "expected": "1", "observed": "2"}]})
+            api_responses.append({"run_id": f"r-f1-{sc['id']}"})
+            poll_responses.append({"status": "completed", "verdict": "passed", "assertions": [{"name": as_name, "status": "passed", "expected": "1", "observed": "1"}]})
+            api_responses.append({"run_id": f"r-f2-{sc['id']}"})
+            poll_responses.append({"status": "completed", "verdict": "passed", "assertions": [{"name": as_name, "status": "passed", "expected": "1", "observed": "1"}]})
 
         stdout, stderr = io.StringIO(), io.StringIO()
         args = ["faultline.cli", "benchmark", "--measure-determinism"]
@@ -294,19 +296,22 @@ class FaultlineCliTests(unittest.TestCase):
         """Verify that vulnerable run failing for the wrong reason counts as defect missed."""
         scenarios_response = {
             "scenarios": [
-                {"id": "sc-1", "definition": {"fault": "payment_response_lost_after_commit", "assertion": "no_duplicate_charge"}}
+                {"id": "payment-response-lost", "definition": {"fault": "payment_response_lost_after_commit", "assertion": "no_duplicate_charge"}},
+                {"id": "duplicate-payment-webhook", "definition": {"fault": "duplicate_payment_webhook", "assertion": "idempotent_webhook_processing"}},
+                {"id": "partial-persistence-failure", "definition": {"fault": "partial_persistence_failure", "assertion": "charge_compensated_on_failure"}},
             ]
         }
-        api_responses = [
-            scenarios_response,
-            {"run_id": "r-v"},
-            {"run_id": "r-f"},
-        ]
-        # Vulnerable run fails, but with an unrelated assertion instead of expected no_duplicate_charge
-        poll_responses = [
-            {"status": "completed", "verdict": "failed", "assertions": [{"name": "unrelated_network_fault", "status": "failed"}]},
-            {"status": "completed", "verdict": "passed", "assertions": [{"name": "no_duplicate_charge", "status": "passed"}]},
-        ]
+        api_responses = [scenarios_response]
+        poll_responses = []
+        for i, sc in enumerate(scenarios_response["scenarios"]):
+            as_name = sc["definition"]["assertion"]
+            api_responses.append({"run_id": f"r-v-{sc['id']}"})
+            if i == 0:
+                poll_responses.append({"status": "completed", "verdict": "failed", "assertions": [{"name": "unrelated_network_fault", "status": "failed"}]})
+            else:
+                poll_responses.append({"status": "completed", "verdict": "failed", "assertions": [{"name": as_name, "status": "failed", "expected": "1", "observed": "2"}]})
+            api_responses.append({"run_id": f"r-f-{sc['id']}"})
+            poll_responses.append({"status": "completed", "verdict": "passed", "assertions": [{"name": as_name, "status": "passed", "expected": "1", "observed": "1"}]})
 
         stdout, stderr = io.StringIO(), io.StringIO()
         args = ["faultline.cli", "benchmark"]
@@ -323,23 +328,21 @@ class FaultlineCliTests(unittest.TestCase):
         """Verify that repeated runs differing in observed invariant values drop the determinism score."""
         scenarios_response = {
             "scenarios": [
-                {"id": "sc-1", "definition": {"fault": "payment_response_lost_after_commit"}}
+                {"id": "payment-response-lost", "definition": {"fault": "payment_response_lost_after_commit", "assertion": "no_duplicate_charge"}},
+                {"id": "duplicate-payment-webhook", "definition": {"fault": "duplicate_payment_webhook", "assertion": "idempotent_webhook_processing"}},
+                {"id": "partial-persistence-failure", "definition": {"fault": "partial_persistence_failure", "assertion": "charge_compensated_on_failure"}},
             ]
         }
-        api_responses = [
-            scenarios_response,
-            {"run_id": "r-v"},
-            {"run_id": "r-f1"},
-            {"run_id": "r-f2"},
-        ]
-        vuln_assertions = [{"name": "no_duplicate_charge", "status": "failed", "expected": "1", "observed": "2"}]
-        fixed_run1 = [{"name": "no_duplicate_charge", "status": "passed", "expected": "1", "observed": "value_a"}]
-        fixed_run2 = [{"name": "no_duplicate_charge", "status": "passed", "expected": "1", "observed": "value_b"}]
-        poll_responses = [
-            {"status": "completed", "verdict": "failed", "assertions": vuln_assertions},
-            {"status": "completed", "verdict": "passed", "assertions": fixed_run1},
-            {"status": "completed", "verdict": "passed", "assertions": fixed_run2},
-        ]
+        api_responses = [scenarios_response]
+        poll_responses = []
+        for i, sc in enumerate(scenarios_response["scenarios"]):
+            as_name = sc["definition"]["assertion"]
+            api_responses.append({"run_id": f"r-v-{sc['id']}"})
+            poll_responses.append({"status": "completed", "verdict": "failed", "assertions": [{"name": as_name, "status": "failed", "expected": "1", "observed": "2"}]})
+            api_responses.append({"run_id": f"r-f1-{sc['id']}"})
+            poll_responses.append({"status": "completed", "verdict": "passed", "assertions": [{"name": as_name, "status": "passed", "expected": "1", "observed": "value_a" if i == 0 else "1"}]})
+            api_responses.append({"run_id": f"r-f2-{sc['id']}"})
+            poll_responses.append({"status": "completed", "verdict": "passed", "assertions": [{"name": as_name, "status": "passed", "expected": "1", "observed": "value_b" if i == 0 else "1"}]})
 
         stdout, stderr = io.StringIO(), io.StringIO()
         args = ["faultline.cli", "benchmark", "--measure-determinism"]
@@ -348,7 +351,23 @@ class FaultlineCliTests(unittest.TestCase):
                 patch("faultline.cli.poll_run", side_effect=poll_responses), \
                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             code = cli.main()
-        self.assertIn("Evaluator Determinism:   0.0% (0/1 repeated runs matched)", stdout.getvalue())
+        self.assertIn("Evaluator Determinism:   66.7% (2/3 repeated runs matched)", stdout.getvalue())
+
+    def test_cli_benchmark_fails_when_seeded_scenario_missing(self) -> None:
+        """Verify that benchmark aborts with exit code 1 if any required seeded scenario is absent."""
+        scenarios_response = {
+            "scenarios": [
+                {"id": "payment-response-lost", "definition": {"fault": "payment_response_lost_after_commit"}},
+            ]
+        }
+        stdout, stderr = io.StringIO(), io.StringIO()
+        args = ["faultline.cli", "benchmark"]
+        with patch.object(sys, "argv", args), \
+                patch("faultline.cli.api_json", return_value=scenarios_response), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 1)
+        self.assertIn("Error: required benchmark scenario(s) missing from server: duplicate-payment-webhook, partial-persistence-failure", stderr.getvalue())
 
     def test_cli_junit_xml_redaction(self) -> None:
         """Verify that sensitive values in run errors and assertions are redacted in JUnit XML."""

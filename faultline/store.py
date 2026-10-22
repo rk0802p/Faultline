@@ -307,7 +307,7 @@ def initialize() -> None:
                     "delay_ms": 100,
                     "assertion": "idempotent_webhook_processing",
                 }),
-                json.dumps(["webhook_fault_activation_confirmed", "idempotent_webhook_processing", "webhook_terminal_state", "all_webhooks_processed"]),
+                json.dumps(["fault_activation_confirmed", "idempotent_webhook_processing", "webhook_deliveries_acknowledged", "order_terminal_state"]),
                 "Clears processed webhook idempotency ledger and resets fulfillment records.",
             ),
             (
@@ -333,7 +333,7 @@ def initialize() -> None:
                     "compensate": True,
                     "assertion": "charge_compensated_on_failure",
                 }),
-                json.dumps(["persistence_fault_activated", "charge_compensated_on_failure", "compensating_refund_issued", "order_persistence_consistent"]),
+                json.dumps(["fault_activation_confirmed", "charge_compensated_on_failure", "no_orphaned_charge", "checkout_terminal_state"]),
                 "Purges provider refunds ledger and resets temporary order rows.",
             ),
         ]
@@ -971,57 +971,81 @@ def get_coverage_matrix() -> dict[str, Any]:
         ("reconciliation_refund", "persistence_failure_after_payment"): True,
     }
 
+    default_steps = {
+        "payment_response_lost_after_commit": "process_payment",
+        "duplicate_payment_webhook": "webhook_delivery",
+        "persistence_failure_after_payment": "order_persistence",
+    }
+
     with database() as db:
-        scenario_runs = {}
-        for fc in fault_classes:
-            sc_id = fc["scenario"]
-            rows = db.execute(
-                "SELECT verdict, status, implementation FROM runs WHERE scenario_id=? ORDER BY started_at DESC LIMIT 10",
-                (sc_id,)
-            ).fetchall()
-            scenario_runs[sc_id] = {
-                "total_runs": len(rows),
-                "has_passed": any(r["verdict"] == "passed" for r in rows),
-                "has_failed": any(r["verdict"] == "failed" for r in rows),
-                "latest_verdict": rows[0]["verdict"] if rows else None,
-            }
+        scenario_rows = db.execute("SELECT id, definition_json FROM scenarios").fetchall()
+        cell_scenarios: dict[tuple[str, str], list[str]] = {}
+        for r in scenario_rows:
+            sc_id = r["id"]
+            try:
+                sc_def = json.loads(r["definition_json"])
+            except Exception:
+                continue
+            f_id = sc_def.get("fault")
+            s_id = sc_def.get("target_step") or (default_steps.get(f_id) if sc_id in {fc["scenario"] for fc in fault_classes} else None)
+            if f_id and s_id:
+                cell_scenarios.setdefault((s_id, f_id), []).append(sc_id)
 
-    matrix = []
-    total_applicable = 0
-    tested_count = 0
-    passed_count = 0
-    failed_count = 0
+        matrix = []
+        total_applicable = 0
+        tested_count = 0
+        passed_count = 0
+        failed_count = 0
 
-    for step in workflow_steps:
-        step_row = {"step": step, "cells": []}
-        for fault in fault_classes:
-            is_applicable = applicable_map.get((step["id"], fault["id"]), False)
-            if is_applicable:
-                total_applicable += 1
-                stats = scenario_runs.get(fault["scenario"], {})
-                if stats.get("total_runs", 0) > 0:
-                    tested_count += 1
-                    if stats.get("has_passed"):
-                        passed_count += 1
-                        cell_status = "passed"
+        for step in workflow_steps:
+            step_row = {"step": step, "cells": []}
+            for fault in fault_classes:
+                is_applicable = applicable_map.get((step["id"], fault["id"]), False)
+                matching_scenarios = list(cell_scenarios.get((step["id"], fault["id"]), []))
+                if not matching_scenarios and default_steps.get(fault["id"]) == step["id"]:
+                    matching_scenarios = [fault["scenario"]]
+
+                runs = []
+                if matching_scenarios:
+                    placeholders = ",".join("?" for _ in matching_scenarios)
+                    runs = db.execute(
+                        f"""SELECT id, verdict, status, implementation, started_at
+                            FROM runs
+                            WHERE scenario_id IN ({placeholders}) AND status IN ('completed', 'failed')
+                            ORDER BY started_at DESC""",
+                        matching_scenarios,
+                    ).fetchall()
+
+                cell_scenario_id = matching_scenarios[0] if matching_scenarios else fault["scenario"]
+                runs_count = len(runs)
+                latest_verdict = runs[0]["verdict"] if runs else None
+
+                if is_applicable:
+                    total_applicable += 1
+                    if runs_count > 0:
+                        tested_count += 1
+                        if latest_verdict == "passed":
+                            passed_count += 1
+                            cell_status = "passed"
+                        else:
+                            failed_count += 1
+                            cell_status = "defect_exposed"
                     else:
-                        failed_count += 1
-                        cell_status = "defect_exposed"
+                        cell_status = "untested"
                 else:
-                    cell_status = "untested"
-            else:
-                cell_status = "not_applicable"
+                    cell_status = "not_applicable"
 
-            step_row["cells"].append({
-                "fault_id": fault["id"],
-                "fault_name": fault["name"],
-                "scenario_id": fault["scenario"],
-                "applicable": is_applicable,
-                "status": cell_status,
-                "runs_count": scenario_runs.get(fault["scenario"], {}).get("total_runs", 0) if is_applicable else 0,
-                "latest_verdict": scenario_runs.get(fault["scenario"], {}).get("latest_verdict") if is_applicable else None,
-            })
-        matrix.append(step_row)
+                step_row["cells"].append({
+                    "fault_id": fault["id"],
+                    "fault_name": fault["name"],
+                    "scenario_id": cell_scenario_id,
+                    "target_step": step["id"],
+                    "applicable": is_applicable,
+                    "status": cell_status,
+                    "runs_count": runs_count if is_applicable else 0,
+                    "latest_verdict": latest_verdict if is_applicable else None,
+                })
+            matrix.append(step_row)
 
     coverage_pct = round((tested_count / total_applicable * 100) if total_applicable else 0, 1)
 
@@ -1341,6 +1365,7 @@ def generate_scenarios_from_gaps(project_id: str = "faultline-demo") -> list[dic
                 definition: dict[str, Any] = {
                     "scenario_version": 1,
                     "name": sc_id,
+                    "target_step": step_id,
                     "description": f"Automated scenario generated to test {step_name} under {fault_id}.",
                     "order_id": f"order-gap-{uuid4().hex[:6]}",
                     "amount_cents": 3000,

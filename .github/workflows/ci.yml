@@ -100,3 +100,42 @@ jobs:
         with:
           name: junit-report
           path: test-results/critical-integrations-junit.xml
+
+  docker-compose-smoke:
+    name: Multi-Container Docker Compose Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build and start multi-container stack
+        run: docker compose up -d --build
+
+      - name: Wait for services to become healthy
+        run: |
+          for i in $(seq 1 60); do
+            cp_health=$(docker inspect --format='{{json .State.Health.Status}}' faultline-control-plane 2>/dev/null || echo "starting")
+            ck_health=$(docker inspect --format='{{json .State.Health.Status}}' faultline-checkout-service 2>/dev/null || echo "starting")
+            py_health=$(docker inspect --format='{{json .State.Health.Status}}' faultline-payment-provider 2>/dev/null || echo "starting")
+            echo "Waiting for services... attempt $i (control-plane: $cp_health, checkout: $ck_health, payment: $py_health)"
+            if [ "$cp_health" = '"healthy"' ] && [ "$ck_health" = '"healthy"' ] && [ "$py_health" = '"healthy"' ]; then
+              echo "All core services reported healthy."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Services failed to become healthy within deadline"
+          docker compose ps
+          docker compose logs
+          exit 1
+
+      - name: Query health and seeded scenarios over loopback ports
+        run: |
+          curl -f -s http://127.0.0.1:8000/api/health
+          curl -f -s http://127.0.0.1:8000/api/scenarios | grep "payment-response-lost"
+          curl -f -s http://127.0.0.1:8766/v1/health
+          curl -f -s http://127.0.0.1:8767/v1/health
+
+      - name: Teardown Docker Compose stack
+        if: always()
+        run: docker compose down -v

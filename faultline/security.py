@@ -65,7 +65,7 @@ def redact_sensitive(obj: Any) -> Any:
     return obj
 
 
-def is_loopback_allowed(target: str) -> bool:
+def is_loopback_allowed(target: str, port: int | None = None) -> bool:
     """Verifies that a target URL or host string resolves strictly to loopback or allowed container hosts."""
     if not target or not isinstance(target, str):
         return False
@@ -73,7 +73,7 @@ def is_loopback_allowed(target: str) -> bool:
     if not target:
         return False
 
-    port: int | None = None
+    parsed_port: int | None = None
     if "://" in target:
         try:
             parsed = urlparse(target)
@@ -87,7 +87,7 @@ def is_loopback_allowed(target: str) -> bool:
             return False
         hostname = (parsed.hostname or "").lower()
         try:
-            port = parsed.port
+            parsed_port = parsed.port
         except (ValueError, TypeError):
             # Raised by urlparse when port is invalid or out of range (e.g. 99999)
             return False
@@ -103,30 +103,40 @@ def is_loopback_allowed(target: str) -> bool:
                 if not remainder.startswith(":"):
                     return False
                 try:
-                    port = int(remainder[1:])
+                    parsed_port = int(remainder[1:])
                 except ValueError:
                     return False
             else:
-                port = None
+                parsed_port = None
         else:
             if target.count(":") == 1:
                 parts = target.split(":")
                 hostname = parts[0].strip().lower()
                 try:
-                    port = int(parts[1])
+                    parsed_port = int(parts[1])
                 except ValueError:
                     return False
             elif target.count(":") > 1:
                 # Raw IPv6 literal without brackets
                 hostname = target.strip().lower()
-                port = None
+                parsed_port = None
             else:
                 hostname = target.strip().lower()
-                port = None
+                parsed_port = None
+
+    # Determine effective port (explicit port parameter or parsed port)
+    if parsed_port is not None and port is not None and parsed_port != port:
+        return False
+    effective_port = parsed_port if parsed_port is not None else port
 
     # Validate port bounds if a port was specified
-    if port is not None and not (1 <= port <= 65535):
-        return False
+    if effective_port is not None:
+        try:
+            effective_port = int(effective_port)
+        except (ValueError, TypeError):
+            return False
+        if not (1 <= effective_port <= 65535):
+            return False
 
     if not hostname or hostname == "0.0.0.0":
         return False
@@ -140,16 +150,17 @@ def is_loopback_allowed(target: str) -> bool:
         if hostname == "localhost":
             return True
         if hostname in CONTAINER_ALLOWED_HOSTS:
-            if hostname in CONTAINER_SERVICE_PORTS and port is not None:
-                if port not in CONTAINER_SERVICE_PORTS[hostname]:
+            if hostname in CONTAINER_SERVICE_PORTS:
+                if effective_port is None or effective_port not in CONTAINER_SERVICE_PORTS[hostname]:
                     return False
             return True
         return False
 
 
-def assert_loopback_safe(target: str) -> None:
+def assert_loopback_safe(target: str, port: int | None = None) -> None:
     """Raises PermissionError if target is not strictly restricted to loopback."""
-    if not is_loopback_allowed(target):
+    if not is_loopback_allowed(target, port=port):
+        dest_repr = f"{target}:{port}" if port is not None and ":" not in target else target
         raise PermissionError(
-            f"Destination '{target}' is rejected. Faultline restricts all network targets to loopback (Spec §16)."
+            f"Destination '{dest_repr}' is rejected. Faultline restricts all network targets to loopback (Spec §16)."
         )

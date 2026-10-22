@@ -184,3 +184,33 @@ def validate_redirect(current_url: str, redirect_target: str) -> str:
     target_url = urljoin(current_url, redirect_target)
     assert_loopback_safe(target_url)
     return target_url
+
+
+MAX_RESPONSE_BYTES_DEFAULT = 1_048_576  # 1 MB default ceiling
+MAX_RESPONSE_BYTES_CEILING = 52_428_800  # 50 MB maximum allowed ceiling
+
+
+def validate_max_response_bytes(val: Any) -> int:
+    """Validates and enforces positive integer bounds for max_response_bytes.
+
+    Rejects non-integers, booleans, zero, negative numbers, and values exceeding MAX_RESPONSE_BYTES_CEILING.
+    """
+    if val is None:
+        return MAX_RESPONSE_BYTES_DEFAULT
+    if isinstance(val, bool):
+        raise ValueError("max_response_bytes cannot be a boolean")
+    if isinstance(val, (int, str)):
+        try:
+            int_val = int(val)
+        except (ValueError, TypeError):
+            raise ValueError(f"max_response_bytes must be a valid integer, got {val!r}")
+    else:
+        raise ValueError(f"max_response_bytes must be a valid integer, got {type(val).__name__}")
+
+    if int_val <= 0:
+        raise ValueError(f"max_response_bytes must be a positive integer (> 0), got {int_val}")
+    if int_val > MAX_RESPONSE_BYTES_CEILING:
+        raise ValueError(
+            f"max_response_bytes exceeds allowed maximum ceiling of {MAX_RESPONSE_BYTES_CEILING} bytes ({int_val} > {MAX_RESPONSE_BYTES_CEILING})"
+        )
+    return int_val

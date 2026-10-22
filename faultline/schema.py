@@ -7,6 +7,8 @@ Supports both reference payment integrations and extensible, generic workflows.
 
 from typing import Any
 
+from .security import validate_max_response_bytes
+
 
 PAYMENT_FAULTS: set[str] = {
     "payment_response_lost_after_commit",
@@ -130,6 +132,16 @@ def validate_scenario(definition: dict[str, Any]) -> None:
                     f"unsupported workflow step type: '{step_type}'. Supported step types: {sorted(SUPPORTED_STEP_TYPES)}"
                 )
 
+            # Validate max_response_bytes if specified at step or step config level
+            raw_mrb = step.get("max_response_bytes") if "max_response_bytes" in step else (
+                step.get("config", {}).get("max_response_bytes") if isinstance(step.get("config"), dict) else None
+            )
+            if raw_mrb is not None:
+                try:
+                    validate_max_response_bytes(raw_mrb)
+                except ValueError as exc:
+                    raise ValueError(f"workflow step '{step_id}' invalid max_response_bytes: {exc}")
+
         if target_step is not None:
             if target_step not in seen_step_ids:
                 raise ValueError(f"unsupported target_step: '{target_step}'. Valid steps: {sorted(seen_step_ids)}")
@@ -183,6 +195,31 @@ def validate_scenario(definition: dict[str, Any]) -> None:
     timeout = definition.get("timeout_seconds", 15)
     if type(timeout) is not int or not 2 <= timeout <= 60:
         raise ValueError("timeout_seconds must be an integer between 2 and 60")
+
+    if "max_response_bytes" in definition and definition["max_response_bytes"] is not None:
+        try:
+            validate_max_response_bytes(definition["max_response_bytes"])
+        except ValueError as exc:
+            raise ValueError(f"scenario invalid max_response_bytes: {exc}")
+
+    raw_fault_cfg = definition.get("fault_config")
+    if raw_fault_cfg is not None:
+        if not isinstance(raw_fault_cfg, dict):
+            raise ValueError("fault_config must be an object")
+        if "client_timeout_seconds" in raw_fault_cfg:
+            try:
+                ct = float(raw_fault_cfg["client_timeout_seconds"])
+                if ct <= 0:
+                    raise ValueError("client_timeout_seconds must be positive (> 0)")
+            except (ValueError, TypeError):
+                raise ValueError("fault_config client_timeout_seconds must be a positive number")
+        if "server_delay_seconds" in raw_fault_cfg:
+            try:
+                sd = float(raw_fault_cfg["server_delay_seconds"])
+                if sd < 0:
+                    raise ValueError("server_delay_seconds must be non-negative (>= 0)")
+            except (ValueError, TypeError):
+                raise ValueError("fault_config server_delay_seconds must be a non-negative number")
 
 
 def validate_template_parameters(schema: dict[str, Any], parameters: dict[str, Any]) -> None:

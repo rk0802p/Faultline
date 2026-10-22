@@ -2018,6 +2018,172 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertTrue(truncated)
         self.assertEqual(size, total_read)
 
+    def test_max_response_bytes_validation_zero_negative_non_int_and_excessive(self) -> None:
+        """Verify max_response_bytes rejects zero, negative, non-integer, boolean, and excessive values before connect."""
+        from faultline.security import validate_max_response_bytes, MAX_RESPONSE_BYTES_CEILING
+        from faultline.engine import _execute_http_request_with_redirects
+        from faultline.schema import validate_scenario
+        from unittest.mock import patch
+
+        # 1. Direct validator unit checks
+        with self.assertRaises(ValueError):
+            validate_max_response_bytes(0)
+        with self.assertRaises(ValueError):
+            validate_max_response_bytes(-50)
+        with self.assertRaises(ValueError):
+            validate_max_response_bytes("invalid_number")
+        with self.assertRaises(ValueError):
+            validate_max_response_bytes(True)
+        with self.assertRaises(ValueError):
+            validate_max_response_bytes(False)
+        with self.assertRaises(ValueError):
+            validate_max_response_bytes(MAX_RESPONSE_BYTES_CEILING + 1)
+
+        # Valid values
+        self.assertEqual(validate_max_response_bytes(1024), 1024)
+        self.assertEqual(validate_max_response_bytes("2048"), 2048)
+        self.assertEqual(validate_max_response_bytes(None), 1_048_576)
+
+        # 2. _execute_http_request_with_redirects rejects invalid limits before opening any connection
+        with patch("faultline.engine._create_http_connection") as mock_conn:
+            for bad_val in [0, -1, "not_an_int", True, 100 * 1024 * 1024]:
+                with self.assertRaises(ValueError):
+                    _execute_http_request_with_redirects(
+                        run_id="test-run",
+                        step_id="step1",
+                        scheme="http",
+                        host="127.0.0.1",
+                        port=8766,
+                        path="/test",
+                        method="GET",
+                        headers={},
+                        raw_body=None,
+                        timeout=2.0,
+                        allowed_statuses={200},
+                        max_response_bytes=bad_val,
+                    )
+            # Verify no connection was attempted
+            mock_conn.assert_not_called()
+
+        # 3. Schema validation rejects invalid max_response_bytes at step and scenario levels
+        base_scenario = {
+            "scenario_version": 1,
+            "name": "schema-test-mrb",
+            "fault": "http_timeout",
+            "assertion": "all_steps_succeeded_or_handled",
+            "timeout_seconds": 10,
+            "workflow": [
+                {
+                    "id": "step1",
+                    "name": "Step 1",
+                    "type": "http.get",
+                    "path": "/v1/health",
+                }
+            ],
+            "target_step": "step1",
+        }
+        for bad_val in [0, -10, "bad_int", True, 60 * 1024 * 1024]:
+            scen_step_bad = dict(base_scenario)
+            scen_step_bad["workflow"] = [
+                {
+                    "id": "step1",
+                    "name": "Step 1",
+                    "type": "http.get",
+                    "path": "/v1/health",
+                    "max_response_bytes": bad_val,
+                }
+            ]
+            with self.assertRaises(ValueError):
+                validate_scenario(scen_step_bad)
+
+            scen_root_bad = dict(base_scenario)
+            scen_root_bad["max_response_bytes"] = bad_val
+            with self.assertRaises(ValueError):
+                validate_scenario(scen_root_bad)
+
+    def test_scenario_level_fault_config_reaches_http_handler_with_precedence(self) -> None:
+        """Verify scenario-level fault_config propagates to HTTP handler and step-level config overrides it."""
+        sc_id = f"scen-fault-cfg-{uuid4().hex[:6]}"
+        scenario_def = {
+            "scenario_version": 1,
+            "name": sc_id,
+            "fault": "http_timeout",
+            "assertion": "all_steps_succeeded_or_handled",
+            "timeout_seconds": 10,
+            "fault_config": {
+                "client_timeout_seconds": 0.15,
+                "server_delay_seconds": 0.5,
+            },
+            "workflow": [
+                {
+                    "id": "step_inherited",
+                    "name": "Inherit Scenario Fault Config",
+                    "type": "http.get",
+                    "path": "/v1/health",
+                }
+            ],
+            "target_step": "step_inherited",
+        }
+        status, res = self.request("POST", "/api/scenarios", {"definition": scenario_def})
+        self.assertEqual(status, 201)
+
+        run = self.launch_and_wait("fixed", sc_id)
+        events = run.get("events", [])
+
+        # 1. Verify FAULT_INJECTED recorded the scenario-level fault config
+        fault_events = [e for e in events if e["type"] == "FAULT_INJECTED"]
+        self.assertEqual(len(fault_events), 1)
+        injected_cfg = fault_events[0]["payload"]["config"]
+        self.assertEqual(injected_cfg.get("client_timeout_seconds"), 0.15)
+        self.assertEqual(injected_cfg.get("server_delay_seconds"), 0.5)
+
+        # 2. Verify HTTP_REQUEST_SENT used scenario-level config
+        req_events = [e for e in events if e["type"] == "HTTP_REQUEST_SENT"]
+        self.assertGreaterEqual(len(req_events), 1)
+        self.assertEqual(req_events[0]["payload"].get("client_timeout_seconds"), 0.15)
+        headers = req_events[0]["payload"].get("headers", {})
+        self.assertEqual(headers.get("X-Faultline-Delay"), "0.5")
+
+        # 3. Verify HTTP_TIMEOUT_OBSERVED recorded the client timeout
+        timeout_events = [e for e in events if e["type"] == "HTTP_TIMEOUT_OBSERVED"]
+        self.assertGreaterEqual(len(timeout_events), 1)
+        self.assertEqual(timeout_events[0]["payload"].get("client_timeout_seconds"), 0.15)
+
+        # 4. Verify step-level precedence: step override takes precedence over scenario
+        sc_id_override = f"scen-override-{uuid4().hex[:6]}"
+        scenario_override_def = {
+            "scenario_version": 1,
+            "name": sc_id_override,
+            "fault": "http_timeout",
+            "assertion": "all_steps_succeeded_or_handled",
+            "timeout_seconds": 10,
+            "fault_config": {
+                "client_timeout_seconds": 0.1,
+                "server_delay_seconds": 0.4,
+            },
+            "workflow": [
+                {
+                    "id": "step_override",
+                    "name": "Step With Own Config",
+                    "type": "http.get",
+                    "path": "/v1/health",
+                    "fault_config": {
+                        "client_timeout_seconds": 0.2,
+                    },
+                }
+            ],
+            "target_step": "step_override",
+        }
+        status, res = self.request("POST", "/api/scenarios", {"definition": scenario_override_def})
+        self.assertEqual(status, 201)
+
+        run_ov = self.launch_and_wait("fixed", sc_id_override)
+        events_ov = run_ov.get("events", [])
+        fault_ov = [e for e in events_ov if e["type"] == "FAULT_INJECTED"][0]
+        # client_timeout_seconds overridden by step (0.2), server_delay_seconds inherited from scenario (0.4)
+        self.assertEqual(fault_ov["payload"]["config"].get("client_timeout_seconds"), 0.2)
+        self.assertEqual(fault_ov["payload"]["config"].get("server_delay_seconds"), 0.4)
+
 
 if __name__ == "__main__":
     unittest.main()

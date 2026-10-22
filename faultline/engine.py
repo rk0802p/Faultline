@@ -498,7 +498,10 @@ class StepRunnerRegistry:
 
 
 MAX_REDIRECTS = 5
-MAX_RESPONSE_BYTES_DEFAULT = 1_048_576  # 1 MB response reading ceiling
+MAX_RESPONSE_BYTES_DEFAULT = security.MAX_RESPONSE_BYTES_DEFAULT
+MAX_RESPONSE_BYTES_CEILING = security.MAX_RESPONSE_BYTES_CEILING
+validate_max_response_bytes = security.validate_max_response_bytes
+
 BLOCKED_REQUEST_HEADERS = {"host", "transfer-encoding", "connection", "upgrade"}
 SENSITIVE_REDIRECT_HEADERS = {
     "authorization",
@@ -649,6 +652,9 @@ def _execute_http_request_with_redirects(
     max_response_bytes: int = MAX_RESPONSE_BYTES_DEFAULT,
 ) -> tuple[int, dict[str, str], bytes, float, list[dict[str, Any]], bool, int]:
     """Executes HTTP request, validating destinations and handling redirects securely."""
+    # Enforce positive bounded max_response_bytes before creating any connection
+    max_response_bytes = validate_max_response_bytes(max_response_bytes)
+
     curr_scheme = scheme
     curr_host = host
     curr_port = port
@@ -787,12 +793,51 @@ def _execute_http_step(
         step_config.get("idempotent", method in {"GET", "HEAD", "PUT", "DELETE"})
     )
     configured_retries = int(step.get("retries", step_config.get("retries", 1 if implementation == "fixed" else 0)))
-    max_response_bytes = int(step.get("max_response_bytes") or step_config.get("max_response_bytes") or MAX_RESPONSE_BYTES_DEFAULT)
+
+    # Reject invalid max_response_bytes configuration before opening connection
+    raw_mrb = step.get("max_response_bytes") if "max_response_bytes" in step else step_config.get("max_response_bytes")
+    try:
+        max_response_bytes = validate_max_response_bytes(raw_mrb)
+    except ValueError as exc:
+        store.record_event(run_id, "STEP_FAILED", {
+            "step_id": step_id,
+            "error": f"Invalid max_response_bytes: {exc}",
+            "evidence": "INVALID_CONFIG",
+        })
+        return False, {
+            "step_id": step_id,
+            "type": "http_result",
+            "status": "config_error",
+            "error": str(exc),
+            "fault_activated": False,
+            "simulated": False,
+        }
 
     if inject_fault and fault_type == "http_timeout":
         fault_config = step.get("fault_config") or {}
-        client_timeout = float(fault_config.get("client_timeout_seconds", 0.1))
-        server_delay = float(fault_config.get("server_delay_seconds", client_timeout + 0.3))
+        raw_ct = fault_config.get("client_timeout_seconds", 0.1)
+        raw_sd = fault_config.get("server_delay_seconds")
+        try:
+            client_timeout = float(raw_ct)
+            if client_timeout <= 0:
+                raise ValueError(f"client_timeout_seconds must be positive (> 0), got {client_timeout}")
+            server_delay = float(raw_sd) if raw_sd is not None else client_timeout + 0.3
+            if server_delay < 0:
+                raise ValueError(f"server_delay_seconds must be non-negative (>= 0), got {server_delay}")
+        except (ValueError, TypeError) as exc:
+            store.record_event(run_id, "STEP_FAILED", {
+                "step_id": step_id,
+                "error": f"Invalid fault configuration: {exc}",
+                "evidence": "INVALID_FAULT_CONFIG",
+            })
+            return False, {
+                "step_id": step_id,
+                "type": "http_result",
+                "status": "config_error",
+                "error": str(exc),
+                "fault_activated": False,
+                "simulated": False,
+            }
 
         fault_headers = dict(base_headers)
         fault_headers["X-Faultline-Fault"] = "http_timeout"
@@ -1393,15 +1438,26 @@ def _execute_generic_workflow(
 
         is_fault_target = (target_step == step_id) or (target_step is None and idx == 0)
 
+        effective_step = dict(step)
+        if "max_response_bytes" not in effective_step and "max_response_bytes" in scenario:
+            effective_step["max_response_bytes"] = scenario["max_response_bytes"]
+
         if is_fault_target and not fault_injected:
             fault_injected = True
+            # Explicit precedence: step-level fault_config specializes and overrides scenario-level fault_config
+            resolved_fault_config = {
+                **(scenario.get("fault_config") or {}),
+                **(step.get("fault_config") or {}),
+            }
+            effective_step["fault_config"] = resolved_fault_config
+
             store.record_event(run_id, "FAULT_INJECTED", {
                 "fault_type": fault_type,
                 "target_step": step_id,
-                "config": fault_config,
+                "config": resolved_fault_config,
             })
             success, side_effect = handler(
-                run_id, step, True, fault_type, implementation, trace_id, root_span_id
+                run_id, effective_step, True, fault_type, implementation, trace_id, root_span_id
             )
             if side_effect.get("fault_activated"):
                 fault_activation_confirmed = True
@@ -1413,7 +1469,7 @@ def _execute_generic_workflow(
                 step_failures += 1
         else:
             success, side_effect = handler(
-                run_id, step, False, fault_type, implementation, trace_id, root_span_id
+                run_id, effective_step, False, fault_type, implementation, trace_id, root_span_id
             )
             if success:
                 executed_steps.append(step_id)

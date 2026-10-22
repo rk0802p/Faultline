@@ -219,15 +219,30 @@ checkout_service = TestCheckoutService()
 
 
 def json_reply(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> None:
-    raw = json.dumps(payload).encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Content-Length", str(len(raw)))
-    handler.end_headers()
-    handler.wfile.write(raw)
+    try:
+        raw = json.dumps(payload).encode("utf-8")
+        handler.send_response(status)
+        handler.send_header("Content-Type", "application/json; charset=utf-8")
+        handler.send_header("Content-Length", str(len(raw)))
+        handler.end_headers()
+        handler.wfile.write(raw)
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+        # Client disconnected or aborted connection (e.g. during timeout testing)
+        pass
 
 
 class ProviderHandler(BaseHTTPRequestHandler):
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            pass
+
+    def finish(self) -> None:
+        try:
+            super().finish()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            pass
     def do_POST(self) -> None:
         if self.headers.get("X-Faultline-Fault") == "http_timeout" or self.headers.get("X-Faultline-Delay"):
             delay_sec = float(self.headers.get("X-Faultline-Delay", "0.4"))
@@ -296,6 +311,18 @@ class ProviderHandler(BaseHTTPRequestHandler):
 
 
 class CheckoutHandler(BaseHTTPRequestHandler):
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            pass
+
+    def finish(self) -> None:
+        try:
+            super().finish()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            pass
+
     def do_POST(self) -> None:
         if self.headers.get("X-Faultline-Fault") == "http_timeout" or self.headers.get("X-Faultline-Delay"):
             delay_sec = float(self.headers.get("X-Faultline-Delay", "0.4"))

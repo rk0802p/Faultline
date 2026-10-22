@@ -1347,6 +1347,25 @@ function setupGenerateFromGaps() {
 // UTILITIES: METRICS, AUDIT, PRUNE
 // =========================================================
 function setupModals() {
+  // Backdrop click to close on all modal overlays
+  $$(".modal-overlay").forEach((modal) => {
+    modal.hidden = true;
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) {
+        modal.hidden = true;
+      }
+    });
+  });
+
+  // Global Escape key to close modals
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      $$(".modal-overlay").forEach((modal) => {
+        modal.hidden = true;
+      });
+    }
+  });
+
   // Metrics Modal
   const openMetrics = $("#open-metrics-btn");
   const closeMetrics = $("#close-metrics-btn");
@@ -1388,7 +1407,10 @@ function setupModals() {
       toast(`Metrics error: ${err.message}`);
     }
   });
-  closeMetrics?.addEventListener("click", () => { if (metricsModal) metricsModal.hidden = true; });
+  closeMetrics?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (metricsModal) metricsModal.hidden = true;
+  });
 
   // Audit Modal
   const openAudit = $("#open-audit-btn");
@@ -1414,7 +1436,10 @@ function setupModals() {
       list.innerHTML = `<span style="color:var(--crimson-600)">Error: ${escapeHtml(err.message)}</span>`;
     }
   });
-  closeAudit?.addEventListener("click", () => { if (auditModal) auditModal.hidden = true; });
+  closeAudit?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (auditModal) auditModal.hidden = true;
+  });
 
   // Prune Modal
   const openPrune = $("#open-prune-btn");
@@ -1426,7 +1451,10 @@ function setupModals() {
     const res = $("#prune-results");
     if (res) res.hidden = true;
   });
-  closePrune?.addEventListener("click", () => { if (pruneModal) pruneModal.hidden = true; });
+  closePrune?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (pruneModal) pruneModal.hidden = true;
+  });
 
   execPrune?.addEventListener("click", async () => {
     try {

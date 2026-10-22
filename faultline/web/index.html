@@ -3,255 +3,768 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#101a2d">
+  <meta name="theme-color" content="#202b40">
   <title>Faultline · Integration failure lab</title>
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/report.css">
 </head>
 <body>
   <div class="app-shell">
-    <aside class="sidebar">
-      <a class="brand" href="/" aria-label="Faultline home">
-        <span class="brand-mark"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M17.4 2.5 7.2 17h7l-.9 12.5L25 14.7h-7.3l-.3-12.2Z"/></svg></span>
-        <span>faultline<span class="brand-period">.</span></span>
+    <!-- Sidebar: Signature Ink (#202B40) -->
+    <aside class="sidebar" aria-label="Main navigation sidebar">
+      <a class="brand" href="#overview" aria-label="Faultline Home">
+        <div class="brand-mark" aria-hidden="true">
+          <!-- Continuous fault line SVG icon -->
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M3 12H9L12 5L15 19L18 12H21" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="12" cy="5" r="2" fill="#d97706"/>
+          </svg>
+        </div>
+        <div class="brand-copy">
+          <span class="brand-title">FAULTLINE</span>
+          <span class="brand-sub">Reliability Lab</span>
+        </div>
       </a>
-      <div class="workspace-label">WORKSPACE</div>
-      <button class="workspace-switch"><span class="workspace-avatar">R</span><span class="workspace-copy"><strong>Reliability lab</strong><small>Personal workspace</small></span><span class="chevron">⌄</span></button>
-      <nav class="side-nav" aria-label="Main navigation">
-        <a class="nav-item active" href="#overview"><span class="nav-icon">◫</span>Overview</a>
-        <a class="nav-item" href="#scenarios"><span class="nav-icon">◇</span>Scenarios<span class="nav-count" id="scenario-count">1</span></a>
-        <a class="nav-item" href="#templates"><span class="nav-icon">☷</span>Templates</a>
-        <a class="nav-item" href="#coverage"><span class="nav-icon">▦</span>Coverage</a>
-        <a class="nav-item" href="#runs"><span class="nav-icon">◷</span>Run history</a>
+
+      <!-- Raycast-inspired Quick Action Bar -->
+      <button class="command-trigger" id="cmd-k-trigger" title="Open Command Palette (Ctrl+K or Cmd+K)">
+        <span style="display:flex;align-items:center;gap:6px">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+          Search actions...
+        </span>
+        <kbd>⌘K</kbd>
+      </button>
+
+      <div class="sidebar-section-label">LAB NAVIGATION</div>
+      <nav class="side-nav" aria-label="Application Views">
+        <a class="nav-item active" href="#overview" data-view="overview">
+          <span class="nav-icon">◫</span>
+          <span>Overview</span>
+        </a>
+        <a class="nav-item" href="#studio" data-view="studio">
+          <span class="nav-icon">⚙</span>
+          <span>Experiment Studio</span>
+          <span class="nav-badge" id="scenario-count">3</span>
+        </a>
+        <a class="nav-item" href="#liverun" data-view="liverun">
+          <span class="nav-icon">▶</span>
+          <span>Live Run</span>
+        </a>
+        <a class="nav-item" href="#investigation" data-view="investigation">
+          <span class="nav-icon">🔍</span>
+          <span>Run Investigation</span>
+        </a>
+        <a class="nav-item" href="#map" data-view="map">
+          <span class="nav-icon">▦</span>
+          <span>Reliability Map</span>
+        </a>
       </nav>
+
       <div class="sidebar-bottom">
-        <div class="local-card"><span class="local-dot"></span><div><strong>Local environment</strong><small>Isolated test targets</small></div><span class="local-lock">⌑</span></div>
-        <div class="user-row"><span class="user-avatar">R</span><span><strong>Developer</strong><small>Local session</small></span><button class="more-button" aria-label="Account options">···</button></div>
+        <div class="env-target-card">
+          <div class="pulse-dot pulse" id="env-pulse"></div>
+          <div class="env-target-text">
+            <strong>Target: Local Environment</strong>
+            <small>Loopback boundary active</small>
+          </div>
+        </div>
+
+        <div class="sidebar-quick-tools">
+          <button class="tool-btn" id="open-metrics-btn" title="View operational metrics">Metrics</button>
+          <button class="tool-btn" id="open-prune-btn" title="Retention & pruning policy">Prune</button>
+          <button class="tool-btn" id="open-audit-btn" title="Immutable governance audit log">Audit</button>
+        </div>
       </div>
     </aside>
 
-    <main class="main-content" id="overview">
-      <header class="topbar"><div class="breadcrumbs"><span>Reliability lab</span><span class="crumb-slash">/</span><strong>Overview</strong></div><div class="topbar-right"><span class="environment-pill" id="services-health-pill"><i></i> LOCAL LAB</span><button class="button button-secondary" id="open-metrics-btn" style="padding:4px 8px;font-size:10px">Metrics</button><button class="button button-secondary" id="open-prune-btn" style="padding:4px 8px;font-size:10px">Prune data</button><button class="button button-secondary" id="open-audit-btn" style="padding:4px 8px;font-size:10px">Audit log</button><button class="icon-button" title="Refresh data" id="refresh-button">↻</button></div></header>
-      <section class="page-heading"><div><div class="eyebrow">FAULTLINE WORKSPACE</div><h1>Integration failure lab</h1><p>Find out whether your checkout stays correct when a dependency fails.</p></div><div class="heading-date"><span class="live-indicator"></span> Ready to run</div></section>
-
-      <section class="hero-card">
-        <div class="hero-noise"></div><div class="hero-content"><div class="hero-kicker"><span class="hero-spark">✳</span> YOUR FIRST RESILIENCE CHECK</div><h2>Test the failure.<br><em>Prove the recovery.</em></h2><p>Payment succeeds. The response disappears. Does your checkout charge twice?</p><a class="hero-link" href="#scenarios">Explore the scenario <span>↘</span></a></div>
-        <div class="hero-visual" aria-hidden="true"><div class="diagram-node node-checkout"><span class="node-glyph">▣</span><span><b>Checkout</b><small>retrying request</small></span><i class="node-state pulse"></i></div><div class="diagram-line line-one"><span class="line-packet"></span></div><div class="fault-marker"><span>×</span><small>response lost</small></div><div class="diagram-line line-two"><span class="line-packet delayed"></span></div><div class="diagram-node node-payment"><span class="node-glyph payment-glyph">$</span><span><b>Payment API</b><small>charge committed</small></span><i class="node-state good"></i></div><div class="diagram-caption"><span class="caption-check">✓</span> side effect recorded</div></div>
-      </section>
-
-      <section class="metrics-grid" aria-label="Workspace metrics">
-        <article class="metric-card"><div class="metric-top"><span>Total runs</span><span class="metric-icon icon-blue">◷</span></div><strong id="metric-runs">0</strong><small>Across all scenarios</small></article>
-        <article class="metric-card"><div class="metric-top"><span>Issues caught</span><span class="metric-icon icon-red">⌁</span></div><strong id="metric-failures">0</strong><small>Invariant failures found</small></article>
-        <article class="metric-card"><div class="metric-top"><span>Passing runs</span><span class="metric-icon icon-green">✓</span></div><strong id="metric-passes">0</strong><small>Recovery behavior verified</small></article>
-        <article class="metric-card metric-adapter"><div class="metric-top"><span>Active adapter</span><span class="metric-icon icon-violet">⌘</span></div><strong>HTTP</strong><small><span class="adapter-status"></span> Local payment provider</small></article>
-      </section>
-
-      <div class="section-heading" id="scenarios"><div><div class="eyebrow">START HERE</div><h2>Failure scenarios</h2></div><span class="section-subtitle">Controlled experiments against your local checkout</span></div>
-      <section class="detail-card suite-card">
-        <div class="detail-title">
-          <span class="detail-title-icon" style="background:#eaf0ff;color:#456fe8">☷</span>
-          <div>
-            <strong>Critical Integrations Suite</strong>
-            <small>Sequentially executes all 3 core failure scenarios (lost responses, duplicate webhooks, partial persistence)</small>
-          </div>
+    <!-- Main Content Canvas -->
+    <main class="main-content">
+      <header class="topbar">
+        <div class="topbar-breadcrumbs">
+          <span>FAULTLINE</span>
+          <span class="crumb-slash">/</span>
+          <strong id="topbar-current-view">OVERVIEW</strong>
         </div>
-        <div style="display:flex;gap:10px;margin-top:12px;align-items:center;flex-wrap:wrap">
-          <button class="button button-primary suite-run-btn" data-implementation="vulnerable"><span>▶</span> Run suite (vulnerable)</button>
-          <button class="button button-secondary suite-run-btn" data-implementation="fixed">Run suite (fixed) <span>↗</span></button>
-          <span style="font-size:10px;color:#8793a5;margin-left:auto">3 scenarios · CI automated suite</span>
+        <div class="topbar-actions">
+          <span class="environment-pill" id="services-health-pill">
+            <i></i> SERVICES HEALTHY
+          </span>
+          <button class="icon-button" id="refresh-button" title="Refresh platform state">↻</button>
         </div>
-      </section>
-      <section class="detail-card scenario-editor">
-        <div class="detail-title"><div><strong>Visual scenario designer</strong><small>Configure the workflow, inspect its steps, then validate and save a version</small></div></div>
-        <select id="scenario-select" aria-label="Scenario to edit"></select>
-        <div class="designer-grid">
-          <div class="designer-fields">
-            <label>Scenario name<input data-field="name" maxlength="80"></label>
-            <label>Description<input data-field="description" maxlength="240"></label>
-            <label>Order ID<input data-field="order_id" maxlength="80"></label>
-            <label>Charge amount (cents)<input data-field="amount_cents" type="number" min="1" step="1"></label>
-            <label>Retry attempts<input data-field="retries" type="number" min="0" max="3" step="1"></label>
-            <label>Run timeout (seconds)<input data-field="timeout_seconds" type="number" min="2" max="60" step="1"></label>
-          </div>
-          <ol class="workflow-canvas" id="workflow-canvas" aria-label="Scenario workflow">
-            <li><span>1</span><div><strong>Checkout starts payment</strong><small>Uses the order and amount above</small></div></li>
-            <li><span>2</span><div><strong>Provider commits charge</strong><small>Local test provider records the side effect</small></div></li>
-            <li class="workflow-fault"><span>3</span><div><strong>Drop provider response</strong><small>Simulates an unknown payment outcome</small></div></li>
-            <li><span>4</span><div><strong>Checkout retries</strong><small>Runs the configured retry count</small></div></li>
-            <li><span>5</span><div><strong>Evaluate invariants</strong><small>Checks duplicate charges and terminal state</small></div></li>
-          </ol>
-        </div>
-        <details class="scenario-json-details"><summary>Scenario definition JSON</summary><textarea id="scenario-json" readonly spellcheck="false"></textarea></details>
-        <div class="designer-actions"><button class="button button-secondary" id="validate-scenario">Validate</button><button class="button button-primary" id="save-scenario">Save new version</button><span id="scenario-feedback" role="status"></span></div>
-      </section>
-      <section class="scenario-grid">
-        <article class="scenario-card">
-          <div class="scenario-card-top"><span class="scenario-symbol">↗</span><span class="scenario-tag">PAYMENTS</span><button class="kebab" aria-label="Scenario options">···</button></div>
-          <h3>Payment response lost</h3><p class="scenario-description">The provider commits a charge, then the response is dropped. Checkout retries with an uncertain outcome.</p>
-          <div class="scenario-flow"><span>Checkout</span><i>→</i><span class="flow-fault">Response timeout <b>×</b></span><i>→</i><span>Retry</span></div>
-          <div class="scenario-meta"><span><i class="meta-dot"></i> Deterministic</span><span>4 invariants</span></div>
-          <div class="scenario-actions"><button class="button button-primary run-button" data-scenario="payment-response-lost" data-implementation="vulnerable"><span>▶</span> Run vulnerable</button><button class="button button-secondary run-button" data-scenario="payment-response-lost" data-implementation="fixed">Run fixed <span>↗</span></button></div>
-        </article>
-        <article class="scenario-card">
-          <div class="scenario-card-top"><span class="scenario-symbol">↻</span><span class="scenario-tag">WEBHOOKS</span><button class="kebab" aria-label="Scenario options">···</button></div>
-          <h3>Duplicate payment webhook</h3><p class="scenario-description">A payment event is redelivered. Verify checkout fulfillment is idempotent and does not duplicate side effects.</p>
-          <div class="scenario-flow"><span>Webhook</span><i>→</i><span class="flow-fault">Redelivery <b>↻</b></span><i>→</i><span>Deduplication</span></div>
-          <div class="scenario-meta"><span><i class="meta-dot"></i> Deterministic</span><span>4 invariants</span></div>
-          <div class="scenario-actions"><button class="button button-primary run-button" data-scenario="duplicate-payment-webhook" data-implementation="vulnerable"><span>▶</span> Run vulnerable</button><button class="button button-secondary run-button" data-scenario="duplicate-payment-webhook" data-implementation="fixed">Run fixed <span>↗</span></button></div>
-        </article>
-        <article class="scenario-card">
-          <div class="scenario-card-top"><span class="scenario-symbol">⌁</span><span class="scenario-tag">STORAGE</span><button class="kebab" aria-label="Scenario options">···</button></div>
-          <h3>Partial persistence failure</h3><p class="scenario-description">Payment succeeds, but checkout database commit fails. Verify compensating refund reconciles the charge.</p>
-          <div class="scenario-flow"><span>Payment</span><i>→</i><span class="flow-fault">DB failure <b>⌁</b></span><i>→</i><span>Compensation</span></div>
-          <div class="scenario-meta"><span><i class="meta-dot"></i> Deterministic</span><span>4 invariants</span></div>
-          <div class="scenario-actions"><button class="button button-primary run-button" data-scenario="partial-persistence-failure" data-implementation="vulnerable"><span>▶</span> Run vulnerable</button><button class="button button-secondary run-button" data-scenario="partial-persistence-failure" data-implementation="fixed">Run fixed <span>↗</span></button></div>
-        </article>
-        <aside class="how-card"><div class="how-icon">✳</div><div class="eyebrow">THE FAULTLINE LOOP</div><h3>Make the invisible visible.</h3><p>Faultline records what happened across the workflow, then checks the business rules that matter.</p><ol><li><span>01</span> Inject a controlled fault</li><li><span>02</span> Capture events and side effects</li><li><span>03</span> Evaluate business invariants</li></ol><div class="safe-note"><span>⌑</span> Runs stay inside this local lab.</div></aside>
-      </section>
+      </header>
 
-      <section class="run-panel" id="active-run" hidden>
-        <div class="run-panel-header"><div><div class="eyebrow">RUN INSPECTOR</div><h2 id="run-title">Run details</h2></div><div class="run-header-actions"><button class="button button-secondary" id="cancel-run" hidden>Cancel run</button><div class="run-status-pill" id="run-status">QUEUED</div></div></div>
-        <div class="run-overview" id="run-overview"></div>
-        <div class="ledger-strip"><div class="ledger-heading"><span class="ledger-icon">$</span><div><strong id="ledger-label">Provider side-effect ledger</strong><small id="ledger-sub">Committed charges observed by the test provider</small></div></div><div class="charge-list" id="charge-list"></div></div>
-        <div class="run-detail-grid"><div class="detail-card"><div class="detail-title"><span class="detail-title-icon assertion-icon">✓</span><div><strong>Business invariants</strong><small>Evaluated against recorded evidence</small></div></div><div id="assertion-list" class="assertion-list"></div></div><div class="detail-card timeline-card"><div class="detail-title"><span class="detail-title-icon timeline-icon">◷</span><div><strong>Execution timeline & replay</strong><small>Interactive step-by-step playback</small></div></div><div class="replay-controls" id="replay-controls"><button class="replay-btn" id="replay-prev" title="Step backward">◀</button><button class="replay-btn" id="replay-play" title="Play / Pause">▶ Play</button><button class="replay-btn" id="replay-next" title="Step forward">▶</button><button class="replay-btn" id="replay-reset" title="Reset to start">⟲</button><input type="range" class="replay-slider" id="replay-slider" min="1" max="1" value="1"><span class="replay-step-label" id="replay-step-label">Event 1 of 1</span></div><div class="timeline-filters"><button class="filter-chip active" data-filter="all">All</button><button class="filter-chip" data-filter="faults">Faults</button><button class="filter-chip" data-filter="side_effects">Side effects</button><button class="filter-chip" data-filter="lifecycle">Lifecycle</button><input type="text" id="event-search" placeholder="Search events..." class="timeline-search"></div><div class="jump-controls" id="jump-controls"><span style="font:9px 'DM Mono',monospace;color:#8592a6">JUMP:</span><button class="jump-btn" id="jump-first-fault" title="Jump to first fault event">First fault ⚡</button><button class="jump-btn" id="jump-first-retry" title="Jump to first retry attempt">First retry ↻</button><button class="jump-btn" id="jump-first-violation" title="Jump to first invariant violation">First violation ✕</button></div><ol id="event-list" class="event-list"></ol></div></div>
-        <div class="run-collab-grid">
-          <div class="detail-card">
-            <div class="detail-title"><span class="detail-title-icon" style="background:#eaf5ea;color:#238c5b">✎</span><div><strong>Run annotations & notes</strong><small>Collaborative observations linked to this run</small></div></div>
-            <div id="annotation-list" class="annotation-list"></div>
-            <form id="annotation-form" class="inline-form">
-              <input type="text" id="annotation-author" placeholder="Author" value="Developer" style="width:85px">
-              <input type="text" id="annotation-text" placeholder="Add an observation or note..." style="flex:1" required>
-              <button type="submit" class="button button-secondary">Add note</button>
-            </form>
+      <div class="view-container">
+
+        <!-- =========================================================
+             SCREEN 01: OVERVIEW (THE CONTROL ROOM)
+             ========================================================= -->
+        <section class="page-view active" id="view-overview">
+          <div class="view-header">
+            <div class="eyebrow">FAULTLINE LABORATORY · CONTROL ROOM</div>
+            <h1>Know how it breaks.</h1>
+            <p>Explore failure scenarios, test recovery behavior, and inspect what actually happened in your checkout integrations.</p>
           </div>
-          <div class="detail-card">
-            <div class="detail-title"><span class="detail-title-icon" style="background:#fff3e6;color:#d97706">☑</span><div><strong>Follow-up defect actions</strong><small>Track resolution tasks created from this run</small></div></div>
-            <div id="task-list" class="task-list"></div>
-            <form id="task-form" class="inline-form">
-              <input type="text" id="task-title" placeholder="Action item (e.g. Add idempotency check)..." style="flex:1" required>
-              <select id="task-priority" style="width:75px">
-                <option value="medium">Medium</option>
-                <option value="high">High</option>
-                <option value="critical">Critical</option>
-                <option value="low">Low</option>
-              </select>
-              <button type="submit" class="button button-primary">Create task</button>
-            </form>
-          </div>
-        </div>
-        <div class="report-footer"><span><span class="report-lock">⌑</span> Evidence saved to local run history</span><div><button class="text-button" id="telemetry-btn">OpenTelemetry Traces 📊</button> <button class="text-button" id="branch-checkpoint-btn">Branch Run 🌿</button> <button class="text-button" id="set-baseline-btn">Set Baseline 🎯</button> <button class="text-button" id="diff-toggle-btn">Compare with baseline ⇄</button> <a class="text-button" id="download-repro" href="#" download>Download reproduction</a> <button class="text-button" id="copy-run-id">Copy run ID</button></div></div>
-        <div id="telemetry-card" class="detail-card" style="margin-top:14px" hidden>
-          <div class="detail-title">
-            <span class="detail-title-icon" style="background:#e0f2fe;color:#0284c7">📊</span>
-            <div>
-              <strong>OpenTelemetry Distributed Traces (Spec §11.5)</strong>
-              <small id="telemetry-subtitle">Correlated span waterfall &amp; W3C trace context</small>
+
+          <!-- Hero: Precision + Continuous Execution Line Motif -->
+          <div class="control-room-hero">
+            <div class="hero-text">
+              <span class="eyebrow" style="color:var(--amber-400)">INTEGRATION FAILURE LAB</span>
+              <h2>Test the failure.<br><em>Prove the recovery.</em></h2>
+              <p>When external payment providers drop responses or webhooks redeliver, do your business invariants hold or do orders double-charge?</p>
+              <div class="hero-actions">
+                <a class="button button-amber" href="#studio" data-switch-view="studio">
+                  <span>⚙</span> Configure new experiment
+                </a>
+                <button class="button button-secondary suite-run-btn" data-implementation="fixed" style="color:#fff;background:rgba(255,255,255,0.12);border-color:rgba(255,255,255,0.2)">
+                  Verify recovery suite <span>↗</span>
+                </button>
+              </div>
             </div>
-            <button class="more-button" id="close-telemetry-btn" style="margin-left:auto">✕</button>
-          </div>
-          <div style="margin:10px 0;display:flex;align-items:center;gap:12px;font-size:11px;flex-wrap:wrap">
-            <span>Trace ID: <code id="telemetry-trace-id" style="background:#f1f5f9;padding:2px 6px;border-radius:4px"></code></span>
-            <span>Spans: <strong id="telemetry-span-count"></strong></span>
-            <button class="button button-secondary" id="copy-traceparent-btn" style="padding:2px 6px;font-size:10px">Copy W3C traceparent</button>
-          </div>
-          <div id="telemetry-spans-list" style="margin-top:10px;display:flex;flex-direction:column;gap:6px"></div>
-        </div>
-        <div id="run-diff-card" class="detail-card diff-card" style="margin-top:14px" hidden>
-          <div class="detail-title"><span class="detail-title-icon" style="background:#f0eaff;color:#7c52db">⇄</span><div><strong>Run comparison & divergence</strong><small id="diff-subtitle">Compare with another run to identify earliest behavioral divergence</small></div></div>
-          <div style="display:flex;gap:10px;align-items:center;margin:12px 0 8px">
-            <label style="font-size:10px;color:#77859a;display:flex;align-items:center;gap:6px">Baseline run:
-              <select id="diff-baseline-select" style="padding:4px 8px;border:1px solid #dfe5ee;border-radius:6px;font-size:11px"></select>
-            </label>
-            <button class="button button-secondary" id="diff-execute-btn">Diff runs</button>
-          </div>
-          <div id="diff-content" class="diff-content"></div>
-        </div>
-      </section>
 
-      <section class="coverage-section" id="coverage">
-        <div class="section-heading"><div><div class="eyebrow">QUALITY & ASSURANCE</div><h2>Failure coverage matrix</h2></div><span class="section-subtitle">Integration steps tested across fault domains</span></div>
-        <div class="detail-card">
-          <div class="coverage-header">
-            <div class="coverage-stat"><span class="stat-num" id="coverage-pct">0%</span><span class="stat-label">Applicable coverage</span></div>
-            <div class="coverage-stat"><span class="stat-num" id="coverage-tested">0</span><span class="stat-label">Tested cells</span></div>
-            <div class="coverage-stat"><span class="stat-num text-green" id="coverage-passed">0</span><span class="stat-label">Passed</span></div>
-            <div class="coverage-stat"><span class="stat-num text-red" id="coverage-defects">0</span><span class="stat-label">Defects exposed</span></div>
+            <div class="faultline-motif-canvas" aria-hidden="true">
+              <!-- SVG Visualizing the Faultline continuous execution line fracturing and recovering -->
+              <svg viewBox="0 0 320 100" fill="none" style="width:100%;height:100%">
+                <path d="M10 50 H90 L130 20" stroke="#94a3b8" stroke-width="2.5" stroke-linecap="round"/>
+                <path d="M130 20 L160 80" stroke="#f59e0b" stroke-width="2.5" stroke-dasharray="4 3" stroke-linecap="round"/>
+                <path d="M160 80 L200 50 H310" stroke="#10b981" stroke-width="2.5" stroke-linecap="round"/>
+                <!-- Pulse nodes -->
+                <circle cx="90" cy="50" r="4" fill="#94a3b8"/>
+                <circle cx="130" cy="20" r="5" fill="#f59e0b"/>
+                <circle cx="160" cy="80" r="5" fill="#ef4444"/>
+                <circle cx="200" cy="50" r="5" fill="#10b981"/>
+                <!-- Monospace labels -->
+                <text x="110" y="14" fill="#f59e0b" font-family="monospace" font-size="9" font-weight="bold">DROP</text>
+                <text x="145" y="96" fill="#ef4444" font-family="monospace" font-size="9" font-weight="bold">RETRY</text>
+                <text x="210" y="42" fill="#10b981" font-family="monospace" font-size="9" font-weight="bold">RECOVERED</text>
+              </svg>
+            </div>
           </div>
-          <div class="coverage-table-wrap">
-            <table class="coverage-table" id="coverage-table">
-              <thead><tr><th>Workflow step</th><th>Lost Provider Response</th><th>Duplicate Webhook</th><th>Persistence Failure</th></tr></thead>
-              <tbody id="coverage-body"></tbody>
-            </table>
-          </div>
-          <div style="margin-top:14px;display:flex;justify-content:flex-end">
-            <button class="button button-primary" id="generate-gaps-btn"><span>⚡</span> Generate scenarios from coverage gaps</button>
-          </div>
-        </div>
-      </section>
 
-      <section class="detail-card" id="audit-modal" style="margin-top:14px" hidden>
-        <div class="detail-title">
-          <span class="detail-title-icon" style="background:#f1f5f9;color:#475569">⚖</span>
-          <div>
-            <strong>Governance &amp; Audit Log (Spec §6.13)</strong>
-            <small>Immutable audit trail of scenario versions, run submissions, and security events</small>
+          <!-- Real Metrics Ribbon (Purpose-driven data) -->
+          <div class="metrics-ribbon" aria-label="Laboratory metrics">
+            <article class="metric-card">
+              <div class="metric-top"><span>Experiments</span><span>◷</span></div>
+              <strong id="metric-runs">0</strong>
+              <small>Total runs recorded</small>
+            </article>
+            <article class="metric-card">
+              <div class="metric-top"><span>Defects Exposed</span><span style="color:var(--crimson-500)">⌁</span></div>
+              <strong id="metric-failures" style="color:var(--crimson-600)">0</strong>
+              <small>Vulnerable runs caught</small>
+            </article>
+            <article class="metric-card">
+              <div class="metric-top"><span>Fixes Verified</span><span style="color:var(--emerald-600)">✓</span></div>
+              <strong id="metric-passes" style="color:var(--emerald-600)">0</strong>
+              <small>Passed all invariants</small>
+            </article>
+            <article class="metric-card">
+              <div class="metric-top"><span>Active Target</span><span style="color:var(--indigo-600)">⌘</span></div>
+              <strong>HTTP / 127.0.0.1</strong>
+              <small>Checkout :8766 · Payment :8767</small>
+            </article>
           </div>
-          <button class="more-button" id="close-audit-btn" style="margin-left:auto">✕</button>
-        </div>
-        <div id="audit-log-list" style="margin-top:10px;max-height:220px;overflow-y:auto"></div>
-      </section>
 
-      <section class="detail-card" id="metrics-modal" style="margin-top:14px" hidden>
-        <div class="detail-title">
-          <span class="detail-title-icon" style="background:#e0f2fe;color:#0284c7">📊</span>
-          <div>
-            <strong>Operational Metrics (Spec §21.2)</strong>
-            <small>Control plane uptime, queue-depth, worker health, and invariant assertion stats</small>
+          <!-- Critical Integrations Suite Banner -->
+          <section class="suite-banner">
+            <div class="suite-info">
+              <strong>Critical Integrations Suite</strong>
+              <small>Executes all 3 core scenarios sequentially: lost response, duplicate webhook, and partial persistence failure.</small>
+            </div>
+            <div style="display:flex;gap:10px;align-items:center">
+              <button class="button button-primary suite-run-btn" data-implementation="vulnerable">
+                <span>▶</span> Run suite (vulnerable)
+              </button>
+              <button class="button button-secondary suite-run-btn" data-implementation="fixed">
+                Run suite (fixed) <span>↗</span>
+              </button>
+            </div>
+          </section>
+
+          <!-- Failure Scenarios Quick Cards -->
+          <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:14px">
+            <div>
+              <div class="eyebrow">SEED SCENARIOS</div>
+              <h2 style="font-size:18px;margin:0;font-weight:700">Explore Failure Scenarios</h2>
+            </div>
+            <a href="#studio" data-switch-view="studio" class="button button-secondary" style="font-size:11px">Open Studio ↗</a>
           </div>
-          <button class="more-button" id="close-metrics-btn" style="margin-left:auto">✕</button>
-        </div>
-        <div id="metrics-content" style="margin-top:12px;display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:12px"></div>
-        <div style="margin-top:10px;display:flex;justify-content:flex-end;gap:10px">
-          <a href="/api/metrics?format=prometheus" target="_blank" class="button button-secondary" style="font-size:10px;text-decoration:none">Prometheus Export ↗</a>
-          <a href="/api/metrics" target="_blank" class="button button-secondary" style="font-size:10px;text-decoration:none">Raw JSON ↗</a>
-        </div>
-      </section>
 
-      <section class="detail-card" id="prune-modal" style="margin-top:14px" hidden>
-        <div class="detail-title">
-          <span class="detail-title-icon" style="background:#fef3c7;color:#d97706">🧹</span>
-          <div>
-            <strong>Artifact Retention &amp; Pruning Policy (Spec §16 &amp; §21.2)</strong>
-            <small>Clean up obsolete run events, telemetry traces, and execution snapshots</small>
+          <div class="scenarios-grid">
+            <!-- Scenario 1: Lost Response -->
+            <article class="scenario-card">
+              <div>
+                <div class="scenario-card-header">
+                  <span class="scenario-tag">PAYMENTS &amp; RETRIES</span>
+                  <span style="font-family:var(--font-mono);font-size:10px;color:var(--ink-400)">4 Invariants</span>
+                </div>
+                <h3>Payment response lost</h3>
+                <p class="scenario-description">The provider commits a charge, then the response is dropped. Checkout retries with an uncertain outcome.</p>
+                <div class="scenario-path">
+                  <span class="path-step">Checkout</span>
+                  <span class="path-arrow">→</span>
+                  <span class="path-fault">Lost Response ⚡</span>
+                  <span class="path-arrow">→</span>
+                  <span class="path-step">Idempotent Retry</span>
+                </div>
+              </div>
+              <div class="scenario-actions">
+                <button class="button button-primary run-button" data-scenario="payment-response-lost" data-implementation="vulnerable">
+                  <span>▶</span> Run vulnerable
+                </button>
+                <button class="button button-secondary run-button" data-scenario="payment-response-lost" data-implementation="fixed">
+                  Run fixed <span>↗</span>
+                </button>
+              </div>
+            </article>
+
+            <!-- Scenario 2: Duplicate Webhook -->
+            <article class="scenario-card">
+              <div>
+                <div class="scenario-card-header">
+                  <span class="scenario-tag">WEBHOOK DEDUPLICATION</span>
+                  <span style="font-family:var(--font-mono);font-size:10px;color:var(--ink-400)">4 Invariants</span>
+                </div>
+                <h3>Duplicate payment webhook</h3>
+                <p class="scenario-description">A payment event is redelivered. Verify checkout fulfillment is idempotent and does not duplicate side effects.</p>
+                <div class="scenario-path">
+                  <span class="path-step">Webhook API</span>
+                  <span class="path-arrow">→</span>
+                  <span class="path-fault">Redelivery ↻</span>
+                  <span class="path-arrow">→</span>
+                  <span class="path-step">Deduplication</span>
+                </div>
+              </div>
+              <div class="scenario-actions">
+                <button class="button button-primary run-button" data-scenario="duplicate-payment-webhook" data-implementation="vulnerable">
+                  <span>▶</span> Run vulnerable
+                </button>
+                <button class="button button-secondary run-button" data-scenario="duplicate-payment-webhook" data-implementation="fixed">
+                  Run fixed <span>↗</span>
+                </button>
+              </div>
+            </article>
+
+            <!-- Scenario 3: Partial Persistence Failure -->
+            <article class="scenario-card">
+              <div>
+                <div class="scenario-card-header">
+                  <span class="scenario-tag">STORAGE &amp; RECONCILIATION</span>
+                  <span style="font-family:var(--font-mono);font-size:10px;color:var(--ink-400)">4 Invariants</span>
+                </div>
+                <h3>Partial persistence failure</h3>
+                <p class="scenario-description">Payment succeeds, but checkout database commit fails. Verify compensating refund reconciles the charge.</p>
+                <div class="scenario-path">
+                  <span class="path-step">External Charge</span>
+                  <span class="path-arrow">→</span>
+                  <span class="path-fault">DB Failure ⌁</span>
+                  <span class="path-arrow">→</span>
+                  <span class="path-step">Compensation Refund</span>
+                </div>
+              </div>
+              <div class="scenario-actions">
+                <button class="button button-primary run-button" data-scenario="partial-persistence-failure" data-implementation="vulnerable">
+                  <span>▶</span> Run vulnerable
+                </button>
+                <button class="button button-secondary run-button" data-scenario="partial-persistence-failure" data-implementation="fixed">
+                  Run fixed <span>↗</span>
+                </button>
+              </div>
+            </article>
           </div>
-          <button class="more-button" id="close-prune-btn" style="margin-left:auto">✕</button>
-        </div>
-        <div style="display:flex;gap:14px;margin-top:12px;align-items:center;flex-wrap:wrap">
-          <label style="font-size:11px">Max age (days): <input type="number" id="prune-days-input" value="30" min="0" max="365" style="width:60px;padding:3px 6px;border:1px solid #dfe5ee;border-radius:4px"></label>
-          <label style="font-size:11px"><input type="checkbox" id="prune-keep-baselines" checked> Preserve baseline runs</label>
-          <label style="font-size:11px"><input type="checkbox" id="prune-dry-run"> Dry run preview</label>
-          <button class="button button-primary" id="execute-prune-btn" style="margin-left:auto">Execute Prune</button>
-        </div>
-        <div id="prune-results" style="margin-top:10px;font-size:11px;color:#475569" hidden></div>
-      </section>
 
-      <section class="templates-section" id="templates">
-        <div class="section-heading"><div><div class="eyebrow">REUSABLE TEMPLATES &amp; WORKFLOW DISCOVERY</div><h2>Scenario templates &amp; OpenAPI import</h2></div><span class="section-subtitle">Spec §6.2 &amp; §6.7 — Pre-configured failure templates and automated workflow mapping</span></div>
-        <div class="detail-card" style="margin-bottom:14px">
-          <div class="detail-title"><span class="detail-title-icon" style="background:#e0f2fe;color:#0284c7">⚡</span><div><strong>OpenAPI specification importer</strong><small>Parse an OpenAPI / Swagger definition to discover endpoints and generate test scenarios</small></div></div>
-          <div style="display:flex;gap:10px;margin-top:10px;align-items:flex-start">
-            <textarea id="openapi-input" placeholder='Paste OpenAPI 3.0 / Swagger JSON here (e.g. {"openapi": "3.0.0", "paths": {...}})...' style="flex:1;min-height:75px;font-family:monospace;font-size:11px;padding:8px;border:1px solid #dfe5ee;border-radius:6px"></textarea>
-            <button class="button button-primary" id="import-openapi-btn" style="white-space:nowrap">Import workflow</button>
+          <!-- Activity History Table -->
+          <section class="card" id="runs" style="margin-top:24px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+              <div>
+                <div class="eyebrow">PERSISTED EXPERIMENT EVIDENCE</div>
+                <h2 style="font-size:16px;margin:0;font-weight:700">Recent Experiment Runs</h2>
+              </div>
+              <div style="display:flex;gap:8px">
+                <button class="button button-secondary" id="history-compare-btn" style="font-size:11px" disabled>Compare selected (0/2)</button>
+                <button class="button button-secondary" id="history-refresh" style="font-size:11px">Refresh</button>
+              </div>
+            </div>
+            <div style="overflow-x:auto">
+              <table class="history-table">
+                <thead>
+                  <tr>
+                    <th style="width:28px"></th>
+                    <th>SCENARIO</th>
+                    <th>IMPLEMENTATION</th>
+                    <th>STATUS</th>
+                    <th>VERDICT</th>
+                    <th>STARTED</th>
+                    <th>ACTION</th>
+                  </tr>
+                </thead>
+                <tbody id="history-body">
+                  <tr><td colspan="7" class="empty-row" style="text-align:center;padding:24px;color:var(--ink-400)">No runs yet. Launch a scenario to observe evidence.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <!-- =========================================================
+             SCREEN 02: EXPERIMENT STUDIO (CONFIGURE)
+             ========================================================= -->
+        <section class="page-view" id="view-studio">
+          <div class="view-header">
+            <div class="eyebrow">EXPERIMENT STUDIO · CONFIGURATION</div>
+            <h1>Visual scenario designer</h1>
+            <p>Select a workflow, configure failure parameters, and test resilience under controlled faults.</p>
           </div>
-          <div id="openapi-results" style="margin-top:10px" hidden></div>
-        </div>
-        <div class="template-grid" id="template-grid" style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:14px"></div>
-      </section>
 
-      <section class="history-section" id="runs"><div class="section-heading history-heading"><div><div class="eyebrow">RECENT ACTIVITY</div><h2>Run history</h2></div><div style="display:flex;gap:8px;align-items:center"><button class="button button-secondary" id="history-compare-btn" style="padding:4px 9px;font-size:10px" disabled>Compare selected (0/2)</button><button class="text-button" id="history-refresh">View latest <span>↗</span></button></div></div><div class="history-table-wrap"><table class="history-table"><thead><tr><th style="width:28px"></th><th>SCENARIO</th><th>IMPLEMENTATION</th><th>STATUS</th><th>VERDICT</th><th>STARTED</th><th></th></tr></thead><tbody id="history-body"><tr><td colspan="7" class="empty-row">No runs yet. Launch a scenario to see its evidence here.</td></tr></tbody></table></div></section>
-      <footer class="page-footer"><span>Faultline <b>0.1</b> · Local development build</span><span>Execution targets are restricted to loopback</span></footer>
+          <div class="studio-layout">
+            <!-- Studio Left: Workflow & Controls -->
+            <div class="studio-main">
+              <div class="card scenario-editor">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+                  <div style="font-weight:600;font-size:13px;color:var(--ink-800)">Scenario Definition</div>
+                  <select id="scenario-select" aria-label="Scenario to edit" style="padding:5px 10px;border-radius:var(--radius-sm);border:1px solid var(--border-subtle);font-size:12px;background:#fff"></select>
+                </div>
+
+                <div class="designer-fields">
+                  <label class="full-width">
+                    Scenario Name
+                    <input data-field="name" maxlength="80" placeholder="e.g. payment-response-lost">
+                  </label>
+                  <label class="full-width">
+                    Description
+                    <input data-field="description" maxlength="240" placeholder="Explain what failure mode this tests...">
+                  </label>
+                  <label>
+                    Order ID
+                    <input data-field="order_id" maxlength="80" placeholder="order-001">
+                  </label>
+                  <label>
+                    Charge Amount (cents)
+                    <input data-field="amount_cents" type="number" min="1" step="1">
+                  </label>
+                  <label>
+                    Retry Attempts
+                    <input data-field="retries" type="number" min="0" max="3" step="1">
+                  </label>
+                  <label>
+                    Run Timeout (seconds)
+                    <input data-field="timeout_seconds" type="number" min="2" max="60" step="1">
+                  </label>
+                </div>
+
+                <div style="display:flex;gap:10px;align-items:center;margin-top:16px">
+                  <button class="button button-secondary" id="validate-scenario">Validate</button>
+                  <button class="button button-primary" id="save-scenario">Save new version</button>
+                  <span id="scenario-feedback" role="status" style="font-size:11px;color:var(--ink-500);margin-left:auto"></span>
+                </div>
+
+                <details class="scenario-json-details" style="margin-top:16px">
+                  <summary style="font-size:11px;color:var(--ink-400);cursor:pointer">Inspect Definition JSON</summary>
+                  <textarea id="scenario-json" readonly spellcheck="false" style="width:100%;height:120px;margin-top:8px;background:var(--ink-950);color:#f1f5f9;font-family:var(--font-mono);font-size:11px;padding:10px;border-radius:var(--radius-sm);border:1px solid var(--ink-800)"></textarea>
+                </details>
+              </div>
+
+              <!-- OpenAPI Workflow Importer Card -->
+              <div class="card">
+                <div class="detail-title">
+                  <span class="detail-title-icon">⚡</span>
+                  <div>
+                    <strong>OpenAPI specification importer</strong>
+                    <small>Parse OpenAPI 3.0 / Swagger JSON to discover endpoints and map recommended failure scenarios</small>
+                  </div>
+                </div>
+                <div style="display:flex;gap:10px;margin-top:12px;align-items:flex-start">
+                  <textarea id="openapi-input" placeholder='Paste OpenAPI 3.0 JSON specification here...' style="flex:1;min-height:75px;font-family:var(--font-mono);font-size:11px;padding:8px 10px;border:1px solid var(--border-subtle);border-radius:var(--radius-sm)"></textarea>
+                  <button class="button button-primary" id="import-openapi-btn" style="white-space:nowrap">Import workflow</button>
+                </div>
+                <div id="openapi-results" style="margin-top:12px" hidden></div>
+              </div>
+            </div>
+
+            <!-- Studio Right: Interactive Workflow Pipeline -->
+            <div class="studio-workflow-container">
+              <div class="detail-title" style="border:none;padding:0">
+                <span class="detail-title-icon" style="background:var(--amber-100);color:var(--amber-900)">☷</span>
+                <div>
+                  <strong>Target Workflow Pipeline</strong>
+                  <small>Continuous execution with fault injection point</small>
+                </div>
+              </div>
+
+              <ol class="workflow-canvas" id="workflow-canvas" aria-label="Scenario workflow">
+                <li><span>1</span><div><strong>Checkout starts payment</strong><small>Client initiates payment intent</small></div></li>
+                <li><span>2</span><div><strong>Provider commits charge</strong><small>Payment provider records side-effect</small></div></li>
+                <li class="workflow-fault"><span>3</span><div><strong>Drop provider response</strong><small>Injected fault drops HTTP response</small></div></li>
+                <li><span>4</span><div><strong>Checkout retries</strong><small>Client retries with idempotency key</small></div></li>
+                <li><span>5</span><div><strong>Evaluate invariants</strong><small>Assert single charge &amp; terminal state</small></div></li>
+              </ol>
+
+              <div style="margin-top:20px;border-top:1px solid var(--border-subtle);padding-top:16px">
+                <div style="font-size:11px;font-weight:600;color:var(--ink-500);margin-bottom:8px">LAUNCH EXPERIMENT FROM STUDIO</div>
+                <div style="display:flex;gap:8px">
+                  <button class="button button-primary run-button" id="studio-run-vulnerable" data-implementation="vulnerable" style="flex:1">
+                    <span>▶</span> Run vulnerable
+                  </button>
+                  <button class="button button-secondary run-button" id="studio-run-fixed" data-implementation="fixed" style="flex:1">
+                    Run fixed <span>↗</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- =========================================================
+             SCREEN 03: LIVE RUN (THE FAILURE TIMELINE - OBSERVE)
+             ========================================================= -->
+        <section class="page-view" id="view-liverun">
+          <div class="view-header">
+            <div class="eyebrow">LIVE RUN · THE FAILURE TIMELINE</div>
+            <h1>Observe real-time execution</h1>
+            <p>Trace the flow of execution, inspect the injected fault, step through retries, and observe side-effects.</p>
+          </div>
+
+          <div class="run-panel" id="active-run">
+            <!-- Run Header -->
+            <div class="run-header-card">
+              <div class="run-header-left">
+                <div>
+                  <div class="eyebrow" style="margin-bottom:2px">ACTIVE RUN INSPECTOR</div>
+                  <h2 id="run-title" style="margin:0;font-size:18px;font-weight:700">Run details</h2>
+                </div>
+                <div class="run-status-pill" id="run-status">QUEUED</div>
+              </div>
+              <div style="display:flex;gap:10px;align-items:center">
+                <button class="button button-secondary" id="cancel-run" hidden>Cancel run</button>
+                <a href="#investigation" data-switch-view="investigation" class="button button-primary">
+                  <span>🔍</span> Deep Investigation ↗
+                </a>
+              </div>
+            </div>
+
+            <!-- Overview Chips -->
+            <div class="run-overview" id="run-overview" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px"></div>
+
+            <!-- Ledger Strip (Committed Side Effects) -->
+            <div class="ledger-strip">
+              <div class="ledger-heading">
+                <span class="ledger-icon">$</span>
+                <div>
+                  <strong id="ledger-label">Provider side-effect ledger</strong>
+                  <small id="ledger-sub" style="font-size:11px;color:var(--ink-400)">Observed external ledger records</small>
+                </div>
+              </div>
+              <div class="charge-list" id="charge-list"></div>
+            </div>
+
+            <!-- Interactive Execution Timeline & Replay Card -->
+            <div class="card" style="padding:0;overflow:hidden">
+              <div style="padding:14px 18px;border-bottom:1px solid var(--border-subtle);display:flex;justify-content:space-between;align-items:center">
+                <div style="display:flex;align-items:center;gap:10px">
+                  <span class="detail-title-icon" style="background:var(--amber-100);color:var(--amber-800)">◷</span>
+                  <div>
+                    <strong>Execution timeline & replay</strong>
+                    <small style="color:var(--ink-400);font-size:11px">Step through execution events in chronological order</small>
+                  </div>
+                </div>
+                <div class="jump-controls" id="jump-controls">
+                  <span style="font-family:var(--font-mono);font-size:10px;color:var(--ink-400)">JUMP:</span>
+                  <button class="jump-btn" id="jump-first-fault" title="Jump to first fault event">Fault ⚡</button>
+                  <button class="jump-btn" id="jump-first-retry" title="Jump to first retry">Retry ↻</button>
+                  <button class="jump-btn" id="jump-first-violation" title="Jump to first invariant violation">Violation ✕</button>
+                </div>
+              </div>
+
+              <!-- Replay Toolbar -->
+              <div class="timeline-toolbar">
+                <div class="replay-controls" id="replay-controls">
+                  <button class="replay-btn" id="replay-prev" title="Step backward">◀</button>
+                  <button class="replay-btn" id="replay-play" title="Play / Pause">▶ Play</button>
+                  <button class="replay-btn" id="replay-next" title="Step forward">▶</button>
+                  <button class="replay-btn" id="replay-reset" title="Reset to start">⟲</button>
+                  <input type="range" class="replay-slider" id="replay-slider" min="1" max="1" value="1">
+                  <span class="replay-step-label" id="replay-step-label">Event 1 of 1</span>
+                </div>
+                <div style="display:flex;gap:6px;align-items:center">
+                  <div class="timeline-filters">
+                    <button class="filter-chip active" data-filter="all">All</button>
+                    <button class="filter-chip" data-filter="faults">Faults</button>
+                    <button class="filter-chip" data-filter="side_effects">Side effects</button>
+                    <button class="filter-chip" data-filter="lifecycle">Lifecycle</button>
+                  </div>
+                  <input type="text" id="event-search" placeholder="Search events..." style="border:1px solid var(--border-subtle);border-radius:var(--radius-sm);padding:3px 8px;font-size:11px;width:120px">
+                </div>
+              </div>
+
+              <!-- Event Stream List with Continuous Vertical Faultline -->
+              <div class="event-list-container">
+                <ol id="event-list" class="event-list"></ol>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- =========================================================
+             SCREEN 04: RUN INVESTIGATION (UNDERSTAND)
+             ========================================================= -->
+        <section class="page-view" id="view-investigation">
+          <div class="view-header">
+            <div class="eyebrow">POST-MORTEM &amp; CAUSALITY · INVESTIGATION</div>
+            <h1>Run Investigation Workspace</h1>
+            <p>Understand why the workflow passed or failed: verify invariant rules, inspect distributed traces, and fork execution checkpoints.</p>
+          </div>
+
+          <div class="investigation-grid">
+            <!-- Business Invariants Card -->
+            <div class="detail-card">
+              <div class="detail-title">
+                <span class="detail-title-icon" style="background:var(--emerald-100);color:var(--emerald-700)">✓</span>
+                <div>
+                  <strong>Business Invariant Assertions</strong>
+                  <small>Evaluated against recorded side-effects and system states</small>
+                </div>
+              </div>
+              <div id="assertion-list" class="assertion-list"></div>
+            </div>
+
+            <!-- OpenTelemetry Waterfall Card -->
+            <div class="detail-card" id="telemetry-card">
+              <div class="detail-title">
+                <span class="detail-title-icon" style="background:var(--indigo-100);color:var(--indigo-600)">📊</span>
+                <div>
+                  <strong>OpenTelemetry Distributed Tracing (Spec §11.5)</strong>
+                  <small>Correlated span waterfall &amp; W3C trace context</small>
+                </div>
+                <button class="icon-button" id="close-telemetry-btn" style="margin-left:auto;width:24px;height:24px">✕</button>
+              </div>
+              <div style="display:flex;align-items:center;gap:12px;margin:12px 0;font-size:11px;flex-wrap:wrap">
+                <span>Trace ID: <code id="telemetry-trace-id" style="font-family:var(--font-mono);background:var(--surface-subtle);padding:2px 6px;border-radius:4px"></code></span>
+                <span>Recorded Spans: <strong id="telemetry-span-count"></strong></span>
+                <button class="button button-secondary" id="copy-traceparent-btn" style="padding:2px 8px;font-size:10px">Copy W3C traceparent</button>
+              </div>
+              <div id="telemetry-spans-list"></div>
+            </div>
+
+            <!-- Run Comparison & Divergence Card -->
+            <div class="detail-card diff-card" id="run-diff-card">
+              <div class="detail-title">
+                <span class="detail-title-icon" style="background:#f3e8ff;color:#7e22ce">⇄</span>
+                <div>
+                  <strong>Run comparison &amp; divergence analysis</strong>
+                  <small id="diff-subtitle">Compare current run against baseline to pinpoint earliest behavioral divergence</small>
+                </div>
+              </div>
+              <div style="display:flex;gap:10px;align-items:center;margin:12px 0">
+                <label style="font-size:11px;color:var(--ink-500);display:flex;align-items:center;gap:6px">
+                  Baseline Run:
+                  <select id="diff-baseline-select" style="padding:4px 8px;border:1px solid var(--border-subtle);border-radius:var(--radius-sm);font-size:11px;background:#fff"></select>
+                </label>
+                <button class="button button-secondary" id="diff-execute-btn">Diff runs</button>
+              </div>
+              <div id="diff-content" class="diff-content"></div>
+            </div>
+
+            <!-- Collaboration & Action Tracking Grid -->
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+              <!-- Annotations -->
+              <div class="detail-card">
+                <div class="detail-title">
+                  <span class="detail-title-icon" style="background:var(--emerald-100);color:var(--emerald-800)">✎</span>
+                  <div>
+                    <strong>Run annotations &amp; notes</strong>
+                    <small>Collaborative observations linked to this run</small>
+                  </div>
+                </div>
+                <div id="annotation-list" class="annotation-list"></div>
+                <form id="annotation-form" class="inline-form" style="display:flex;gap:8px;margin-top:10px">
+                  <input type="text" id="annotation-author" placeholder="Author" value="Developer" style="width:90px;padding:4px 8px;border:1px solid var(--border-subtle);border-radius:var(--radius-sm);font-size:11px">
+                  <input type="text" id="annotation-text" placeholder="Add an observation or finding..." style="flex:1;padding:4px 8px;border:1px solid var(--border-subtle);border-radius:var(--radius-sm);font-size:11px" required>
+                  <button type="submit" class="button button-secondary" style="font-size:11px">Add note</button>
+                </form>
+              </div>
+
+              <!-- Defect Action Items -->
+              <div class="detail-card">
+                <div class="detail-title">
+                  <span class="detail-title-icon" style="background:var(--amber-100);color:var(--amber-800)">☑</span>
+                  <div>
+                    <strong>Follow-up defect actions</strong>
+                    <small>Track resolution tasks created from this run</small>
+                  </div>
+                </div>
+                <div id="task-list" class="task-list"></div>
+                <form id="task-form" class="inline-form" style="display:flex;gap:8px;margin-top:10px">
+                  <input type="text" id="task-title" placeholder="Action item (e.g. Add idempotency check)..." style="flex:1;padding:4px 8px;border:1px solid var(--border-subtle);border-radius:var(--radius-sm);font-size:11px" required>
+                  <select id="task-priority" style="padding:4px 6px;border:1px solid var(--border-subtle);border-radius:var(--radius-sm);font-size:11px">
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                    <option value="critical">Critical</option>
+                    <option value="low">Low</option>
+                  </select>
+                  <button type="submit" class="button button-primary" style="font-size:11px">Create task</button>
+                </form>
+              </div>
+            </div>
+
+            <!-- Post-Mortem Toolbox Bar -->
+            <div class="card" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+              <span style="font-size:12px;color:var(--ink-500)">
+                <span style="color:var(--emerald-600)">✓</span> Immutable evidence preserved in local database
+              </span>
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <button class="button button-secondary" id="telemetry-btn">OpenTelemetry Waterfall 📊</button>
+                <button class="button button-secondary" id="branch-checkpoint-btn">Branch Checkpoint 🌿</button>
+                <button class="button button-secondary" id="set-baseline-btn">Set Baseline 🎯</button>
+                <button class="button button-secondary" id="diff-toggle-btn">Compare with baseline ⇄</button>
+                <a class="button button-secondary" id="download-repro" href="#" download>Reproduction bundle</a>
+                <button class="button button-secondary" id="copy-run-id">Copy run ID</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- =========================================================
+             SCREEN 05: RELIABILITY MAP (DISCOVER)
+             ========================================================= -->
+        <section class="page-view" id="view-map">
+          <div class="view-header">
+            <div class="eyebrow">RELIABILITY COVERAGE &amp; GAPS · DISCOVERY</div>
+            <h1>Reliability Map &amp; Coverage</h1>
+            <p>A matrix of workflow steps across fault classes. Untested failure modes are actionable coverage gaps.</p>
+          </div>
+
+          <!-- Coverage Matrix Card -->
+          <div class="card coverage-section" id="coverage">
+            <div class="detail-title" style="border:none;padding-bottom:8px">
+              <span class="detail-title-icon" style="background:var(--emerald-100);color:var(--emerald-800)">▦</span>
+              <div>
+                <strong>Failure Coverage Matrix</strong>
+                <small>Tested integration steps under real failure modes</small>
+              </div>
+              <button class="button button-primary" id="generate-gaps-btn" style="margin-left:auto">
+                <span>⚡</span> Generate scenarios from coverage gaps
+              </button>
+            </div>
+
+            <div class="coverage-stats-ribbon">
+              <div>
+                <strong class="stat-num" id="coverage-pct" style="font-size:22px;font-family:var(--font-mono)">0%</strong>
+                <span class="stat-label" style="display:block;font-size:11px;color:var(--ink-400)">Applicable coverage</span>
+              </div>
+              <div>
+                <strong class="stat-num" id="coverage-tested" style="font-size:22px;font-family:var(--font-mono)">0</strong>
+                <span class="stat-label" style="display:block;font-size:11px;color:var(--ink-400)">Tested cells</span>
+              </div>
+              <div>
+                <strong class="stat-num text-green" id="coverage-passed" style="font-size:22px;font-family:var(--font-mono);color:var(--emerald-600)">0</strong>
+                <span class="stat-label" style="display:block;font-size:11px;color:var(--ink-400)">Passed</span>
+              </div>
+              <div>
+                <strong class="stat-num text-red" id="coverage-defects" style="font-size:22px;font-family:var(--font-mono);color:var(--crimson-600)">0</strong>
+                <span class="stat-label" style="display:block;font-size:11px;color:var(--ink-400)">Defects exposed</span>
+              </div>
+            </div>
+
+            <div class="coverage-table-wrap">
+              <table class="coverage-table" id="coverage-table">
+                <thead>
+                  <tr>
+                    <th>Workflow Step</th>
+                    <th>Lost Provider Response</th>
+                    <th>Duplicate Webhook</th>
+                    <th>Persistence Failure</th>
+                  </tr>
+                </thead>
+                <tbody id="coverage-body"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Scenario Templates Section -->
+          <div class="card templates-section" id="templates" style="margin-top:24px">
+            <div class="detail-title" style="margin-bottom:16px">
+              <span class="detail-title-icon" style="background:var(--amber-100);color:var(--amber-800)">☷</span>
+              <div>
+                <strong>Reusable Scenario Templates</strong>
+                <small>Spec §6.2 — Instantiate pre-configured failure templates into new test scenarios</small>
+              </div>
+            </div>
+            <div class="template-grid" id="template-grid" style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:16px"></div>
+          </div>
+        </section>
+
+      </div>
     </main>
   </div>
+
+  <!-- =========================================================
+       RAYCAST-STYLE COMMAND PALETTE (Ctrl+K / Cmd+K)
+       ========================================================= -->
+  <div class="command-palette-backdrop" id="command-palette-backdrop" aria-hidden="true">
+    <div class="command-palette" role="dialog" aria-modal="true" aria-label="Command Palette">
+      <div class="command-input-wrap">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+        <input class="command-input" id="command-input" placeholder="Type a command, scenario, or navigate..." autocomplete="off" spellcheck="false">
+        <kbd style="font-size:10px;color:var(--ink-400);background:var(--ink-800);padding:2px 5px;border-radius:3px">ESC</kbd>
+      </div>
+      <div class="command-results" id="command-results"></div>
+    </div>
+  </div>
+
+  <!-- Operational Metrics Modal -->
+  <div class="modal-overlay" id="metrics-modal" hidden>
+    <div class="modal-dialog">
+      <div class="detail-title">
+        <span class="detail-title-icon" style="background:var(--indigo-100);color:var(--indigo-600)">📊</span>
+        <div>
+          <strong>Operational Metrics (Spec §21.2)</strong>
+          <small>Control plane uptime, worker queue, and invariant pass rates</small>
+        </div>
+        <button class="icon-button" id="close-metrics-btn" style="margin-left:auto;width:24px;height:24px">✕</button>
+      </div>
+      <div id="metrics-content" style="margin-top:16px;display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:12px"></div>
+      <div style="margin-top:16px;display:flex;justify-content:flex-end;gap:10px">
+        <a href="/api/metrics?format=prometheus" target="_blank" class="button button-secondary" style="font-size:11px">Prometheus Export ↗</a>
+        <a href="/api/metrics" target="_blank" class="button button-secondary" style="font-size:11px">Raw JSON ↗</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pruning Modal -->
+  <div class="modal-overlay" id="prune-modal" hidden>
+    <div class="modal-dialog">
+      <div class="detail-title">
+        <span class="detail-title-icon" style="background:var(--amber-100);color:var(--amber-800)">🧹</span>
+        <div>
+          <strong>Artifact Retention &amp; Pruning Policy</strong>
+          <small>Clean up obsolete run events, telemetry traces, and execution snapshots</small>
+        </div>
+        <button class="icon-button" id="close-prune-btn" style="margin-left:auto;width:24px;height:24px">✕</button>
+      </div>
+      <div style="display:flex;gap:14px;margin-top:16px;align-items:center;flex-wrap:wrap">
+        <label style="font-size:12px">Max age (days): <input type="number" id="prune-days-input" value="30" min="0" max="365" style="width:60px;padding:4px 6px;border:1px solid var(--border-subtle);border-radius:4px"></label>
+        <label style="font-size:12px"><input type="checkbox" id="prune-keep-baselines" checked> Preserve baseline runs</label>
+        <label style="font-size:12px"><input type="checkbox" id="prune-dry-run"> Dry run preview</label>
+        <button class="button button-primary" id="execute-prune-btn" style="margin-left:auto">Execute Prune</button>
+      </div>
+      <div id="prune-results" style="margin-top:14px;font-size:11px;color:var(--ink-600)" hidden></div>
+    </div>
+  </div>
+
+  <!-- Audit Log Modal -->
+  <div class="modal-overlay" id="audit-modal" hidden>
+    <div class="modal-dialog">
+      <div class="detail-title">
+        <span class="detail-title-icon" style="background:var(--surface-subtle);color:var(--ink-700)">⚖</span>
+        <div>
+          <strong>Governance &amp; Audit Log</strong>
+          <small>Immutable audit trail of scenario versions, run submissions, and security events</small>
+        </div>
+        <button class="icon-button" id="close-audit-btn" style="margin-left:auto;width:24px;height:24px">✕</button>
+      </div>
+      <div id="audit-log-list" style="margin-top:14px;max-height:280px;overflow-y:auto"></div>
+    </div>
+  </div>
+
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="/app.js" defer></script>
 </body>

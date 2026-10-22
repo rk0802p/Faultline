@@ -1,15 +1,89 @@
 """Shared scenario schema definitions and validation logic (Spec §8 & §14).
 
-Ensures the control plane, store, gap generator, and CLI share an authoritative
-definition of supported faults, primary invariants, and parameter schemas.
-Supports both reference payment integrations and extensible, generic workflows.
+Ensures the control plane, store, gap generator, and CLI share an authoritative,
+extensible definition of supported faults, primary invariants, and parameter schemas.
+Supports both domain-agnostic generic workflows and pluggable integration packs.
 """
 
-from typing import Any
+from typing import Any, Callable
 
 from .security import validate_max_response_bytes
 
 
+ValidatorCallable = Callable[[dict[str, Any]], None]
+
+
+class FaultSchemaRegistry:
+    """Pluggable registry for fault schemas, primary invariants, and domain-specific validators."""
+
+    def __init__(self) -> None:
+        self._faults: dict[str, dict[str, Any]] = {}
+        self._validators: dict[str, ValidatorCallable] = {}
+        self._legacy_steps: set[str] = set()
+
+    def register(
+        self,
+        fault_name: str,
+        primary_assertion: str,
+        description: str,
+        category: str = "generic",
+        parameter_schema: dict[str, Any] | None = None,
+        defaults: dict[str, Any] | None = None,
+        validator: ValidatorCallable | None = None,
+        legacy_steps: set[str] | None = None,
+    ) -> None:
+        if fault_name in self._faults:
+            raise ValueError(f"fault schema '{fault_name}' is already registered")
+        self._faults[fault_name] = {
+            "primary_assertion": primary_assertion,
+            "description": description,
+            "category": category,
+            "parameter_schema": parameter_schema or {},
+            "defaults": defaults or {},
+        }
+        if validator is not None:
+            self._validators[fault_name] = validator
+        if legacy_steps:
+            self._legacy_steps.update(legacy_steps)
+
+    def get(self, fault_name: str) -> dict[str, Any] | None:
+        return self._faults.get(fault_name)
+
+    def is_registered(self, fault_name: str) -> bool:
+        return fault_name in self._faults
+
+    def all_faults(self) -> dict[str, dict[str, Any]]:
+        return dict(self._faults)
+
+    def get_validator(self, fault_name: str) -> ValidatorCallable | None:
+        return self._validators.get(fault_name)
+
+    def legacy_steps(self) -> set[str]:
+        return set(self._legacy_steps)
+
+
+# Global fault schema registry
+fault_schema_registry = FaultSchemaRegistry()
+
+# Register core generic fault schemas
+fault_schema_registry.register(
+    fault_name="http_timeout",
+    primary_assertion="all_steps_succeeded_or_handled",
+    description="Simulates controlled HTTP timeout against an approved service endpoint.",
+    category="network",
+    parameter_schema={
+        "target_service": {"type": "string", "label": "Target Service", "placeholder": "e.g. checkout-service"},
+        "timeout_ms": {"type": "integer", "label": "Timeout Duration (ms)", "min": 100, "max": 30000},
+        "timeout_seconds": {"type": "integer", "label": "Run Timeout (seconds)", "min": 2, "max": 60},
+    },
+    defaults={"timeout_ms": 1500},
+)
+
+# Shared dictionary reference for backward compatibility across modules
+SUPPORTED_FAULTS: dict[str, dict[str, Any]] = fault_schema_registry._faults
+VALID_WORKFLOW_STEPS: set[str] = fault_schema_registry._legacy_steps
+
+# Backward-compatibility alias
 PAYMENT_FAULTS: set[str] = {
     "payment_response_lost_after_commit",
     "duplicate_payment_webhook",
@@ -17,65 +91,28 @@ PAYMENT_FAULTS: set[str] = {
 }
 
 
-SUPPORTED_FAULTS: dict[str, dict[str, Any]] = {
-    "payment_response_lost_after_commit": {
-        "primary_assertion": "no_duplicate_charge",
-        "description": "Provider commits charge, but response is dropped before checkout receives it.",
-        "defaults": {"retries": 1},
-        "category": "payment",
-        "parameter_schema": {
-            "order_id": {"type": "string", "label": "Order ID", "placeholder": "order-001"},
-            "amount_cents": {"type": "integer", "label": "Charge Amount (cents)", "min": 1},
-            "retries": {"type": "integer", "label": "Retry Attempts", "min": 0, "max": 3},
-            "timeout_seconds": {"type": "integer", "label": "Run Timeout (seconds)", "min": 2, "max": 60},
-        },
-    },
-    "duplicate_payment_webhook": {
-        "primary_assertion": "idempotent_webhook_processing",
-        "description": "Network redelivery of payment succeeded webhook.",
-        "defaults": {"webhook_deliveries": 2, "delay_ms": 100},
-        "category": "webhook",
-        "parameter_schema": {
-            "order_id": {"type": "string", "label": "Order ID", "placeholder": "order-001"},
-            "amount_cents": {"type": "integer", "label": "Charge Amount (cents)", "min": 1},
-            "webhook_deliveries": {"type": "integer", "label": "Webhook Deliveries", "min": 2, "max": 5},
-            "delay_ms": {"type": "integer", "label": "Delivery Delay (ms)", "min": 0, "max": 5000},
-            "timeout_seconds": {"type": "integer", "label": "Run Timeout (seconds)", "min": 2, "max": 60},
-        },
-    },
-    "persistence_failure_after_payment": {
-        "primary_assertion": "charge_compensated_on_failure",
-        "description": "Database write fails after payment commit; requires compensating refund.",
-        "defaults": {"retries": 0, "compensate": True},
-        "category": "storage",
-        "parameter_schema": {
-            "order_id": {"type": "string", "label": "Order ID", "placeholder": "order-001"},
-            "amount_cents": {"type": "integer", "label": "Charge Amount (cents)", "min": 1},
-            "retries": {"type": "integer", "label": "Retry Attempts", "min": 0, "max": 3},
-            "timeout_seconds": {"type": "integer", "label": "Run Timeout (seconds)", "min": 2, "max": 60},
-        },
-    },
-    "http_timeout": {
-        "primary_assertion": "all_steps_succeeded_or_handled",
-        "description": "Simulates controlled HTTP timeout against an approved service endpoint.",
-        "defaults": {"timeout_ms": 1500},
-        "category": "network",
-        "parameter_schema": {
-            "target_service": {"type": "string", "label": "Target Service", "placeholder": "e.g. checkout-service"},
-            "timeout_ms": {"type": "integer", "label": "Timeout Duration (ms)", "min": 100, "max": 30000},
-            "timeout_seconds": {"type": "integer", "label": "Run Timeout (seconds)", "min": 2, "max": 60},
-        },
-    },
-}
+def register_fault_schema(
+    fault_name: str,
+    primary_assertion: str,
+    description: str,
+    category: str = "generic",
+    parameter_schema: dict[str, Any] | None = None,
+    defaults: dict[str, Any] | None = None,
+    validator: ValidatorCallable | None = None,
+    legacy_steps: set[str] | None = None,
+) -> None:
+    """Registers a fault schema into the global fault schema registry."""
+    fault_schema_registry.register(
+        fault_name=fault_name,
+        primary_assertion=primary_assertion,
+        description=description,
+        category=category,
+        parameter_schema=parameter_schema,
+        defaults=defaults,
+        validator=validator,
+        legacy_steps=legacy_steps,
+    )
 
-
-VALID_WORKFLOW_STEPS: set[str] = {
-    "initiate_checkout",
-    "process_payment",
-    "order_persistence",
-    "webhook_delivery",
-    "reconciliation_refund",
-}
 
 SUPPORTED_STEP_TYPES: set[str] = {
     "http.request",
@@ -94,8 +131,13 @@ HTTP_STEP_TYPES: set[str] = {
 }
 
 
+def register_step_type(step_type: str) -> None:
+    """Registers a supported step type for workflow scenario schemas."""
+    SUPPORTED_STEP_TYPES.add(step_type)
+
+
 def validate_scenario(definition: dict[str, Any]) -> None:
-    """Validates that a scenario definition conforms strictly to supported failure testing constraints."""
+    """Validates that a scenario definition conforms to supported constraints via the fault schema registry."""
     if not isinstance(definition, dict):
         raise ValueError("scenario definition must be a JSON object")
 
@@ -103,8 +145,8 @@ def validate_scenario(definition: dict[str, Any]) -> None:
         raise ValueError("unsupported scenario_version: must be integer 1")
 
     fault = definition.get("fault")
-    if fault not in SUPPORTED_FAULTS:
-        raise ValueError(f"unsupported fault type: '{fault}'. Supported: {list(SUPPORTED_FAULTS.keys())}")
+    if not fault_schema_registry.is_registered(fault):
+        raise ValueError(f"unsupported fault type: '{fault}'. Supported: {sorted(list(fault_schema_registry.all_faults().keys()))}")
 
     workflow = definition.get("workflow")
     target_step = definition.get("target_step")
@@ -153,10 +195,12 @@ def validate_scenario(definition: dict[str, Any]) -> None:
                     f"must be an HTTP operation ({sorted(HTTP_STEP_TYPES)})"
                 )
     else:
-        if target_step is not None and target_step not in VALID_WORKFLOW_STEPS:
-            raise ValueError(f"unsupported target_step: '{target_step}'. Valid steps: {sorted(VALID_WORKFLOW_STEPS)}")
+        legacy = fault_schema_registry.legacy_steps()
+        if target_step is not None and legacy and target_step not in legacy:
+            raise ValueError(f"unsupported target_step: '{target_step}'. Valid steps: {sorted(legacy)}")
 
-    expected_assertion = SUPPORTED_FAULTS[fault]["primary_assertion"]
+    fault_info = fault_schema_registry.get(fault)
+    expected_assertion = fault_info["primary_assertion"]
     if definition.get("assertion") != expected_assertion:
         raise ValueError(
             f"unsupported primary assertion '{definition.get('assertion')}' for fault '{fault}'. "
@@ -166,27 +210,12 @@ def validate_scenario(definition: dict[str, Any]) -> None:
     if not isinstance(definition.get("name"), str) or not definition["name"].strip():
         raise ValueError("scenario name is required")
 
-    # Payment-specific schema validations: only required when fault is a payment fault
-    if fault in PAYMENT_FAULTS:
-        if not isinstance(definition.get("order_id"), str) or not definition["order_id"].strip():
-            raise ValueError("order_id is required")
-
-        if type(definition.get("amount_cents")) is not int or definition["amount_cents"] < 1:
-            raise ValueError("amount_cents must be a positive integer")
-
-        if fault in {"payment_response_lost_after_commit", "persistence_failure_after_payment"}:
-            retries = definition.get("retries")
-            if type(retries) is not int or not 0 <= retries <= 3:
-                raise ValueError("retries must be an integer between 0 and 3")
-        elif fault == "duplicate_payment_webhook":
-            deliveries = definition.get("webhook_deliveries", 2)
-            if type(deliveries) is not int or not 2 <= deliveries <= 5:
-                raise ValueError("webhook_deliveries must be an integer between 2 and 5")
-            delay = definition.get("delay_ms", 100)
-            if type(delay) is not int or not 0 <= delay <= 5000:
-                raise ValueError("delay_ms must be an integer between 0 and 5000")
+    # Domain-specific validation: dispatched via registered validator callback if present
+    custom_validator = fault_schema_registry.get_validator(fault)
+    if custom_validator is not None:
+        custom_validator(definition)
     else:
-        # Generic / non-payment fault validations
+        # Generic non-integration validations
         if "timeout_ms" in definition:
             t_ms = definition["timeout_ms"]
             if type(t_ms) is not int or not 100 <= t_ms <= 30000:

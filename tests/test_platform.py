@@ -2184,6 +2184,148 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertEqual(fault_ov["payload"]["config"].get("client_timeout_seconds"), 0.2)
         self.assertEqual(fault_ov["payload"]["config"].get("server_delay_seconds"), 0.4)
 
+    def test_custom_integration_pack_registers_and_executes_without_engine_or_schema_changes(self) -> None:
+        """Phase 3 Acceptance: Verify a new custom integration pack dynamically registers faults,
+
+        step runners, assertion evaluators, cleanup hooks, and validation rules without modifying
+        engine.py or schema.py.
+        """
+        from faultline import schema
+
+        # 1. Integration pack domain validator
+        def validate_queue_scenario(definition: dict[str, Any]) -> None:
+            queue_name = definition.get("queue_name")
+            if not isinstance(queue_name, str) or not queue_name.startswith("q_"):
+                raise ValueError("queue_name must start with 'q_'")
+            partition = definition.get("partition_id", 0)
+            if type(partition) is not int or partition < 0 or partition > 16:
+                raise ValueError("partition_id must be an integer between 0 and 16")
+
+        # 2. Integration pack step handlers
+        queue_storage: list[str] = []
+
+        def execute_publish_step(run_id, step, is_fault_target, fault_type, implementation, trace_id, root_span_id):
+            msg = step.get("message", "default_payload")
+            queue_storage.append(msg)
+            return True, {"action": "published", "message": msg, "queue_depth": len(queue_storage)}
+
+        def execute_consume_step(run_id, step, is_fault_target, fault_type, implementation, trace_id, root_span_id):
+            consumed = queue_storage.pop(0) if queue_storage else None
+            side_effect = {
+                "action": "consumed",
+                "message": consumed,
+                "fault_activated": is_fault_target,
+            }
+            return True, side_effect
+
+        # 3. Integration pack assertion evaluator
+        def evaluate_all_messages_reconciled(context: dict[str, Any]) -> dict[str, Any]:
+            fault_confirmed = bool(context.get("fault_activation_confirmed"))
+            is_passed = bool(context.get("is_passed")) and fault_confirmed
+            return {
+                "name": "all_messages_reconciled",
+                "status": "passed" if is_passed else "failed",
+                "expected": "all messages published are successfully consumed and reconciled",
+                "observed": "all queue messages verified and drained",
+                "evidence": ["QUEUE_DRAINED", "RECONCILIATION_VERIFIED"],
+            }
+
+        # 4. Integration pack cleanup hook
+        cleaned_up = threading.Event()
+
+        def cleanup_queue_service(run_id: str) -> list[str]:
+            queue_storage.clear()
+            cleaned_up.set()
+            return [f"queue:test_partition:{run_id}"]
+
+        # 5. Dynamically register integration components
+        schema.register_fault_schema(
+            fault_name="queue_partition_lag",
+            primary_assertion="all_messages_reconciled",
+            description="Simulates network partition and worker lag in distributed message queue pipeline.",
+            category="messaging",
+            parameter_schema={
+                "queue_name": {"type": "string", "label": "Queue Name"},
+                "partition_id": {"type": "integer", "label": "Partition ID", "min": 0, "max": 16},
+            },
+            defaults={"partition_id": 0},
+            validator=validate_queue_scenario,
+        )
+        engine.register_step("queue.publish", execute_publish_step)
+        engine.register_step("queue.consume", execute_consume_step)
+        engine.register_assertion("all_messages_reconciled", evaluate_all_messages_reconciled)
+        engine.register_cleanup_hook("queue-service", cleanup_queue_service)
+        engine.register_fault("queue_partition_lag", engine._execute_generic_workflow, ["queue-service"])
+
+        # 6. Verify GET /api/scenarios/supported-faults exposes the dynamically registered fault
+        status, faults_data = self.request("GET", "/api/scenarios/supported-faults")
+        self.assertEqual(status, 200)
+        self.assertIn("queue_partition_lag", faults_data["faults"])
+        self.assertEqual(faults_data["faults"]["queue_partition_lag"]["category"], "messaging")
+
+        # 7. Verify schema rejection when custom validator constraint is violated
+        invalid_sc_id = f"scen-queue-invalid-{uuid4().hex[:6]}"
+        invalid_scenario = {
+            "scenario_version": 1,
+            "name": invalid_sc_id,
+            "fault": "queue_partition_lag",
+            "assertion": "all_messages_reconciled",
+            "queue_name": "bad_queue_prefix",  # fails validate_queue_scenario check (must start with 'q_')
+            "partition_id": 1,
+            "timeout_seconds": 10,
+            "workflow": [
+                {"id": "step_pub", "name": "Publish Event", "type": "queue.publish", "message": "msg_001"},
+            ],
+        }
+        status, err_resp = self.request("POST", "/api/scenarios", {"definition": invalid_scenario})
+        self.assertEqual(status, 400)
+        self.assertIn("queue_name must start with 'q_'", err_resp.get("error", ""))
+
+        # 8. Create valid custom integration scenario
+        valid_sc_id = f"scen-queue-{uuid4().hex[:6]}"
+        valid_scenario = {
+            "scenario_version": 1,
+            "name": valid_sc_id,
+            "fault": "queue_partition_lag",
+            "assertion": "all_messages_reconciled",
+            "queue_name": "q_orders_inbound",
+            "partition_id": 2,
+            "timeout_seconds": 10,
+            "workflow": [
+                {"id": "step_pub", "name": "Publish Event", "type": "queue.publish", "message": "order_msg_101"},
+                {"id": "step_sub", "name": "Consume Event", "type": "queue.consume"},
+            ],
+            "target_step": "step_sub",
+        }
+        status, res = self.request("POST", "/api/scenarios", {"definition": valid_scenario})
+        self.assertEqual(status, 201)
+
+        # 9. Launch and execute the scenario through the platform API
+        run = self.launch_and_wait("fixed", valid_sc_id)
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["verdict"], "passed")
+
+        # 10. Verify assertions evaluated by the custom integration evaluator
+        assertions = run.get("assertions", [])
+        assertion_names = {a["name"]: a for a in assertions}
+        self.assertIn("all_messages_reconciled", assertion_names)
+        self.assertEqual(assertion_names["all_messages_reconciled"]["status"], "passed")
+        self.assertEqual(assertion_names["all_messages_reconciled"]["expected"], "all messages published are successfully consumed and reconciled")
+        self.assertIn("QUEUE_DRAINED", assertion_names["all_messages_reconciled"]["evidence"])
+
+        # 11. Verify cleanup hook was called
+        self.assertTrue(cleaned_up.is_set(), "custom cleanup hook was not invoked")
+        cleanup = run.get("cleanup", {})
+        self.assertEqual(cleanup.get("status"), "succeeded")
+        self.assertIn(f"queue:test_partition:{run['id']}", cleanup.get("owned_resources", []))
+
+        # 12. Verify snapshot and side effects
+        snapshots = store.get_snapshots(run["id"])
+        self.assertGreaterEqual(len(snapshots), 1)
+        final_snap = snapshots[-1]["snapshot"]
+        self.assertEqual(final_snap["verdict"], "passed")
+        self.assertEqual(len(final_snap["side_effects"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

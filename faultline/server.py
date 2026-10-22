@@ -128,6 +128,10 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             scenario_id = path.split("/")[3]
             versions = store.scenario_versions(scenario_id)
             self.respond(200, {"versions": versions}) if versions else self.respond(404, {"error": "scenario not found"})
+        elif re.fullmatch(r"/api/scenarios/[^/]+", path):
+            scenario_id = path.split("/")[3]
+            scenario = store.get_scenario(scenario_id)
+            self.respond(200, {"scenario": scenario}) if scenario else self.respond(404, {"error": "scenario not found"})
         elif path == "/api/runs":
             self.respond(200, {"runs": store.list_runs()})
         elif path.startswith("/api/runs/"):
@@ -192,7 +196,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 self.respond(200, {"run": run}) if run else self.respond(404, {"error": "run not found"})
         elif path == "/" or path == "/index.html":
             self.static_file("index.html", "text/html; charset=utf-8")
-        elif path in {"/app.js", "/styles.css", "/report.css"}:
+        elif path in {"/api.js", "/app.js", "/styles.css", "/report.css"}:
             content_type = "text/javascript; charset=utf-8" if path.endswith(".js") else "text/css; charset=utf-8"
             self.static_file(path[1:], content_type)
         else:

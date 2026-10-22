@@ -2,14 +2,20 @@
  * Faultline — A laboratory for software failures
  * Client Application Logic
  * Raycast-style Command Palette + PostHog-inspired technical personality
+ * Scenario-driven, generic, and decoupled from hardcoded workflows.
  */
 
+// Global selector helpers
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
+// Application State
 const state = {
   activeView: "overview",
+  activeProjectId: "faultline-demo",
   scenarios: [],
+  scenariosLoading: false,
+  scenariosError: null,
   runs: [],
   selectedRunId: null,
   currentRun: null,
@@ -33,24 +39,82 @@ const state = {
 };
 
 // =========================================================
-// API HELPER
+// API CLIENT RESOLUTION
 // =========================================================
-async function request(path, options = {}) {
-  const response = await fetch(path, options);
+// Resolves the centralized API client defined in api.js,
+// with safe fallback for any execution environment.
+const apiClient = (typeof window !== "undefined" && window.api)
+  ? window.api
+  : (typeof api !== "undefined" ? api : null);
+
+/**
+ * Fallback request helper in case api.js is not loaded
+ */
+async function fallbackRequest(path, options = {}) {
+  if (apiClient && typeof apiClient.request === "function") {
+    return apiClient.request(path, options);
+  }
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.headers || {}),
+  };
+  let body = options.body;
+  if (body !== undefined && typeof body === "object" && !(body instanceof FormData)) {
+    body = JSON.stringify(body);
+  }
+  const response = await fetch(path, { ...options, headers, body });
+  if (response.status === 204) return null;
   const text = await response.text();
-  let body;
+  let parsed;
   try {
-    body = text ? JSON.parse(text) : {};
+    parsed = text ? JSON.parse(text) : {};
   } catch {
-    body = { raw: text };
+    parsed = { raw: text };
   }
   if (!response.ok) {
-    const message = body.error || `HTTP ${response.status} ${response.statusText}`;
+    const message = parsed.error || `HTTP ${response.status} ${response.statusText}`;
     throw new Error(message);
   }
-  return body;
+  return parsed;
 }
 
+// Proxy object guaranteeing all API operations route through centralized contracts
+const apiService = {
+  getScenarios: () => (apiClient ? apiClient.getScenarios() : fallbackRequest("/api/scenarios")),
+  getScenario: (id) => (apiClient ? apiClient.getScenario(id) : fallbackRequest(`/api/scenarios/${encodeURIComponent(id)}`)),
+  createScenario: (def) => (apiClient ? apiClient.createScenario(def) : fallbackRequest("/api/scenarios", { method: "POST", body: { definition: def } })),
+  saveScenarioVersion: (id, def) => (apiClient ? apiClient.saveScenarioVersion(id, def) : fallbackRequest(`/api/scenarios/${encodeURIComponent(id)}/versions`, { method: "POST", body: { definition: def } })),
+  validateScenario: (def) => (apiClient ? apiClient.validateScenario(def) : fallbackRequest("/api/scenarios/validate", { method: "POST", body: { definition: def } })),
+  generateFromGaps: (pId) => (apiClient ? apiClient.generateFromGaps(pId) : fallbackRequest("/api/scenarios/generate-from-gaps", { method: "POST", body: { project_id: pId } })),
+
+  getRuns: () => (apiClient ? apiClient.getRuns() : fallbackRequest("/api/runs")),
+  getRun: (id) => (apiClient ? apiClient.getRun(id) : fallbackRequest(`/api/runs/${encodeURIComponent(id)}`)),
+  launchRun: (scId, impl) => (apiClient ? apiClient.launchRun(scId, impl) : fallbackRequest("/api/runs", { method: "POST", body: { scenario_id: scId, implementation: impl } })),
+  cancelRun: (id) => (apiClient ? apiClient.cancelRun(id) : fallbackRequest(`/api/runs/${encodeURIComponent(id)}/cancel`, { method: "POST", body: {} })),
+  branchRun: (id, overrides) => (apiClient ? apiClient.branchRun(id, overrides) : fallbackRequest(`/api/runs/${encodeURIComponent(id)}/branch`, { method: "POST", body: { overrides } })),
+  setBaseline: (id) => (apiClient ? apiClient.setBaseline(id) : fallbackRequest(`/api/runs/${encodeURIComponent(id)}/baseline`, { method: "POST" })),
+  diffRuns: (idA, idB) => (apiClient ? apiClient.diffRuns(idA, idB) : fallbackRequest(`/api/runs/${encodeURIComponent(idA)}/diff/${encodeURIComponent(idB)}`)),
+  getTelemetry: (id) => (apiClient ? apiClient.getTelemetry(id) : fallbackRequest(`/api/runs/${encodeURIComponent(id)}/telemetry`)),
+
+  getAnnotations: (id) => (apiClient ? apiClient.getAnnotations(id) : fallbackRequest(`/api/runs/${encodeURIComponent(id)}/annotations`)),
+  addAnnotation: (id, author, comment) => (apiClient ? apiClient.addAnnotation(id, author, comment) : fallbackRequest(`/api/runs/${encodeURIComponent(id)}/annotations`, { method: "POST", body: { author, comment } })),
+  getTasks: (id) => (apiClient ? apiClient.getTasks(id) : fallbackRequest(`/api/runs/${encodeURIComponent(id)}/tasks`)),
+  addTask: (id, title, prio, assignee) => (apiClient ? apiClient.addTask(id, title, prio, assignee) : fallbackRequest(`/api/runs/${encodeURIComponent(id)}/tasks`, { method: "POST", body: { title, priority: prio, assignee } })),
+  updateTask: (tId, status) => (apiClient ? apiClient.updateTask(tId, status) : fallbackRequest(`/api/tasks/${encodeURIComponent(tId)}`, { method: "PATCH", body: { status } })),
+
+  getSuite: (sId) => (apiClient ? apiClient.getSuite(sId) : fallbackRequest(`/api/suites/${encodeURIComponent(sId)}`)),
+  getTemplates: () => (apiClient ? apiClient.getTemplates() : fallbackRequest("/api/templates")),
+  instantiateTemplate: (tId, scId) => (apiClient ? apiClient.instantiateTemplate(tId, scId) : fallbackRequest(`/api/templates/${encodeURIComponent(tId)}/instantiate`, { method: "POST", body: { scenario_id: scId } })),
+
+  getCoverage: () => (apiClient ? apiClient.getCoverage() : fallbackRequest("/api/coverage")),
+  getMetrics: () => (apiClient ? apiClient.getMetrics() : fallbackRequest("/api/metrics")),
+  getProjects: () => (apiClient ? apiClient.getProjects() : fallbackRequest("/api/projects")),
+  getAuditEvents: (pId) => (apiClient ? apiClient.getAuditEvents(pId) : fallbackRequest(`/api/projects/${encodeURIComponent(pId)}/audit-events`)),
+  pruneRuns: (pId, days, keep, dry) => (apiClient ? apiClient.pruneRuns(pId, days, keep, dry) : fallbackRequest(`/api/projects/${encodeURIComponent(pId)}/prune`, { method: "POST", body: { max_age_days: days, keep_baselines: keep, dry_run: dry } })),
+  importOpenApi: (spec) => (apiClient ? apiClient.importOpenApi(spec) : fallbackRequest("/api/workflows/import-openapi", { method: "POST", headers: { "Content-Type": "application/json" }, body: spec })),
+};
+
+// Utility string escaping
 function escapeHtml(value) {
   if (value === null || value === undefined) return "";
   return String(value)
@@ -85,22 +149,18 @@ function switchView(viewName) {
   if (!validViews.includes(viewName)) viewName = "overview";
   state.activeView = viewName;
 
-  // Update URL hash without jumping
   if (window.location.hash.replace("#", "") !== viewName) {
     history.replaceState(null, "", `#${viewName}`);
   }
 
-  // Update sidebar active classes
   $$(".nav-item").forEach((item) => {
     item.classList.toggle("active", item.dataset.view === viewName);
   });
 
-  // Update views active classes
   $$(".page-view").forEach((view) => {
     view.classList.toggle("active", view.id === `view-${viewName}`);
   });
 
-  // Update breadcrumb
   const breadcrumb = $("#topbar-current-view");
   if (breadcrumb) {
     const titles = {
@@ -138,13 +198,13 @@ function setupViewNavigation() {
     if (hash) switchView(hash);
   });
 
-  // Initial view from hash
   const initialHash = window.location.hash.replace("#", "");
   if (initialHash) switchView(initialHash);
 }
 
 // =========================================================
 // RAYCAST-STYLE COMMAND PALETTE (⌘K / Ctrl+K)
+// SCENARIO-DRIVEN DYNAMIC ACTIONS
 // =========================================================
 function getCommandItems() {
   const items = [
@@ -162,15 +222,24 @@ function getCommandItems() {
     { group: "Actions", title: "Open Operational Metrics", shortcut: "O M", action: () => $("#open-metrics-btn")?.click() },
     { group: "Actions", title: "Open Retention Pruning Policy", shortcut: "O P", action: () => $("#open-prune-btn")?.click() },
     { group: "Actions", title: "Open Governance Audit Log", shortcut: "O A", action: () => $("#open-audit-btn")?.click() },
-
-    // Core Scenarios
-    { group: "Scenarios", title: "Run 'Payment Response Lost' (Vulnerable)", action: () => launchRun("vulnerable", "payment-response-lost") },
-    { group: "Scenarios", title: "Run 'Payment Response Lost' (Fixed)", action: () => launchRun("fixed", "payment-response-lost") },
-    { group: "Scenarios", title: "Run 'Duplicate Payment Webhook' (Vulnerable)", action: () => launchRun("vulnerable", "duplicate-payment-webhook") },
-    { group: "Scenarios", title: "Run 'Duplicate Payment Webhook' (Fixed)", action: () => launchRun("fixed", "duplicate-payment-webhook") },
-    { group: "Scenarios", title: "Run 'Partial Persistence Failure' (Vulnerable)", action: () => launchRun("vulnerable", "partial-persistence-failure") },
-    { group: "Scenarios", title: "Run 'Partial Persistence Failure' (Fixed)", action: () => launchRun("fixed", "partial-persistence-failure") },
   ];
+
+  // Dynamic Scenarios from Backend Registry
+  if (state.scenarios && state.scenarios.length > 0) {
+    state.scenarios.forEach((sc) => {
+      const name = sc.name || sc.id;
+      items.push({
+        group: "Registered Scenarios",
+        title: `Run '${name}' (Vulnerable)`,
+        action: () => launchRun("vulnerable", sc.id),
+      });
+      items.push({
+        group: "Registered Scenarios",
+        title: `Run '${name}' (Fixed)`,
+        action: () => launchRun("fixed", sc.id),
+      });
+    });
+  }
 
   // Dynamic Recent Runs
   state.runs.slice(0, 5).forEach((r) => {
@@ -226,7 +295,6 @@ function renderCommandResults(query) {
     return;
   }
 
-  // Group items
   const groups = {};
   filtered.forEach((item, idx) => {
     if (!groups[item.group]) groups[item.group] = [];
@@ -402,10 +470,14 @@ function updateMetricsRibbon() {
 }
 
 async function refreshRuns() {
-  const { runs } = await request("/api/runs");
-  state.runs = runs;
-  renderHistory();
-  await refreshCoverage();
+  try {
+    const res = await apiService.getRuns();
+    state.runs = res.runs || [];
+    renderHistory();
+    await refreshCoverage();
+  } catch (err) {
+    toast(`Failed to load runs: ${err.message}`);
+  }
 }
 
 async function launchRun(implementation, scenarioId) {
@@ -416,19 +488,17 @@ async function launchRun(implementation, scenarioId) {
     const scenario = state.scenarios.find((item) => item.id === targetId) || state.scenarios[0];
     if (!scenario) throw new Error("No runnable scenario is available");
 
-    toast(`Launching ${scenario.name} (${implementation})...`);
-    const { run_id: runId } = await request("/api/runs", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scenario_id: scenario.id, implementation }),
-    });
+    const scenarioName = scenario.name || scenario.id;
+    toast(`Launching ${scenarioName} (${implementation})...`);
+    const res = await apiService.launchRun(scenario.id, implementation);
+    const runId = res.run_id;
 
     state.selectedRunId = runId;
     switchView("liverun");
     await refreshRuns();
     await openRun(runId);
     schedulePoll(runId);
-    toast(`${scenario.name} run started!`);
+    toast(`${scenarioName} run started!`);
   } catch (error) {
     toast(`Launch error: ${error.message}`);
   } finally {
@@ -440,7 +510,7 @@ function schedulePoll(runId) {
   if (state.pollTimer) window.clearTimeout(state.pollTimer);
   state.pollTimer = window.setTimeout(async () => {
     try {
-      const { run } = await request(`/api/runs/${encodeURIComponent(runId)}`);
+      const { run } = await apiService.getRun(runId);
       if (state.selectedRunId === runId) renderRun(run);
       if (["completed", "failed", "cancelled", "timed_out"].includes(run.status)) {
         await refreshRuns();
@@ -458,7 +528,7 @@ function schedulePoll(runId) {
 // =========================================================
 async function openRun(runId) {
   try {
-    const { run } = await request(`/api/runs/${encodeURIComponent(runId)}`);
+    const { run } = await apiService.getRun(runId);
     if (!run) throw new Error("Run not found");
     state.selectedRunId = runId;
     state.currentRun = run;
@@ -493,22 +563,24 @@ function renderRun(run) {
   // Overview Chips
   const overview = $("#run-overview");
   if (overview) {
+    const faultLabel = run.scenario?.fault || run.scenario?.fault_type || 'configured';
     overview.innerHTML = `
       <span class="overview-chip" style="font-family:var(--font-mono);font-size:11px;background:#fff;border:1px solid var(--border-subtle);padding:4px 8px;border-radius:4px">Run ID: <strong>${run.id.slice(0, 8)}</strong></span>
-      <span class="overview-chip" style="font-family:var(--font-mono);font-size:11px;background:#fff;border:1px solid var(--border-subtle);padding:4px 8px;border-radius:4px">Target: <strong>${run.scenario?.fault || 'network'}</strong></span>
+      <span class="overview-chip" style="font-family:var(--font-mono);font-size:11px;background:#fff;border:1px solid var(--border-subtle);padding:4px 8px;border-radius:4px">Target: <strong>${escapeHtml(faultLabel)}</strong></span>
       <span class="overview-chip" style="font-family:var(--font-mono);font-size:11px;background:#fff;border:1px solid var(--border-subtle);padding:4px 8px;border-radius:4px">Events: <strong>${run.events?.length || 0}</strong></span>
       <span class="overview-chip" style="font-family:var(--font-mono);font-size:11px;background:#fff;border:1px solid var(--border-subtle);padding:4px 8px;border-radius:4px">Invariants: <strong>${run.assertions?.length || 0}</strong></span>
     `;
   }
 
-  // Ledger Strip
+  // Generic Side-Effect Ledger Strip
   const summary = run.summary || {};
   const charges = summary.charges || [];
   const refunds = summary.refunds || [];
   const fulfillments = summary.fulfillments || [];
+  const sideEffects = summary.side_effects || [];
   const chargeList = $("#charge-list");
   if (chargeList) {
-    if (!charges.length && !refunds.length && !fulfillments.length) {
+    if (!charges.length && !refunds.length && !fulfillments.length && !sideEffects.length) {
       chargeList.innerHTML = '<span style="font-size:11px;color:var(--ink-400)">No side-effect ledger items recorded yet.</span>';
     } else {
       let items = "";
@@ -520,6 +592,9 @@ function renderRun(run) {
       });
       fulfillments.forEach((f) => {
         items += `<span class="charge-chip" style="border-color:var(--indigo-100);background:var(--indigo-100);color:var(--indigo-600)"><i></i> Fulfillment: <strong>${escapeHtml(f.id)}</strong></span>`;
+      });
+      sideEffects.forEach((se) => {
+        items += `<span class="charge-chip"><i></i> ${escapeHtml(se.name || se.type || 'Effect')}: <strong>${escapeHtml(String(se.value || se.id || ''))}</strong></span>`;
       });
       chargeList.innerHTML = items;
     }
@@ -576,10 +651,10 @@ function renderEventList(events) {
       return event.type.includes("FAULT") || event.type.includes("DROPPED") || event.type.includes("FAILED");
     }
     if (f === "side_effects") {
-      return event.type.includes("CHARGE") || event.type.includes("REFUND") || event.type.includes("FULFILLMENT");
+      return event.type.includes("CHARGE") || event.type.includes("REFUND") || event.type.includes("FULFILLMENT") || event.type.includes("EFFECT");
     }
     if (f === "lifecycle") {
-      return event.type.includes("RUN") || event.type.includes("CHECKOUT") || event.type.includes("ASSERTION");
+      return event.type.includes("RUN") || event.type.includes("STEP") || event.type.includes("ASSERTION");
     }
     return true;
   });
@@ -735,13 +810,13 @@ async function runSuite(implementation) {
   buttons.forEach((b) => { b.disabled = true; });
   try {
     toast(`Starting Critical Integrations Suite (${implementation})...`);
-    const { suite } = await request("/api/suites/critical-integrations");
+    const { suite } = await apiService.getSuite("critical-integrations");
     switchView("liverun");
     for (const scId of suite.scenarios) {
       await launchRun(implementation, scId);
       for (let i = 0; i < 40; i++) {
         await new Promise((r) => setTimeout(r, 200));
-        const { run } = await request(`/api/runs/${encodeURIComponent(state.selectedRunId)}`);
+        const { run } = await apiService.getRun(state.selectedRunId);
         if (["completed", "failed", "cancelled", "timed_out"].includes(run.status)) {
           break;
         }
@@ -764,28 +839,47 @@ function setScenarioEditor() {
   const selected = state.scenarios.find((item) => item.id === select.value);
   const definition = selected?.definition || {
     scenario_version: 1,
-    name: "new-payment-scenario",
+    name: "new-scenario",
     description: "",
-    order_id: "order-new",
-    amount_cents: 2500,
     fault: "payment_response_lost_after_commit",
     retries: 1,
-    assertion: "no_duplicate_charge",
+    assertion: "service_recovers",
   };
   state.editorDefinition = definition;
   $$("[data-field]").forEach((input) => {
     const field = input.dataset.field;
     input.value = definition[field] ?? (field === "timeout_seconds" ? 15 : "");
   });
-  updateWorkflowCanvas(definition.fault);
+  updateWorkflowCanvas(definition);
   updateScenarioPreview();
   const saveBtn = $("#save-scenario");
   if (saveBtn) saveBtn.textContent = selected ? "Save new version" : "Create scenario";
 }
 
-function updateWorkflowCanvas(fault) {
+function updateWorkflowCanvas(definition) {
   const canvas = $("#workflow-canvas");
   if (!canvas) return;
+
+  // Generic Step Handler: if the scenario defines workflow steps, render them dynamically
+  const steps = definition?.workflow || definition?.steps;
+  if (Array.isArray(steps) && steps.length > 0) {
+    canvas.innerHTML = steps.map((step, idx) => {
+      const isFault = step.id === definition.fault?.target_step || step.type?.includes("fault") || step.fault;
+      return `
+        <li class="${isFault ? 'workflow-fault' : ''}">
+          <span>${idx + 1}</span>
+          <div>
+            <strong>${escapeHtml(step.name || step.id || `Step ${idx + 1}`)}</strong>
+            <small>${escapeHtml(step.description || step.type || 'Workflow operation')}</small>
+          </div>
+        </li>
+      `;
+    }).join("");
+    return;
+  }
+
+  // Fallback / standard reference workflows
+  const fault = typeof definition === "string" ? definition : definition?.fault;
   if (fault === "duplicate_payment_webhook") {
     canvas.innerHTML = `
       <li><span>1</span><div><strong>Webhook delivers payment event</strong><small>Sends payment.succeeded webhook</small></div></li>
@@ -831,21 +925,15 @@ async function submitScenario(save) {
     updateScenarioPreview();
     const definition = state.editorDefinition;
     if (!save) {
-      const result = await request("/api/scenarios/validate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ definition }),
-      });
+      const result = await apiService.validateScenario(definition);
       if (feedback) feedback.textContent = result.valid ? "Definition is valid." : "Definition is invalid.";
       return;
     }
     const selected = $("#scenario-select")?.value;
-    const path = selected ? `/api/scenarios/${encodeURIComponent(selected)}/versions` : "/api/scenarios";
-    const result = await request(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ definition }),
-    });
+    const result = selected
+      ? await apiService.saveScenarioVersion(selected, definition)
+      : await apiService.createScenario(definition);
+
     if (feedback) feedback.textContent = `Saved ${selected ? `version ${result.version}` : "version 1"}.`;
     await refreshScenarios();
     toast("Scenario saved successfully!");
@@ -854,15 +942,77 @@ async function submitScenario(save) {
   }
 }
 
+/**
+ * Make backend the source of truth for scenarios.
+ * Populates scenario selector, command palette, and overview quick cards.
+ */
 async function refreshScenarios() {
-  const res = await request("/api/scenarios");
-  state.scenarios = res.scenarios;
+  state.scenariosLoading = true;
+  state.scenariosError = null;
   const countEl = $("#scenario-count");
-  if (countEl) countEl.textContent = String(state.scenarios.length);
   const select = $("#scenario-select");
-  if (select) {
-    select.innerHTML = '<option value="">Create a new scenario…</option>' +
-      state.scenarios.map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)} · v${s.version}</option>`).join("");
+  const grid = $(".scenarios-grid");
+
+  try {
+    const res = await apiService.getScenarios();
+    state.scenarios = res.scenarios || [];
+    state.scenariosLoading = false;
+
+    if (countEl) countEl.textContent = String(state.scenarios.length);
+
+    // Populate Experiment Studio Select
+    if (select) {
+      if (!state.scenarios.length) {
+        select.innerHTML = '<option value="">No scenarios available (create one below)</option>';
+      } else {
+        select.innerHTML = '<option value="">Create a new scenario…</option>' +
+          state.scenarios.map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name || s.id)} · v${s.version || 1}</option>`).join("");
+      }
+    }
+
+    // Populate Overview Quick Cards dynamically from backend scenarios
+    if (grid) {
+      if (!state.scenarios.length) {
+        grid.innerHTML = '<div class="empty-state" style="padding:24px;text-align:center;color:var(--ink-400);grid-column:1/-1">No registered scenarios found. Create one in the Experiment Studio or generate from templates.</div>';
+      } else {
+        grid.innerHTML = state.scenarios.map((s) => {
+          const cat = s.definition?.category || s.category || "INTEGRATION FAILURE";
+          const desc = s.definition?.description || s.description || "Simulates controlled fault injection to verify recovery.";
+          return `
+            <article class="scenario-card" data-scenario="${escapeHtml(s.id)}">
+              <div>
+                <div class="scenario-card-header">
+                  <span class="scenario-tag">${escapeHtml(cat.toUpperCase())}</span>
+                  <span class="scenario-version" style="font-family:var(--font-mono);font-size:10px;color:var(--ink-400)">v${s.version || 1}</span>
+                </div>
+                <h3>${escapeHtml(s.name || s.id)}</h3>
+                <p class="scenario-description">${escapeHtml(desc)}</p>
+              </div>
+              <div class="scenario-actions">
+                <button class="button button-primary run-button" data-scenario="${escapeHtml(s.id)}" data-implementation="vulnerable">
+                  <span>⚡</span> Run Vulnerable
+                </button>
+                <button class="button button-secondary run-button" data-scenario="${escapeHtml(s.id)}" data-implementation="fixed">
+                  <span>🛡</span> Run Fixed
+                </button>
+              </div>
+            </article>
+          `;
+        }).join("");
+
+        // Re-bind quick launch buttons
+        grid.querySelectorAll(".run-button").forEach((btn) => {
+          btn.addEventListener("click", () => launchRun(btn.dataset.implementation, btn.dataset.scenario));
+        });
+      }
+    }
+  } catch (err) {
+    state.scenariosLoading = false;
+    state.scenariosError = err.message;
+    if (countEl) countEl.textContent = "!";
+    if (grid) {
+      grid.innerHTML = `<div class="error-state" style="padding:16px;color:var(--crimson-600);grid-column:1/-1;border:1px solid var(--crimson-200);border-radius:var(--radius-sm);background:var(--crimson-50)">Failed to load scenarios from control plane: ${escapeHtml(err.message)}</div>`;
+    }
   }
 }
 
@@ -877,7 +1027,7 @@ async function loadRunTelemetry(runId) {
 
   try {
     listEl.innerHTML = '<span style="font-size:11px;color:var(--ink-400)">Loading OpenTelemetry trace spans...</span>';
-    const data = await request(`/api/runs/${encodeURIComponent(runId)}/telemetry`);
+    const data = await apiService.getTelemetry(runId);
     traceIdEl.textContent = data.traceId;
     if (countEl) countEl.textContent = String(data.spanCount);
 
@@ -945,7 +1095,7 @@ async function executeRunDiff() {
     return;
   }
   try {
-    const { diff } = await request(`/api/runs/${encodeURIComponent(state.selectedRunId)}/diff/${encodeURIComponent(baselineId)}`);
+    const { diff } = await apiService.diffRuns(state.selectedRunId, baselineId);
     renderDiff(diff);
   } catch (err) {
     toast(`Diff error: ${err.message}`);
@@ -994,7 +1144,7 @@ function renderDiff(diff) {
 // =========================================================
 async function refreshCoverage() {
   try {
-    const data = await request("/api/coverage");
+    const data = await apiService.getCoverage();
     renderCoverage(data);
   } catch {}
 }
@@ -1056,7 +1206,7 @@ async function loadTemplates() {
   const container = $("#template-grid");
   if (!container) return;
   try {
-    const { templates } = await request("/api/templates");
+    const { templates } = await apiService.getTemplates();
     container.innerHTML = templates.map((tpl) => `
       <article class="scenario-card" style="display:flex;flex-direction:column;justify-content:space-between">
         <div>
@@ -1081,11 +1231,7 @@ async function loadTemplates() {
         const scId = `${templateId.replace("-tpl", "")}-${Date.now().toString(36)}`;
         try {
           btn.disabled = true;
-          await request(`/api/templates/${encodeURIComponent(templateId)}/instantiate`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ scenario_id: scId }),
-          });
+          await apiService.instantiateTemplate(templateId, scId);
           toast(`Created scenario '${scId}' from template!`);
           await refreshScenarios();
           switchView("studio");
@@ -1111,8 +1257,8 @@ async function loadTemplates() {
 // =========================================================
 async function loadAnnotations(runId) {
   try {
-    const { annotations } = await request(`/api/runs/${encodeURIComponent(runId)}/annotations`);
-    state.annotations = annotations;
+    const { annotations } = await apiService.getAnnotations(runId);
+    state.annotations = annotations || [];
     renderAnnotations();
   } catch {}
 }
@@ -1143,11 +1289,11 @@ async function handleAddAnnotation(event) {
   const comment = textInput?.value.trim();
   if (!comment) return;
   try {
-    const { annotation } = await request(`/api/runs/${encodeURIComponent(state.selectedRunId)}/annotations`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ author: authorInput?.value.trim() || "Developer", comment }),
-    });
+    const { annotation } = await apiService.addAnnotation(
+      state.selectedRunId,
+      authorInput?.value.trim() || "Developer",
+      comment
+    );
     state.annotations.push(annotation);
     renderAnnotations();
     textInput.value = "";
@@ -1159,8 +1305,8 @@ async function handleAddAnnotation(event) {
 
 async function loadTasks(runId) {
   try {
-    const { tasks } = await request(`/api/runs/${encodeURIComponent(runId)}/tasks`);
-    state.tasks = tasks;
+    const { tasks } = await apiService.getTasks(runId);
+    state.tasks = tasks || [];
     renderTasks();
   } catch {}
 }
@@ -1186,11 +1332,7 @@ function renderTasks() {
       const taskId = e.target.dataset.taskId;
       const newStatus = e.target.checked ? "resolved" : "open";
       try {
-        await request(`/api/tasks/${encodeURIComponent(taskId)}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: newStatus }),
-        });
+        await apiService.updateTask(taskId, newStatus);
         const task = state.tasks.find((t) => t.id === taskId);
         if (task) task.status = newStatus;
         renderTasks();
@@ -1210,11 +1352,12 @@ async function handleAddTask(event) {
   const title = titleInput?.value.trim();
   if (!title) return;
   try {
-    const { task } = await request(`/api/runs/${encodeURIComponent(state.selectedRunId)}/tasks`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, priority: prioSelect?.value || "medium", assignee: "Developer" }),
-    });
+    const { task } = await apiService.addTask(
+      state.selectedRunId,
+      title,
+      prioSelect?.value || "medium",
+      "Developer"
+    );
     state.tasks.unshift(task);
     renderTasks();
     titleInput.value = "";
@@ -1237,11 +1380,7 @@ function setupBranching() {
     try {
       btn.disabled = true;
       toast("Branching execution from checkpoint...");
-      const { run } = await request(`/api/runs/${encodeURIComponent(state.selectedRunId)}/branch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ overrides: { implementation: impl.trim().toLowerCase() } }),
-      });
+      const { run } = await apiService.branchRun(state.selectedRunId, { implementation: impl.trim().toLowerCase() });
       toast(`Branched new run: ${run.id.slice(0, 8)}`);
       await refreshRuns();
       await openRun(run.id);
@@ -1261,7 +1400,7 @@ function setupBaseline() {
     if (!state.selectedRunId) return;
     try {
       btn.disabled = true;
-      await request(`/api/runs/${encodeURIComponent(state.selectedRunId)}/baseline`, { method: "POST" });
+      await apiService.setBaseline(state.selectedRunId);
       toast("Run designated as baseline 🎯");
       await refreshRuns();
     } catch (err) {
@@ -1287,11 +1426,7 @@ function setupOpenApiImporter() {
     try {
       btn.disabled = true;
       btn.textContent = "Analyzing...";
-      const { workflow } = await request("/api/workflows/import-openapi", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: raw,
-      });
+      const { workflow } = await apiService.importOpenApi(raw);
       results.hidden = false;
       results.innerHTML = `
         <div style="background:var(--surface-subtle);border:1px solid var(--border-subtle);border-radius:var(--radius-sm);padding:12px">
@@ -1322,11 +1457,7 @@ function setupGenerateFromGaps() {
     try {
       btn.disabled = true;
       btn.textContent = "Analyzing gaps...";
-      const { count } = await request("/api/scenarios/generate-from-gaps", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ project_id: "faultline-demo" }),
-      });
+      const { count } = await apiService.generateFromGaps(state.activeProjectId);
       if (count > 0) {
         toast(`Generated ${count} new scenario(s) from coverage gaps!`);
         await refreshScenarios();
@@ -1344,10 +1475,9 @@ function setupGenerateFromGaps() {
 }
 
 // =========================================================
-// UTILITIES: METRICS, AUDIT, PRUNE
+// UTILITIES: METRICS, AUDIT, PRUNE (MODALS)
 // =========================================================
 function setupModals() {
-  // Backdrop click to close on all modal overlays
   $$(".modal-overlay").forEach((modal) => {
     modal.hidden = true;
     modal.addEventListener("click", (e) => {
@@ -1357,7 +1487,6 @@ function setupModals() {
     });
   });
 
-  // Global Escape key to close modals
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       $$(".modal-overlay").forEach((modal) => {
@@ -1375,7 +1504,7 @@ function setupModals() {
     try {
       const content = $("#metrics-content");
       if (content) content.innerHTML = '<span style="font-size:11px;color:var(--ink-400)">Loading metrics...</span>';
-      const m = await request("/api/metrics");
+      const m = await apiService.getMetrics();
       const r = m.runs || {};
       const a = m.assertions || {};
       const w = m.worker_health || {};
@@ -1421,7 +1550,7 @@ function setupModals() {
     const list = $("#audit-log-list");
     if (!list) return;
     try {
-      const { audit_events } = await request("/api/projects/faultline-demo/audit-events");
+      const { audit_events } = await apiService.getAuditEvents(state.activeProjectId);
       if (!audit_events.length) {
         list.innerHTML = '<span style="font-size:11px;color:var(--ink-400)">No audit events recorded yet.</span>';
         return;
@@ -1463,11 +1592,7 @@ function setupModals() {
       const days = parseInt($("#prune-days-input")?.value, 10) || 30;
       const keepBaselines = $("#prune-keep-baselines")?.checked ?? true;
       const dryRun = $("#prune-dry-run")?.checked ?? false;
-      const res = await request("/api/projects/faultline-demo/prune", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ max_age_days: days, keep_baselines: keepBaselines, dry_run: dryRun }),
-      });
+      const res = await apiService.pruneRuns(state.activeProjectId, days, keepBaselines, dryRun);
       const resultsDiv = $("#prune-results");
       if (resultsDiv) {
         resultsDiv.hidden = false;
@@ -1614,11 +1739,7 @@ async function initialize() {
     const runId = e.currentTarget.dataset.runId;
     if (!runId) return;
     try {
-      await request(`/api/runs/${encodeURIComponent(runId)}/cancel`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
-      });
+      await apiService.cancelRun(runId);
       toast("Cancellation requested");
       await openRun(runId);
     } catch (err) {
@@ -1626,8 +1747,15 @@ async function initialize() {
     }
   });
 
-  // Load Initial Data
+  // Discover Projects & Load Initial Data
   try {
+    try {
+      const projRes = await apiService.getProjects();
+      if (projRes?.projects?.length) {
+        state.activeProjectId = projRes.projects[0].id;
+      }
+    } catch {}
+
     await Promise.all([refreshScenarios(), refreshRuns(), refreshCoverage(), loadTemplates()]);
     if (state.scenarios.length) {
       const select = $("#scenario-select");
@@ -1643,8 +1771,10 @@ async function initialize() {
 }
 
 // Start application
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", initialize);
-} else {
-  initialize();
+if (typeof document !== "undefined") {
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initialize);
+  } else {
+    initialize();
+  }
 }

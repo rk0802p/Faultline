@@ -94,6 +94,14 @@ def import_openapi_spec(spec_input: dict[str, Any] | str) -> dict[str, Any]:
 
             # Analyze failure test recommendations
             p_lower = path.lower()
+            recommended_scenarios.append({
+                "id": f"rec-timeout-{operation_id}",
+                "name": f"HTTP Timeout & Latency on {method_upper} {path}",
+                "target_endpoint": path,
+                "target_method": method_upper,
+                "fault_class": "http_timeout",
+                "rationale": "External service dependencies can experience unpredictable network delays or dropped connections.",
+            })
             if any(term in p_lower for term in ["pay", "charge", "checkout"]):
                 recommended_scenarios.append({
                     "id": f"rec-lost-resp-{operation_id}",

@@ -489,6 +489,13 @@ def register_payment_integration(
         },
         validator=validate_payment_scenario,
         legacy_steps=PAYMENT_WORKFLOW_STEPS,
+        pipeline=[
+            {"title": "Dispatch Request", "desc": "Sends request with idempotency key"},
+            {"title": "Provider Commits", "desc": "Upstream service records operation"},
+            {"title": "Drop Response", "desc": "Simulates unknown outcome fault", "is_fault": True},
+            {"title": "Client Retries", "desc": "Executes configured retries"},
+            {"title": "Evaluate Invariants", "desc": "Checks idempotent outcome"},
+        ],
     )
     schema_registry.register(
         fault_name="duplicate_payment_webhook",
@@ -505,6 +512,13 @@ def register_payment_integration(
         },
         validator=validate_payment_scenario,
         legacy_steps=PAYMENT_WORKFLOW_STEPS,
+        pipeline=[
+            {"title": "Deliver Payment Event", "desc": "Sends webhook event payload"},
+            {"title": "Start Fulfillment", "desc": "Records service fulfillment"},
+            {"title": "Duplicate Redelivery", "desc": "Simulates network redelivery", "is_fault": True},
+            {"title": "Verify Deduplication", "desc": "Idempotently handles event"},
+            {"title": "Evaluate Invariants", "desc": "Checks single fulfillment state"},
+        ],
     )
     schema_registry.register(
         fault_name="persistence_failure_after_payment",
@@ -520,6 +534,13 @@ def register_payment_integration(
         },
         validator=validate_payment_scenario,
         legacy_steps=PAYMENT_WORKFLOW_STEPS,
+        pipeline=[
+            {"title": "Start Transaction", "desc": "Sends charge request"},
+            {"title": "Provider Commits", "desc": "Ledger records operation"},
+            {"title": "Database Write Fails", "desc": "Simulates DB commit failure", "is_fault": True},
+            {"title": "Trigger Compensation", "desc": "Issues compensating refund"},
+            {"title": "Evaluate Invariants", "desc": "Checks zero orphaned charges"},
+        ],
     )
 
     # 3. Register cleanup hooks

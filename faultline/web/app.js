@@ -837,19 +837,11 @@ function renderDynamicEditorFields(fault, definition = {}) {
       `;
     }).join("");
   } else {
-    // Default / generic fields
+    // Default / generic fields when no specialized parameter schema exists
     container.innerHTML = `
       <label>
-        Target Step / Resource ID
-        <input data-field="order_id" maxlength="80" placeholder="e.g. order-001 or target-id" value="${escapeHtml(String(definition.order_id || ''))}">
-      </label>
-      <label>
-        Amount / Payload Magnitude
-        <input data-field="amount_cents" type="number" min="1" step="1" placeholder="e.g. 2500" value="${escapeHtml(String(definition.amount_cents || ''))}">
-      </label>
-      <label>
-        Retry Attempts
-        <input data-field="retries" type="number" min="0" max="3" step="1" value="${escapeHtml(String(definition.retries ?? ''))}">
+        Target Step ID
+        <input data-field="target_step" maxlength="80" placeholder="e.g. step_001 or target-id" value="${escapeHtml(String(definition.target_step || ''))}">
       </label>
       <label>
         Run Timeout (seconds)
@@ -939,38 +931,30 @@ function updateWorkflowCanvas(definition) {
     return;
   }
 
-  // 2. If a recognized fault is selected, render its target execution pipeline
+  // 2. If a recognized fault is selected, render its target execution pipeline from schema
   const fault = definition?.fault;
-  if (fault === "duplicate_payment_webhook") {
+  const faultMeta = state.supportedFaults ? state.supportedFaults[fault] : null;
+  const pipeline = faultMeta?.pipeline;
+
+  if (pipeline && Array.isArray(pipeline) && pipeline.length > 0) {
+    canvas.innerHTML = pipeline.map((p, idx) => `
+      <li class="${p.is_fault ? 'workflow-fault' : ''}">
+        <span>${idx + 1}</span>
+        <div>
+          <strong>${escapeHtml(p.title || p.name || `Step ${idx + 1}`)}</strong>
+          <small>${escapeHtml(p.desc || p.description || '')}</small>
+        </div>
+      </li>
+    `).join("");
+  } else if (faultMeta) {
+    // Dynamically generated pipeline from schema metadata
+    const faultDesc = faultMeta.description || "Simulates controlled fault injection";
+    const assertionName = faultMeta.primary_assertion || "all_steps_succeeded_or_handled";
     canvas.innerHTML = `
-      <li><span>1</span><div><strong>Deliver payment event</strong><small>Sends webhook event payload</small></div></li>
-      <li><span>2</span><div><strong>Start fulfillment</strong><small>Records service fulfillment</small></div></li>
-      <li class="workflow-fault"><span>3</span><div><strong>Duplicate redelivery</strong><small>Simulates network redelivery</small></div></li>
-      <li><span>4</span><div><strong>Verify deduplication</strong><small>Idempotently handles event</small></div></li>
-      <li><span>5</span><div><strong>Evaluate invariants</strong><small>Checks single fulfillment state</small></div></li>
-    `;
-  } else if (fault === "persistence_failure_after_payment") {
-    canvas.innerHTML = `
-      <li><span>1</span><div><strong>Start transaction</strong><small>Sends charge request</small></div></li>
-      <li><span>2</span><div><strong>Provider commits</strong><small>Ledger records operation</small></div></li>
-      <li class="workflow-fault"><span>3</span><div><strong>Database write fails</strong><small>Simulates DB commit failure</small></div></li>
-      <li><span>4</span><div><strong>Trigger compensation</strong><small>Issues compensating refund</small></div></li>
-      <li><span>5</span><div><strong>Evaluate invariants</strong><small>Checks zero orphaned charges</small></div></li>
-    `;
-  } else if (fault === "payment_response_lost_after_commit") {
-    canvas.innerHTML = `
-      <li><span>1</span><div><strong>Dispatch request</strong><small>Sends request with idempotency key</small></div></li>
-      <li><span>2</span><div><strong>Provider commits</strong><small>Upstream service records operation</small></div></li>
-      <li class="workflow-fault"><span>3</span><div><strong>Drop response</strong><small>Simulates unknown outcome fault</small></div></li>
-      <li><span>4</span><div><strong>Client retries</strong><small>Executes configured retries</small></div></li>
-      <li><span>5</span><div><strong>Evaluate invariants</strong><small>Checks idempotent outcome</small></div></li>
-    `;
-  } else if (fault === "http_timeout") {
-    canvas.innerHTML = `
-      <li><span>1</span><div><strong>Client request</strong><small>Sends request to target service</small></div></li>
-      <li class="workflow-fault"><span>2</span><div><strong>Inject latency / timeout</strong><small>Drops connection after duration</small></div></li>
-      <li><span>3</span><div><strong>Retry or fallback</strong><small>Attempts resilient recovery</small></div></li>
-      <li><span>4</span><div><strong>Evaluate invariants</strong><small>Validates boundary protection</small></div></li>
+      <li><span>1</span><div><strong>Client Dispatch</strong><small>Initiates request to target system</small></div></li>
+      <li class="workflow-fault"><span>2</span><div><strong>Inject Fault</strong><small>${escapeHtml(faultDesc)}</small></div></li>
+      <li><span>3</span><div><strong>Resilient Recovery</strong><small>System handles error or retries</small></div></li>
+      <li><span>4</span><div><strong>Evaluate Invariants</strong><small>Validates: ${escapeHtml(assertionName)}</small></div></li>
     `;
   } else {
     // 3. Neutral empty state when no compatible workflow is configured

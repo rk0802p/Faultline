@@ -102,7 +102,7 @@
           <div class="view-header">
             <div class="eyebrow">FAULTLINE LABORATORY · CONTROL ROOM</div>
             <h1>Know how it breaks.</h1>
-            <p>Explore failure scenarios, test recovery behavior, and inspect what actually happened in your checkout integrations.</p>
+            <p>Explore failure scenarios, test recovery behavior, and inspect what actually happened in your distributed system integrations.</p>
           </div>
 
           <!-- Hero: Precision + Continuous Execution Line Motif -->
@@ -110,7 +110,7 @@
             <div class="hero-text">
               <span class="eyebrow" style="color:var(--amber-400)">INTEGRATION FAILURE LAB</span>
               <h2>Test the failure.<br><em>Prove the recovery.</em></h2>
-              <p>When external payment providers drop responses or webhooks redeliver, do your business invariants hold or do orders double-charge?</p>
+              <p>When external dependencies drop responses, timeout, or redeliver events, do your business invariants hold or do failures cascade?</p>
               <div class="hero-actions">
                 <a class="button button-amber" href="#studio" data-switch-view="studio">
                   <span>⚙</span> Configure new experiment
@@ -191,7 +191,7 @@
 
           <div class="scenarios-grid">
             <!-- Scenario 1: Lost Response -->
-            <article class="scenario-card">
+            <article class="scenario-card" data-scenario="payment-response-lost">
               <div>
                 <div class="scenario-card-header">
                   <span class="scenario-tag">PAYMENTS &amp; RETRIES</span>
@@ -218,7 +218,7 @@
             </article>
 
             <!-- Scenario 2: Duplicate Webhook -->
-            <article class="scenario-card">
+            <article class="scenario-card" data-scenario="duplicate-payment-webhook">
               <div>
                 <div class="scenario-card-header">
                   <span class="scenario-tag">WEBHOOK DEDUPLICATION</span>
@@ -245,7 +245,7 @@
             </article>
 
             <!-- Scenario 3: Partial Persistence Failure -->
-            <article class="scenario-card">
+            <article class="scenario-card" data-scenario="partial-persistence-failure">
               <div>
                 <div class="scenario-card-header">
                   <span class="scenario-tag">STORAGE &amp; RECONCILIATION</span>
@@ -327,7 +327,7 @@
                 <div class="designer-fields">
                   <label class="full-width">
                     Scenario Name
-                    <input data-field="name" maxlength="80" placeholder="e.g. payment-response-lost">
+                    <input data-field="name" maxlength="80" placeholder="e.g. http-timeout-service or scenario-name">
                   </label>
                   <label class="full-width">
                     Description
@@ -341,20 +341,12 @@
                   </label>
                   <div id="dynamic-editor-fields" style="display:contents">
                     <label>
-                      Target Step / Resource ID
-                      <input data-field="order_id" maxlength="80" placeholder="e.g. order-001 or target-id">
-                    </label>
-                    <label>
-                      Amount / Payload Magnitude
-                      <input data-field="amount_cents" type="number" min="1" step="1" placeholder="e.g. 2500">
-                    </label>
-                    <label>
-                      Retry Attempts
-                      <input data-field="retries" type="number" min="0" max="3" step="1">
+                      Target Step ID
+                      <input data-field="target_step" maxlength="80" placeholder="e.g. step_001 or target-id">
                     </label>
                     <label>
                       Run Timeout (seconds)
-                      <input data-field="timeout_seconds" type="number" min="2" max="60" step="1">
+                      <input data-field="timeout_seconds" type="number" min="2" max="60" step="1" value="15">
                     </label>
                   </div>
                 </div>
@@ -399,11 +391,9 @@
               </div>
 
               <ol class="workflow-canvas" id="workflow-canvas" aria-label="Scenario workflow">
-                <li><span>1</span><div><strong>Checkout starts payment</strong><small>Client initiates payment intent</small></div></li>
-                <li><span>2</span><div><strong>Provider commits charge</strong><small>Payment provider records side-effect</small></div></li>
-                <li class="workflow-fault"><span>3</span><div><strong>Drop provider response</strong><small>Injected fault drops HTTP response</small></div></li>
-                <li><span>4</span><div><strong>Checkout retries</strong><small>Client retries with idempotency key</small></div></li>
-                <li><span>5</span><div><strong>Evaluate invariants</strong><small>Assert single charge &amp; terminal state</small></div></li>
+                <li class="empty-workflow-notice" style="list-style:none;padding:24px 16px;text-align:center;color:var(--ink-400);font-size:12px;border:1px dashed var(--border-subtle);border-radius:var(--radius-sm)">
+                  Select a registered scenario or choose a failure mode to visualize its execution pipeline.
+                </li>
               </ol>
 
               <div style="margin-top:20px;border-top:1px solid var(--border-subtle);padding-top:16px">

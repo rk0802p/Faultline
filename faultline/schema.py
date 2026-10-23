@@ -31,6 +31,7 @@ class FaultSchemaRegistry:
         defaults: dict[str, Any] | None = None,
         validator: ValidatorCallable | None = None,
         legacy_steps: set[str] | None = None,
+        pipeline: list[dict[str, Any]] | None = None,
     ) -> None:
         if fault_name in self._faults:
             raise ValueError(f"fault schema '{fault_name}' is already registered")
@@ -40,6 +41,7 @@ class FaultSchemaRegistry:
             "category": category,
             "parameter_schema": parameter_schema or {},
             "defaults": defaults or {},
+            "pipeline": pipeline or [],
         }
         if validator is not None:
             self._validators[fault_name] = validator
@@ -77,6 +79,12 @@ fault_schema_registry.register(
         "timeout_seconds": {"type": "integer", "label": "Run Timeout (seconds)", "min": 2, "max": 60},
     },
     defaults={"timeout_ms": 1500},
+    pipeline=[
+        {"title": "Client Request", "desc": "Dispatches HTTP request to target service endpoint"},
+        {"title": "Inject Latency / Timeout", "desc": "Drops or delays connection exceeding client limit", "is_fault": True},
+        {"title": "Retry / Fallback", "desc": "Client circuit breaker or fallback handles timeout"},
+        {"title": "Evaluate Invariants", "desc": "Validates boundary protection and graceful degradation"},
+    ],
 )
 
 # Shared dictionary reference for backward compatibility across modules
@@ -93,6 +101,7 @@ def register_fault_schema(
     defaults: dict[str, Any] | None = None,
     validator: ValidatorCallable | None = None,
     legacy_steps: set[str] | None = None,
+    pipeline: list[dict[str, Any]] | None = None,
 ) -> None:
     """Registers a fault schema into the global fault schema registry."""
     fault_schema_registry.register(
@@ -104,6 +113,7 @@ def register_fault_schema(
         defaults=defaults,
         validator=validator,
         legacy_steps=legacy_steps,
+        pipeline=pipeline,
     )
 
 

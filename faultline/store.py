@@ -996,6 +996,23 @@ def get_coverage_matrix() -> dict[str, Any]:
             s_id = sc_def.get("target_step") or (default_steps.get(f_id) if sc_id in {fc["scenario"] for fc in fault_classes} else None)
             if f_id and s_id:
                 cell_scenarios.setdefault((s_id, f_id), []).append(sc_id)
+            for stp in sc_def.get("workflow", []):
+                if isinstance(stp, dict) and stp.get("id"):
+                    s_id_w = stp["id"]
+                    if not any(ws["id"] == s_id_w for ws in workflow_steps):
+                        workflow_steps.append({
+                            "id": s_id_w,
+                            "name": stp.get("name", s_id_w),
+                            "description": stp.get("type", "Custom workflow operation"),
+                        })
+
+        for f_id, f_meta in SUPPORTED_FAULTS.items():
+            if not any(fc["id"] == f_id for fc in fault_classes):
+                fault_classes.append({
+                    "id": f_id,
+                    "name": f_meta.get("description", f_id.replace("_", " ").title())[:24],
+                    "scenario": f_id.replace("_", "-"),
+                })
 
         matrix = []
         total_applicable = 0
@@ -1006,7 +1023,14 @@ def get_coverage_matrix() -> dict[str, Any]:
         for step in workflow_steps:
             step_row = {"step": step, "cells": []}
             for fault in fault_classes:
-                is_applicable = applicable_map.get((step["id"], fault["id"]), False)
+                if (step["id"], fault["id"]) in applicable_map:
+                    is_applicable = applicable_map[(step["id"], fault["id"])]
+                elif (step["id"], fault["id"]) in cell_scenarios:
+                    is_applicable = True
+                elif fault["id"] == "http_timeout" and any(step["id"].startswith(pfx) for pfx in ("http", "step", "req", "call")):
+                    is_applicable = True
+                else:
+                    is_applicable = False
                 matching_scenarios = list(cell_scenarios.get((step["id"], fault["id"]), []))
                 if not matching_scenarios and default_steps.get(fault["id"]) == step["id"]:
                     matching_scenarios = [fault["scenario"]]
@@ -1367,25 +1391,41 @@ def generate_scenarios_from_gaps(project_id: str = "faultline-demo") -> list[dic
                 if sc_id in existing_scenario_ids:
                     continue
 
-                primary_assertion = SUPPORTED_FAULTS[fault_id]["primary_assertion"]
+                fault_info = SUPPORTED_FAULTS[fault_id]
+                primary_assertion = fault_info["primary_assertion"]
                 definition: dict[str, Any] = {
                     "scenario_version": 1,
                     "name": sc_id,
                     "target_step": step_id,
                     "description": f"Automated scenario generated to test {step_name} under {fault_id}.",
-                    "order_id": f"order-gap-{uuid4().hex[:6]}",
-                    "amount_cents": 3000,
                     "fault": fault_id,
                     "assertion": primary_assertion,
                     "timeout_seconds": 15,
                 }
-                if fault_id in {"payment_response_lost_after_commit", "persistence_failure_after_payment"}:
+                definition.update(fault_info.get("defaults", {}))
+                param_schema = fault_info.get("parameter_schema", {})
+                for k, v in param_schema.items():
+                    if k not in definition and "default" in v:
+                        definition[k] = v["default"]
+
+                if "order_id" in param_schema and "order_id" not in definition:
+                    definition["order_id"] = f"order-gap-{uuid4().hex[:6]}"
+                if "amount_cents" in param_schema and "amount_cents" not in definition:
+                    definition["amount_cents"] = 3000
+                if "retries" in param_schema and "retries" not in definition:
                     definition["retries"] = 1 if fault_id == "payment_response_lost_after_commit" else 0
-                if fault_id == "duplicate_payment_webhook":
+                if "webhook_deliveries" in param_schema and "webhook_deliveries" not in definition:
                     definition["webhook_deliveries"] = 2
+                if "delay_ms" in param_schema and "delay_ms" not in definition:
                     definition["delay_ms"] = 100
                 if fault_id == "persistence_failure_after_payment":
                     definition["compensate"] = True
+
+                from .schema import fault_schema_registry
+                if fault_id == "http_timeout" or (step_id not in fault_schema_registry.legacy_steps() and "workflow" not in definition):
+                    definition["workflow"] = [
+                        {"id": step_id, "name": step_name, "type": "http.get", "path": "/v1/health"}
+                    ]
 
                 validate_scenario(definition)
                 create_scenario(sc_id, project_id, definition)

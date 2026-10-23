@@ -2400,6 +2400,41 @@ print("VERIFIED_CLEAN_ISOLATION")
         )
         self.assertIn("VERIFIED_CLEAN_ISOLATION", proc.stdout)
 
+    def test_supported_faults_exposes_schema_pipelines_and_dynamic_incident_import(self) -> None:
+        """Verify that supported fault schemas dynamically declare workflow execution pipelines,
+
+        and that incident import dynamically configures non-payment faults (e.g. http_timeout).
+        """
+        # 1. Supported faults include schema-driven pipelines
+        status, data = self.request("GET", "/api/scenarios/supported-faults")
+        self.assertEqual(status, 200)
+        faults = data["faults"]
+        self.assertIn("http_timeout", faults)
+        self.assertIn("pipeline", faults["http_timeout"])
+        self.assertGreaterEqual(len(faults["http_timeout"]["pipeline"]), 3)
+        self.assertTrue(any(p.get("is_fault") for p in faults["http_timeout"]["pipeline"]))
+
+        # 2. Dynamic incident import for generic faults without hardcoded payment fields
+        incident_payload = {
+            "title": "Incident 409: Checkout Latency Spike",
+            "description": "Downstream endpoint timed out during peak load.",
+            "fault": "http_timeout",
+            "timeout_seconds": 12,
+            "workflow": [
+                {"id": "step_auth", "name": "Auth User", "type": "http.get", "path": "/v1/auth"},
+                {"id": "step_target", "name": "Checkout API", "type": "http.post", "path": "/v1/checkout"},
+            ],
+            "target_step": "step_target",
+        }
+        status, res = self.request("POST", "/api/scenarios/import-incident", incident_payload)
+        self.assertEqual(status, 201)
+        created_def = res["definition"]
+        self.assertEqual(created_def["fault"], "http_timeout")
+        self.assertEqual(created_def["assertion"], "all_steps_succeeded_or_handled")
+        self.assertNotIn("order_id", created_def)
+        self.assertNotIn("amount_cents", created_def)
+        self.assertEqual(created_def["target_step"], "step_target")
+
 
 if __name__ == "__main__":
     unittest.main()

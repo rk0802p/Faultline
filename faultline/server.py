@@ -384,25 +384,33 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 title = payload.get("title", "").strip()
                 if not title:
                     raise ValueError("incident title is required")
-                fault = payload.get("fault", "payment_response_lost_after_commit")
+                fault = payload.get("fault", "payment_response_lost_after_commit" if "payment_response_lost_after_commit" in SUPPORTED_FAULTS else list(SUPPORTED_FAULTS.keys())[0])
                 if fault not in SUPPORTED_FAULTS:
-                    raise ValueError("unsupported fault type")
-                order_id = payload.get("order_id") or f"order-inc-{uuid4().hex[:6]}"
-                amount_cents = int(payload.get("amount_cents", 2500))
-                retries = int(payload.get("retries", 1))
+                    raise ValueError(f"unsupported fault type: '{fault}'")
+                fault_info = SUPPORTED_FAULTS[fault]
                 definition = {
                     "scenario_version": 1,
                     "name": title,
                     "description": payload.get("description", f"Imported incident: {title}"),
-                    "order_id": order_id,
-                    "amount_cents": amount_cents,
                     "fault": fault,
-                    "retries": retries,
-                    "assertion": SUPPORTED_FAULTS[fault]["primary_assertion"],
+                    "assertion": fault_info["primary_assertion"],
+                    "timeout_seconds": int(payload.get("timeout_seconds", 15)),
                 }
-                if fault == "duplicate_payment_webhook":
-                    definition["webhook_deliveries"] = int(payload.get("webhook_deliveries", 2))
-                    definition["delay_ms"] = int(payload.get("delay_ms", 100))
+                definition.update(fault_info.get("defaults", {}))
+                param_schema = fault_info.get("parameter_schema", {})
+                for k in param_schema:
+                    if k in payload:
+                        definition[k] = payload[k]
+                if "workflow" in payload:
+                    definition["workflow"] = payload["workflow"]
+                if "target_step" in payload:
+                    definition["target_step"] = payload["target_step"]
+                if "order_id" in param_schema and "order_id" not in definition:
+                    definition["order_id"] = payload.get("order_id") or f"order-inc-{uuid4().hex[:6]}"
+                if "amount_cents" in param_schema and "amount_cents" not in definition:
+                    definition["amount_cents"] = int(payload.get("amount_cents", 2500))
+                if "retries" in param_schema and "retries" not in definition:
+                    definition["retries"] = int(payload.get("retries", 1))
                 validate_scenario(definition)
                 scenario_id = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:64]
                 if any(item["id"] == scenario_id for item in store.list_scenarios()):

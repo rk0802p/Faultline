@@ -1388,6 +1388,17 @@ class FaultlinePlatformTests(unittest.TestCase):
         self.assertIn("HTTP_RESPONSE_RECEIVED", fixed_events)
         self.assertIn("STEP_COMPLETED", fixed_events)
 
+        # 5. Point-in-time state reconstruction reflects generic steps and fault activation
+        status, state_resp = self.request("GET", f"/api/runs/{fixed_run['id']}/state?sequence=99")
+        self.assertEqual(status, 200)
+        final_state = state_resp["state"]
+        self.assertEqual(final_state["status"], "completed")
+        self.assertTrue(final_state["fault_activated"])
+        self.assertIn("steps", final_state)
+        self.assertIn("call_service", final_state["steps"])
+        self.assertIn("requests", final_state)
+        self.assertGreaterEqual(len(final_state["requests"]), 1)
+
         # Invariants
         assertions = {a["name"]: a["status"] for a in fixed_run["assertions"]}
         self.assertEqual(assertions.get("fault_activation_confirmed"), "passed")

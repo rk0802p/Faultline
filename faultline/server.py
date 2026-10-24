@@ -398,9 +398,18 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
                 }
                 definition.update(fault_info.get("defaults", {}))
                 param_schema = fault_info.get("parameter_schema", {})
-                for k in param_schema:
+                for k, v in param_schema.items():
                     if k in payload:
                         definition[k] = payload[k]
+                    elif k not in definition and isinstance(v, dict):
+                        if "default" in v:
+                            definition[k] = v["default"]
+                        elif v.get("type") == "string":
+                            definition[k] = f"{k}-inc-{uuid4().hex[:6]}"
+                        elif v.get("type") == "integer":
+                            definition[k] = v.get("min", 1)
+                        elif v.get("type") == "boolean":
+                            definition[k] = True
                 if "workflow" in payload:
                     definition["workflow"] = payload["workflow"]
                 if "target_step" in payload:

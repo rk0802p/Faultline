@@ -1342,6 +1342,8 @@ def reconstruct_state_at(run_id: str, target_sequence: int) -> dict[str, Any] | 
         "charges": [],
         "fulfillments": [],
         "refunds": [],
+        "steps": {},
+        "requests": [],
         "invariants_evaluated": False,
         "fault_activated": False,
     }
@@ -1352,16 +1354,31 @@ def reconstruct_state_at(run_id: str, target_sequence: int) -> dict[str, Any] | 
         p = ev.get("payload", {})
         if t == "RUN_QUEUED":
             state["status"] = "queued"
-        elif t == "CHECKOUT_STARTED":
+        elif t in {"CHECKOUT_STARTED", "RUN_STARTED"}:
             state["status"] = "running"
-            state["orders"][p.get("order_id", "default")] = {"status": "started", "implementation": p.get("implementation")}
+            if "order_id" in p:
+                state["orders"][p.get("order_id", "default")] = {"status": "started", "implementation": p.get("implementation")}
+        elif t == "STEP_STARTED":
+            step_name = p.get("step_id") or p.get("name") or "step"
+            state["steps"][step_name] = {"status": "running"}
+        elif t == "STEP_COMPLETED":
+            step_name = p.get("step_id") or p.get("name") or "step"
+            state["steps"][step_name] = {"status": "completed"}
+        elif t == "STEP_FAILED":
+            step_name = p.get("step_id") or p.get("name") or "step"
+            state["steps"][step_name] = {"status": "failed", "error": p.get("error")}
+        elif t == "STEP_RETRY":
+            step_name = p.get("step_id") or p.get("name") or "step"
+            state["steps"][step_name] = {"status": "retrying", "attempt": p.get("attempt")}
+        elif t == "HTTP_REQUEST_SENT":
+            state["requests"].append(p)
         elif t == "PROVIDER_CHARGE_COMMITTED":
             state["charges"].append(p)
         elif t == "PROVIDER_REFUND_COMMITTED":
             state["refunds"].append(p)
         elif t == "FULFILLMENT_COMMITTED":
             state["fulfillments"].append(p)
-        elif "FAULT_" in t:
+        elif "FAULT_" in t or t in {"HTTP_TIMEOUT_OBSERVED", "HTTP_FAULT_ACTIVATION_FAILED"}:
             state["fault_activated"] = True
             state["fault_event"] = t
         elif t == "CHECKOUT_REACHED_TERMINAL_STATE":

@@ -1327,12 +1327,12 @@ def execute_run(run_id: str, scenario: dict[str, Any], implementation: str) -> N
             },
         )
 
-        if store.transition_run(run_id, "completed", verdict=verdict, summary=summary, finished=True):
-            store.record_event(run_id, "RUN_COMPLETED", {"verdict": verdict})
+        if store.run_status(run_id) == "cancel_requested":
+            store.record_event(run_id, "RUN_CANCELLED", {"phase": "completion_race"})
+            store.transition_run(run_id, "cancelled", verdict="cancelled", summary=summary, finished=True)
         else:
-            if store.run_status(run_id) == "cancel_requested":
-                store.record_event(run_id, "RUN_CANCELLED", {"phase": "completion_race"})
-                store.transition_run(run_id, "cancelled", verdict="cancelled", summary=summary, finished=True)
+            store.record_event(run_id, "RUN_COMPLETED", {"verdict": verdict})
+            store.transition_run(run_id, "completed", verdict=verdict, summary=summary, finished=True)
         logger.info("run completed run_id=%s verdict=%s", run_id, verdict)
     except RunCancelled:
         cleanup_all(run_id)

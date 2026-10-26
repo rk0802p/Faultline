@@ -89,7 +89,37 @@ def evaluate_step_execution_verified(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def evaluate_observer_invariants_satisfied(context: dict[str, Any]) -> dict[str, Any]:
+    """Evaluates whether all out-of-band observer invariant assertions passed."""
+    obs_failed = context.get("observer_failures", [])
+    obs_total = context.get("observer_total", 0)
+    is_passed = len(obs_failed) == 0
+    return {
+        "name": "observer_invariants_satisfied",
+        "status": "passed" if is_passed else "failed",
+        "expected": "all independent business invariant assertions pass",
+        "observed": f"{obs_total - len(obs_failed)}/{obs_total} observer assertions passed" if obs_total else "no observer assertions defined",
+        "evidence": [f"failed:{f}" for f in obs_failed] if obs_failed else ["ALL_OBSERVER_INVARIANTS_PASSED"],
+    }
+
+
+def evaluate_database_state_verified(context: dict[str, Any]) -> dict[str, Any]:
+    """Evaluates whether ground-truth database assertions passed."""
+    db_verified = bool(context.get("database_state_verified", True))
+    db_errors = context.get("database_state_errors", [])
+    is_passed = db_verified and len(db_errors) == 0
+    return {
+        "name": "database_state_verified",
+        "status": "passed" if is_passed else "failed",
+        "expected": "independent database state queries confirm business correctness",
+        "observed": "database state verified" if is_passed else f"violations: {', '.join(db_errors)}",
+        "evidence": ["DATABASE_STATE_VERIFIED"] if is_passed else [f"db_violation:{e}" for e in db_errors],
+    }
+
+
 # Register core domain-independent evaluators
 assertion_registry.register("fault_activation_confirmed", evaluate_fault_activation_confirmed)
 assertion_registry.register("all_steps_succeeded_or_handled", evaluate_all_steps_succeeded_or_handled)
 assertion_registry.register("step_execution_verified", evaluate_step_execution_verified)
+assertion_registry.register("observer_invariants_satisfied", evaluate_observer_invariants_satisfied)
+assertion_registry.register("database_state_verified", evaluate_database_state_verified)

@@ -27,6 +27,15 @@ TARGET_ID_REGEX = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
 VALID_TARGET_MODES = {"connect", "managed"}
 
 
+DEFAULT_PERMITTED_FAULTS = [
+    "http_timeout",
+    "network_latency",
+    "network_disconnect",
+    "network_reset",
+    "network_response_drop",
+]
+
+
 @dataclass
 class TargetConfig:
     id: str
@@ -39,7 +48,7 @@ class TargetConfig:
     health_timeout_seconds: float = 2.0
     services: list[dict[str, Any]] = field(default_factory=list)
     dependencies: list[dict[str, Any]] = field(default_factory=list)
-    permitted_faults: list[str] = field(default_factory=lambda: ["http_timeout"])
+    permitted_faults: list[str] = field(default_factory=lambda: list(DEFAULT_PERMITTED_FAULTS))
     managed_command: list[str] | None = None
     managed_env: dict[str, str] | None = None
     observation_config: dict[str, Any] = field(default_factory=dict)
@@ -64,7 +73,7 @@ class TargetConfig:
             health_timeout_seconds=float(cleaned.get("health_timeout_seconds", 2.0)),
             services=list(cleaned.get("services", [])),
             dependencies=list(cleaned.get("dependencies", [])),
-            permitted_faults=list(cleaned.get("permitted_faults", ["http_timeout"])),
+            permitted_faults=list(cleaned.get("permitted_faults", DEFAULT_PERMITTED_FAULTS)),
             managed_command=cleaned.get("managed_command"),
             managed_env=cleaned.get("managed_env"),
             observation_config=dict(cleaned.get("observation_config", {})),

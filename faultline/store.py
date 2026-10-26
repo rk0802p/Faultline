@@ -5,6 +5,7 @@ import hashlib
 import os
 import socket
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
@@ -643,18 +644,29 @@ def request_cancel(run_id: str) -> bool:
     return transition_run(run_id, "cancel_requested")
 
 
+_event_lock = threading.Lock()
+
+
 def record_event(run_id: str, event_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     sanitized = security.redact_sensitive(payload or {})
-    with database() as db:
-        sequence = db.execute(
-            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_events WHERE run_id=?", (run_id,)
-        ).fetchone()[0]
-        recorded_at = now()
-        db.execute(
-            "INSERT INTO run_events(run_id, sequence, recorded_at, type, payload_json) VALUES (?, ?, ?, ?, ?)",
-            (run_id, sequence, recorded_at, event_type, json.dumps(sanitized)),
-        )
-    return {"sequence": sequence, "recorded_at": recorded_at, "type": event_type, "payload": sanitized}
+    with _event_lock:
+        for attempt in range(10):
+            try:
+                with database() as db:
+                    sequence = db.execute(
+                        "SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_events WHERE run_id=?", (run_id,)
+                    ).fetchone()[0]
+                    recorded_at = now()
+                    db.execute(
+                        "INSERT INTO run_events(run_id, sequence, recorded_at, type, payload_json) VALUES (?, ?, ?, ?, ?)",
+                        (run_id, sequence, recorded_at, event_type, json.dumps(sanitized)),
+                    )
+                return {"sequence": sequence, "recorded_at": recorded_at, "type": event_type, "payload": sanitized}
+            except sqlite3.IntegrityError as exc:
+                if attempt == 9 or "FOREIGN KEY" in str(exc):
+                    raise
+                time.sleep(0.01)
+    return {"sequence": 1, "recorded_at": now(), "type": event_type, "payload": sanitized}
 
 
 def record_cleanup(

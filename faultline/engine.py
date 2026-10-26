@@ -452,11 +452,25 @@ def _execute_http_step(
     """Executes a real HTTP request against an approved test endpoint with bounded timeouts and evidence capture."""
     step_id = step.get("id", "http_step")
     scheme, host, port, path = _resolve_http_endpoint(step)
+
+    proxy_url = step.get("proxy_url")
+    if proxy_url:
+        parsed_proxy = urlparse(proxy_url)
+        connect_host = parsed_proxy.hostname or "127.0.0.1"
+        connect_port = parsed_proxy.port or (443 if parsed_proxy.scheme == "https" else 80)
+        connect_scheme = parsed_proxy.scheme or "http"
+    else:
+        connect_host = host
+        connect_port = port
+        connect_scheme = scheme
+
     method = (step.get("method") or ("POST" if step.get("type") == "http.post" else "GET")).upper()
 
     raw_body, content_type, base_headers = _build_http_payload(step)
     if trace_id and root_span_id:
         base_headers["traceparent"] = f"00-{trace_id}-{root_span_id}-01"
+    if proxy_url and "host" not in [k.lower() for k in base_headers]:
+        base_headers["Host"] = f"{host}:{port}"
 
     step_config = step.get("config") or {}
     allowed_statuses = set(step.get("allowed_statuses") or step_config.get("allowed_statuses") or [200, 201, 204])
@@ -533,7 +547,7 @@ def _execute_http_step(
 
         t0 = time.monotonic()
         timed_out = False
-        conn = _create_http_connection(scheme, host, port, timeout=3.0)
+        conn = _create_http_connection(connect_scheme, connect_host, connect_port, timeout=3.0)
         with _active_lock:
             _active_connections[run_id] = conn
         try:
@@ -809,6 +823,202 @@ def _execute_http_step(
                         "fault_activated": True,
                         "simulated": False,
                     }
+                except Exception as exc:
+                    store.record_event(run_id, "STEP_FAILED", {
+                        "step_id": step_id,
+                        "error": f"Retry request to {scheme}://{host}:{port}{path} failed: {exc}",
+                        "evidence": "HTTP_RETRY_FAILED",
+                    })
+                    return False, {
+                        "step_id": step_id,
+                        "type": "http_result",
+                        "status": "retry_failed",
+                        "fault_activated": True,
+                        "simulated": False,
+                    }
+
+                size, snippet, truncated = _capture_response_summary(retry_body, total_bytes_read=retry_total_read, body_truncated=retry_truncated)
+                safe_resp_headers = {k: v for k, v in retry_headers.items() if k in SAFE_RESPONSE_HEADERS}
+                store.record_event(run_id, "HTTP_RESPONSE_RECEIVED", {
+                    "step_id": step_id,
+                    "status": retry_status,
+                    "attempt": 2,
+                    "elapsed_seconds": round(retry_elapsed, 4),
+                    "response_size_bytes": size,
+                    "headers": safe_resp_headers,
+                    "body_snippet": snippet,
+                    "body_truncated": truncated,
+                    "recovered": True,
+                })
+                is_status_ok = retry_status in allowed_statuses
+                store.record_event(run_id, "STEP_COMPLETED", {
+                    "step_id": step_id,
+                    "status": "success" if is_status_ok else "unexpected_status",
+                    "http_status": retry_status,
+                    "recovered": True,
+                })
+                return is_status_ok, {
+                    "step_id": step_id,
+                    "type": "http_result",
+                    "status": retry_status,
+                    "recovered": True,
+                    "fault_activated": True,
+                    "simulated": False,
+                }
+
+    if inject_fault and fault_type in ("network_latency", "network_disconnect", "network_reset", "network_response_drop"):
+        fault_headers = dict(base_headers)
+        store.record_event(run_id, "HTTP_REQUEST_SENT", {
+            "step_id": step_id,
+            "method": method,
+            "url": f"{scheme}://{host}:{port}{path}",
+            "proxy_url": proxy_url,
+            "headers": security.redact_sensitive(fault_headers),
+            "body": sanitized_body,
+            "attempt": 1,
+            "injected_fault": fault_type,
+        })
+        t0 = time.monotonic()
+        conn_cut = False
+        step_timeout = float(step.get("timeout_seconds", step_config.get("timeout_seconds", 3.0)))
+        conn = _create_http_connection(connect_scheme, connect_host, connect_port, timeout=step_timeout)
+        with _active_lock:
+            _active_connections[run_id] = conn
+        try:
+            conn.connect()
+            conn.request(method, path, body=raw_body, headers=fault_headers)
+            resp = conn.getresponse()
+            captured, total_read, was_truncated = _read_bounded_response(resp, max_bytes=max_response_bytes)
+            elapsed = time.monotonic() - t0
+            size, snippet, truncated = _capture_response_summary(captured, total_bytes_read=total_read, body_truncated=was_truncated)
+            if fault_type in ("network_disconnect", "network_reset", "network_response_drop"):
+                store.record_event(run_id, "NETWORK_FAULT_ACTIVATION_FAILED", {
+                    "step_id": step_id,
+                    "fault": fault_type,
+                    "reason": "target completed request without proxy cut",
+                    "status": resp.status,
+                    "elapsed_seconds": round(elapsed, 4),
+                })
+            store.record_event(run_id, "HTTP_RESPONSE_RECEIVED", {
+                "step_id": step_id,
+                "status": resp.status,
+                "attempt": 1,
+                "elapsed_seconds": round(elapsed, 4),
+                "response_size_bytes": size,
+                "headers": {k.lower(): v for k, v in resp.getheaders() if k.lower() in SAFE_RESPONSE_HEADERS},
+                "body_snippet": snippet,
+                "body_truncated": truncated,
+                "recovered": False,
+            })
+            is_ok = resp.status in allowed_statuses
+            store.record_event(run_id, "STEP_COMPLETED", {
+                "step_id": step_id,
+                "status": "success" if is_ok else "unexpected_status",
+                "http_status": resp.status,
+            })
+            return is_ok, {
+                "step_id": step_id,
+                "type": "http_result",
+                "status": resp.status,
+                "fault_activated": False,
+                "simulated": False,
+            }
+        except (ConnectionResetError, ConnectionAbortedError) as exc:
+            conn_cut = True
+            t_elapsed = round(time.monotonic() - t0, 4)
+            store.record_event(run_id, "NETWORK_FAULT_OBSERVED", {
+                "step_id": step_id,
+                "method": method,
+                "target": f"{scheme}://{host}:{port}{path}",
+                "elapsed_seconds": t_elapsed,
+                "error": type(exc).__name__,
+                "details": str(exc),
+            })
+        except (ConnectionError, http.client.RemoteDisconnected) as exc:
+            conn_cut = True
+            t_elapsed = round(time.monotonic() - t0, 4)
+            store.record_event(run_id, "NETWORK_FAULT_OBSERVED", {
+                "step_id": step_id,
+                "method": method,
+                "target": f"{scheme}://{host}:{port}{path}",
+                "elapsed_seconds": t_elapsed,
+                "error": type(exc).__name__,
+                "details": str(exc),
+            })
+        except (TimeoutError, socket.timeout) as exc:
+            conn_cut = True
+            t_elapsed = round(time.monotonic() - t0, 4)
+            store.record_event(run_id, "NETWORK_FAULT_OBSERVED", {
+                "step_id": step_id,
+                "method": method,
+                "target": f"{scheme}://{host}:{port}{path}",
+                "elapsed_seconds": t_elapsed,
+                "error": type(exc).__name__,
+            })
+        except OSError as exc:
+            conn_cut = True
+            t_elapsed = round(time.monotonic() - t0, 4)
+            store.record_event(run_id, "NETWORK_FAULT_OBSERVED", {
+                "step_id": step_id,
+                "method": method,
+                "target": f"{scheme}://{host}:{port}{path}",
+                "elapsed_seconds": t_elapsed,
+                "error": type(exc).__name__,
+                "details": str(exc),
+            })
+        finally:
+            with _active_lock:
+                _active_connections.pop(run_id, None)
+            conn.close()
+
+        if conn_cut:
+            can_retry = configured_retries > 0 and (is_idempotent or implementation == "fixed")
+            if not can_retry or implementation == "vulnerable":
+                store.record_event(run_id, "STEP_FAILED", {
+                    "step_id": step_id,
+                    "error": f"Network stream severed under fault {fault_type}",
+                    "evidence": "NETWORK_FAULT_OBSERVED",
+                })
+                return False, {
+                    "step_id": step_id,
+                    "type": "http_result",
+                    "status": "connection_cut",
+                    "fault_activated": True,
+                    "simulated": False,
+                }
+            else:
+                disarm_hook = step.get("_disarm_hook")
+                if callable(disarm_hook):
+                    disarm_hook()
+                store.record_event(run_id, "STEP_RETRY", {
+                    "step_id": step_id,
+                    "attempt": 2,
+                    "recovered": True,
+                    "reason": f"{fault_type}_recovered",
+                })
+                store.record_event(run_id, "HTTP_REQUEST_SENT", {
+                    "step_id": step_id,
+                    "method": method,
+                    "url": f"{scheme}://{host}:{port}{path}",
+                    "headers": sanitized_headers,
+                    "body": sanitized_body,
+                    "attempt": 2,
+                })
+                try:
+                    retry_status, retry_headers, retry_body, retry_elapsed, _, retry_truncated, retry_total_read = _execute_http_request_with_redirects(
+                        run_id=run_id,
+                        step_id=step_id,
+                        scheme=scheme,
+                        host=host,
+                        port=port,
+                        path=path,
+                        method=method,
+                        headers=base_headers,
+                        raw_body=raw_body,
+                        timeout=step_timeout,
+                        allowed_statuses=allowed_statuses,
+                        max_response_bytes=max_response_bytes,
+                    )
                 except Exception as exc:
                     store.record_event(run_id, "STEP_FAILED", {
                         "step_id": step_id,
@@ -1142,14 +1352,55 @@ def _execute_generic_workflow(
             }
             effective_step["fault_config"] = resolved_fault_config
 
+            active_injector = None
+            managed_proxy_injector = None
+            custom_inj = scenario.get("fault_injector") or resolved_fault_config.get("fault_injector")
+            if custom_inj:
+                from .injectors import injector_registry
+                active_injector = injector_registry.get(custom_inj)
+            if active_injector is None and (
+                fault_type in ("network_latency", "network_disconnect", "network_reset", "network_response_drop")
+                or resolved_fault_config.get("use_proxy")
+            ):
+                from .injectors import LoopbackProxyInjector
+                _, up_h, up_p, _ = _resolve_http_endpoint(effective_step)
+                managed_proxy_injector = LoopbackProxyInjector(upstream_host=up_h, upstream_port=up_p)
+                active_injector = managed_proxy_injector
+
+            if active_injector is not None:
+                p_cfg = dict(resolved_fault_config)
+                if fault_type == "network_disconnect":
+                    p_cfg.setdefault("drop_request", True)
+                elif fault_type == "network_reset":
+                    p_cfg.setdefault("drop_request", True)
+                    p_cfg.setdefault("reset", True)
+                elif fault_type == "network_response_drop":
+                    p_cfg.setdefault("drop_response", True)
+                elif fault_type == "network_latency":
+                    p_cfg.setdefault("latency_seconds", float(resolved_fault_config.get("latency_seconds", 1.0)))
+
+                active_injector.arm(run_id, p_cfg)
+                effective_step["proxy_url"] = active_injector.proxy_url
+                effective_step["_disarm_hook"] = lambda: active_injector.disarm(run_id)
+
             store.record_event(run_id, "FAULT_INJECTED", {
                 "fault_type": fault_type,
                 "target_step": step_id,
                 "config": resolved_fault_config,
             })
-            success, side_effect = handler(
-                run_id, effective_step, True, fault_type, implementation, trace_id, root_span_id
-            )
+            try:
+                success, side_effect = handler(
+                    run_id, effective_step, True, fault_type, implementation, trace_id, root_span_id
+                )
+            finally:
+                if active_injector is not None:
+                    active_injector.disarm(run_id)
+                    inj_ok, _, _ = active_injector.verify_activation(run_id)
+                    if inj_ok:
+                        fault_activation_confirmed = True
+                if managed_proxy_injector is not None:
+                    managed_proxy_injector.shutdown()
+
             if side_effect.get("fault_activated"):
                 fault_activation_confirmed = True
             if success:
@@ -1168,8 +1419,47 @@ def _execute_generic_workflow(
             else:
                 step_failures += 1
 
+    # Phase 02: Evaluate Independent Observers
+    observer_assertions: list[dict[str, Any]] = []
+    observer_results: dict[str, Any] = {}
+    scenario_observers = scenario.get("observers", [])
+    if scenario_observers:
+        from .observers import observer_registry
+        for obs_spec in scenario_observers:
+            try:
+                obs_name = obs_spec.get("name")
+                obs_instance = observer_registry.get(obs_name) if obs_name else None
+                if obs_instance is None:
+                    obs_instance = observer_registry.create_from_config(obs_spec)
+
+                obs_context = {
+                    "run_id": run_id,
+                    "fault_type": fault_type,
+                    "implementation": implementation,
+                    "is_passed": (fault_recovered and step_failures == 0) if implementation == "fixed" else (step_failures == 0),
+                    "executed_steps": executed_steps,
+                    **(scenario.get("observer_context") or {}),
+                    **(scenario.get("parameters") or {}),
+                }
+                obs_data = obs_instance.observe(run_id, obs_context)
+                observer_results[obs_instance.name] = obs_data
+
+                rule_configs = obs_spec.get("assertions", [])
+                outcomes = obs_instance.verify_assertions(run_id, rule_configs, obs_context)
+                observer_assertions.extend(outcomes)
+            except Exception as obs_exc:
+                logger.warning("Observer execution error: %s", obs_exc)
+                observer_assertions.append({
+                    "name": f"observer_error_{obs_spec.get('name', 'unnamed')}",
+                    "status": "failed",
+                    "expected": "observer execution succeeds",
+                    "observed": str(obs_exc),
+                    "evidence": ["OBSERVER_EXECUTION_ERROR"],
+                })
+
+    failed_obs_names = [a["name"] for a in observer_assertions if a["status"] == "failed"]
     primary_assertion = scenario.get("assertion", "all_steps_succeeded_or_handled")
-    is_passed = (fault_recovered and step_failures == 0) if implementation == "fixed" else (step_failures == 0)
+    is_passed = ((fault_recovered and step_failures == 0) if implementation == "fixed" else (step_failures == 0)) and (len(failed_obs_names) == 0)
 
     context = {
         "fault_activation_confirmed": fault_activation_confirmed,
@@ -1178,11 +1468,15 @@ def _execute_generic_workflow(
         "executed_steps": executed_steps,
         "workflow": workflow,
         "step_failures": step_failures,
+        "observer_failures": failed_obs_names,
+        "observer_total": len(observer_assertions),
+        "database_state_verified": len(failed_obs_names) == 0,
     }
     assertions = [
         assertion_registry.evaluate("fault_activation_confirmed", context),
         assertion_registry.evaluate(primary_assertion, context),
     ]
+    assertions.extend(observer_assertions)
 
     summary = {
         "workflow_steps_total": len(workflow),
@@ -1190,6 +1484,7 @@ def _execute_generic_workflow(
         "fault_injected": fault_injected,
         "fault_recovered": fault_recovered,
         "side_effects": side_effects,
+        "observer_results": observer_results,
         "failed_assertions": [a["name"] for a in assertions if a["status"] == "failed"],
     }
     return assertions, summary
@@ -1201,6 +1496,12 @@ fault_registry.register(
     _execute_generic_workflow,
     ["http-service"],
 )
+for net_fault in ("network_latency", "network_disconnect", "network_reset", "network_response_drop"):
+    fault_registry.register(
+        net_fault,
+        _execute_generic_workflow,
+        ["http-service"],
+    )
 
 import os
 from .integrations import register_all_integrations

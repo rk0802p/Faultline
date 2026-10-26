@@ -90,6 +90,25 @@ fault_schema_registry.register(
     ],
 )
 
+
+# Register core network proxy fault schemas (Phase 02)
+for net_fault, net_desc in [
+    ("network_latency", "Injects socket-level latency via network stream proxy"),
+    ("network_disconnect", "Abruptly cuts downstream TCP socket stream"),
+    ("network_reset", "Sends TCP RST packet by forcing zero-linger socket close"),
+    ("network_response_drop", "Drops downstream response stream after commit checkpoint"),
+]:
+    fault_schema_registry.register(
+        fault_name=net_fault,
+        primary_assertion="all_steps_succeeded_or_handled",
+        description=net_desc,
+        category="network",
+        parameter_schema={
+            "latency_seconds": {"type": "integer", "min": 0, "max": 10},
+        },
+        defaults={"latency_seconds": 1},
+    )
+
 # Shared dictionary reference for backward compatibility across modules
 SUPPORTED_FAULTS: dict[str, dict[str, Any]] = fault_schema_registry._faults
 VALID_WORKFLOW_STEPS: set[str] = fault_schema_registry._legacy_steps
@@ -209,7 +228,7 @@ def validate_scenario(definition: dict[str, Any]) -> None:
                 raise ValueError(f"unsupported target_step: '{target_step}'. Valid steps: {sorted(seen_step_ids)}")
             target_obj = step_by_id[target_step]
             target_type = target_obj.get("type")
-            if fault == "http_timeout" and target_type not in HTTP_STEP_TYPES:
+            if fault in {"http_timeout", "network_latency", "network_disconnect", "network_reset", "network_response_drop"} and target_type not in HTTP_STEP_TYPES:
                 raise ValueError(
                     f"target_step '{target_step}' with type '{target_type}' is incompatible with fault 'http_timeout'; "
                     f"must be an HTTP operation ({sorted(HTTP_STEP_TYPES)})"
@@ -269,6 +288,20 @@ def validate_scenario(definition: dict[str, Any]) -> None:
                     raise ValueError("server_delay_seconds must be non-negative (>= 0)")
             except (ValueError, TypeError):
                 raise ValueError("fault_config server_delay_seconds must be a non-negative number")
+
+    raw_observers = definition.get("observers")
+    if raw_observers is not None:
+        if not isinstance(raw_observers, list):
+            raise ValueError("observers must be a list of observer definitions")
+        for idx, obs in enumerate(raw_observers):
+            if not isinstance(obs, dict):
+                raise ValueError(f"observer #{idx+1} must be an object")
+            if "type" not in obs or not isinstance(obs["type"], str):
+                raise ValueError(f"observer #{idx+1} requires a valid 'type'")
+
+    raw_inj = definition.get("fault_injector")
+    if raw_inj is not None and (not isinstance(raw_inj, str) or not raw_inj.strip()):
+        raise ValueError("fault_injector must be a non-empty string identifier")
 
 
 def validate_template_parameters(schema: dict[str, Any], parameters: dict[str, Any]) -> None:

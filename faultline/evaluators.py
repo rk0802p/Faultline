@@ -26,8 +26,13 @@ class AssertionEvaluatorRegistry:
     def is_registered(self, name: str) -> bool:
         return name in self._evaluators
 
-    def evaluate(self, name: str, context: dict[str, Any]) -> dict[str, Any]:
-        """Evaluates assertion by name against execution context."""
+    def evaluate(self, name_or_spec: str | dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        """Evaluates assertion by name or declarative specification against execution context."""
+        if isinstance(name_or_spec, dict):
+            from .assertions import evaluate_declarative_assertion
+            return evaluate_declarative_assertion(name_or_spec, context)
+
+        name = str(name_or_spec)
         evaluator = self.get(name)
         if evaluator is not None:
             return evaluator(context)

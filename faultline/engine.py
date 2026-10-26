@@ -861,6 +861,8 @@ def _execute_http_step(
                     "step_id": step_id,
                     "type": "http_result",
                     "status": retry_status,
+                    "elapsed_seconds": round(retry_elapsed, 4),
+                    "body": snippet,
                     "recovered": True,
                     "fault_activated": True,
                     "simulated": False,
@@ -1212,6 +1214,8 @@ def _execute_http_step(
         "step_id": step_id,
         "type": "http_result",
         "status": status_code,
+        "elapsed_seconds": round(elapsed, 4),
+        "body": snippet,
         "simulated": False,
     }
 
@@ -1462,21 +1466,37 @@ def _execute_generic_workflow(
     is_passed = ((fault_recovered and step_failures == 0) if implementation == "fixed" else (step_failures == 0)) and (len(failed_obs_names) == 0)
 
     context = {
+        "run_id": run_id,
         "fault_activation_confirmed": fault_activation_confirmed,
         "fault_type": fault_type,
         "is_passed": is_passed,
         "executed_steps": executed_steps,
         "workflow": workflow,
+        "side_effects": side_effects,
         "step_failures": step_failures,
         "observer_failures": failed_obs_names,
         "observer_total": len(observer_assertions),
         "database_state_verified": len(failed_obs_names) == 0,
+        **(scenario.get("observer_context") or {}),
+        **(scenario.get("parameters") or {}),
     }
     assertions = [
         assertion_registry.evaluate("fault_activation_confirmed", context),
         assertion_registry.evaluate(primary_assertion, context),
     ]
     assertions.extend(observer_assertions)
+
+    # Phase 03: Evaluate Declarative Invariants declared in scenario['assertions']
+    declarative_list = scenario.get("assertions")
+    if isinstance(declarative_list, list):
+        for item in declarative_list:
+            if isinstance(item, str) and item in ("fault_activation_confirmed", primary_assertion):
+                continue
+            assertions.append(assertion_registry.evaluate(item, context))
+
+    failed_asserts = [a["name"] for a in assertions if a["status"] == "failed"]
+    if failed_asserts:
+        is_passed = False
 
     summary = {
         "workflow_steps_total": len(workflow),

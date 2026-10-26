@@ -240,11 +240,28 @@ def validate_scenario(definition: dict[str, Any]) -> None:
 
     fault_info = fault_schema_registry.get(fault)
     expected_assertion = fault_info["primary_assertion"]
-    if definition.get("assertion") != expected_assertion:
-        raise ValueError(
-            f"unsupported primary assertion '{definition.get('assertion')}' for fault '{fault}'. "
-            f"Expected '{expected_assertion}'."
-        )
+    primary_assert = definition.get("assertion")
+    assertions_list = definition.get("assertions")
+
+    if primary_assert != expected_assertion:
+        if not (isinstance(assertions_list, list) and (
+            expected_assertion in assertions_list
+            or any(isinstance(a, dict) and a.get("name") == expected_assertion for a in assertions_list)
+        )):
+            raise ValueError(
+                f"unsupported primary assertion '{primary_assert}' for fault '{fault}'. "
+                f"Expected '{expected_assertion}'."
+            )
+
+    if assertions_list is not None:
+        if not isinstance(assertions_list, list):
+            raise ValueError("assertions must be a list of assertion names or declarative definitions")
+        for idx, a in enumerate(assertions_list):
+            if isinstance(a, dict):
+                if "type" not in a or not isinstance(a["type"], str):
+                    raise ValueError(f"declarative assertion #{idx+1} requires a valid 'type'")
+            elif not isinstance(a, str):
+                raise ValueError(f"assertion #{idx+1} must be a string name or declarative object")
 
     if not isinstance(definition.get("name"), str) or not definition["name"].strip():
         raise ValueError("scenario name is required")

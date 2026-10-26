@@ -1,0 +1,13 @@
+{
+  "scenario_version": 1,
+  "name": "reconciliation-split",
+  "description": "Simulates secondary database failure after primary transaction commit to evaluate ledger reconciliation and cross-system consistency.",
+  "fault": "persistence_failure_after_payment",
+  "order_id": "order-rec-split-001",
+  "amount_cents": 8900,
+  "retries": 1,
+  "assertion": "charge_compensated_on_failure",
+  "assertions": [
+    "charge_compensated_on_failure"
+  ]
+}

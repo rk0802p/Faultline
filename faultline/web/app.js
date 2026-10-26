@@ -22,6 +22,8 @@ if (!api) {
 const state = {
   activeView: "overview",
   activeProjectId: null,
+  targets: [],
+  selectedTargetId: (typeof localStorage !== "undefined" && localStorage.getItem("faultline_target_id")) || "checkout-demo",
   scenarios: [],
   scenariosLoading: false,
   scenariosError: null,
@@ -81,7 +83,7 @@ function formatTime(value) {
 // VIEW NAVIGATION (5 SIGNATURE SCREENS)
 // =========================================================
 function switchView(viewName) {
-  const validViews = ["overview", "studio", "liverun", "investigation", "map"];
+  const validViews = ["overview", "studio", "liverun", "investigation", "map", "targets"];
   if (!validViews.includes(viewName)) viewName = "overview";
   state.activeView = viewName;
 
@@ -105,10 +107,12 @@ function switchView(viewName) {
       liverun: "LIVE RUN TIMELINE",
       investigation: "INVESTIGATION",
       map: "RELIABILITY MAP",
+      targets: "TARGET APPLICATIONS",
     };
     breadcrumb.textContent = titles[viewName] || "OVERVIEW";
   }
 
+  if (viewName === "targets") refreshTargets();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
@@ -150,6 +154,9 @@ function getCommandItems() {
     { group: "Navigation", title: "Go to Live Run Timeline", shortcut: "G L", action: () => switchView("liverun") },
     { group: "Navigation", title: "Go to Run Investigation", shortcut: "G I", action: () => switchView("investigation") },
     { group: "Navigation", title: "Go to Reliability Map & Coverage", shortcut: "G M", action: () => switchView("map") },
+    { group: "Navigation", title: "Go to Target Applications", shortcut: "G T", action: () => switchView("targets") },
+    { group: "Targets", title: "Register New Target App", shortcut: "R T", action: () => openRegisterTargetModal() },
+    { group: "Targets", title: "Refresh Target Health Status", shortcut: "R H", action: () => refreshTargets() },
 
     // Core Platform Tools
     { group: "Tools", title: "Generate Scenarios from Coverage Gaps", shortcut: "G G", action: () => $("#generate-gaps-btn")?.click() },
@@ -550,23 +557,127 @@ function renderRun(run) {
     }
   }
 
-  // Assertions
+  // Declarative Business Assertions (Phase 03)
   const assertionList = $("#assertion-list");
   if (assertionList) {
     const assertions = run.assertions || [];
     if (!assertions.length) {
       assertionList.innerHTML = '<span style="font-size:11px;color:var(--ink-400)">Awaiting completion to evaluate business invariants...</span>';
     } else {
-      assertionList.innerHTML = assertions.map((a) => `
-        <div class="assertion-card ${a.status}">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-            <strong>${escapeHtml(a.name)}</strong>
-            <span class="verdict-badge ${a.status}">${a.status}</span>
+      assertionList.innerHTML = assertions.map((a) => {
+        const isDeclarative = a.query || a.operator;
+        const typeBadge = a.type ? `<span class="badge" style="font-size:9px;font-family:var(--font-mono);background:var(--surface-sunken);padding:1px 5px;border-radius:3px;color:var(--ink-600)">${escapeHtml(a.type)}</span>` : '';
+        const queryHtml = a.query ? `<div class="sql-query-block" style="margin:6px 0">${escapeHtml(a.query)}</div>` : '';
+        const diffHtml = isDeclarative ? `
+          <div class="assertion-diff-row">
+            <span>Observed: <strong style="color:var(--ink-900)">${escapeHtml(JSON.stringify(a.observed))}</strong></span>
+            <span class="operator-badge">${escapeHtml(a.operator || '==')}</span>
+            <span>Expected: <strong>${escapeHtml(JSON.stringify(a.expected))}</strong></span>
           </div>
+        ` : `
           <small><strong>Expected:</strong> ${escapeHtml(a.expected || 'Rule condition holds')}</small>
           <small><strong>Observed:</strong> ${escapeHtml(a.observed || 'Verified')}</small>
+        `;
+        const evidenceHtml = a.evidence ? `
+          <details style="margin-top:6px;font-size:10px">
+            <summary style="cursor:pointer;color:var(--ink-500)">View Evidence Details</summary>
+            <pre style="margin:4px 0;background:var(--surface-sunken);padding:6px;border-radius:4px;overflow-x:auto;max-height:120px">${escapeHtml(JSON.stringify(a.evidence, null, 2))}</pre>
+          </details>
+        ` : '';
+
+        return `
+          <div class="assertion-card ${a.status}">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+              <div style="display:flex;align-items:center;gap:6px">
+                <strong>${escapeHtml(a.name)}</strong>
+                ${typeBadge}
+              </div>
+              <span class="verdict-badge ${a.status}">${a.status}</span>
+            </div>
+            ${queryHtml}
+            ${diffHtml}
+            ${evidenceHtml}
+          </div>
+        `;
+      }).join("");
+    }
+  }
+
+  // Independent External Observation (Phase 02/03)
+  const obsContainer = $("#observation-results-list");
+  if (obsContainer) {
+    const observerResults = run.summary?.observer_results;
+    const observationEvents = (run.events || []).filter((e) =>
+      ["OBSERVATION_RECORDED", "HTTP_OBSERVATION_RECORDED", "NETWORK_FAULT_APPLIED", "CHECKPOINT_REACHED"].includes(e.type)
+    );
+
+    if (!observerResults && !observationEvents.length) {
+      obsContainer.innerHTML = `
+        <div style="background:var(--surface-subtle);border:1px dashed var(--border-subtle);border-radius:var(--radius-sm);padding:14px;color:var(--ink-500);font-size:11px">
+          <strong>No external database or network observation records for this run.</strong>
+          <p style="margin:4px 0 0">Attach a <code>database_observer</code> or network fault proxy in the scenario definition to record independent table rows and socket states directly outside application code.</p>
         </div>
-      `).join("");
+      `;
+    } else {
+      let obsHtml = "";
+
+      if (observerResults?.database) {
+        const db = observerResults.database;
+        obsHtml += `
+          <div class="observation-subcard">
+            <div class="observation-subcard-header">
+              <span style="font-weight:700;display:flex;align-items:center;gap:6px">
+                <span style="color:var(--indigo-600)">🗄️</span> SQLite Database Observer
+              </span>
+              <span class="badge" style="font-family:var(--font-mono);font-size:10px">${escapeHtml(db.target_id || 'target')}</span>
+            </div>
+            <div style="font-size:11px;color:var(--ink-500);font-family:var(--font-mono)">
+              DB Path: <code>${escapeHtml(db.sqlite_path || 'connected')}</code>
+            </div>
+            ${db.records ? `
+              <div style="background:var(--surface-card);border:1px solid var(--border-subtle);border-radius:4px;padding:8px">
+                <strong style="font-size:10px;text-transform:uppercase;color:var(--ink-400)">Observed Records & Counts</strong>
+                <pre style="margin:4px 0 0;font-family:var(--font-mono);font-size:11px">${escapeHtml(JSON.stringify(db.records, null, 2))}</pre>
+              </div>
+            ` : ''}
+          </div>
+        `;
+      }
+
+      if (observerResults?.http_state) {
+        const httpObs = observerResults.http_state;
+        obsHtml += `
+          <div class="observation-subcard">
+            <div class="observation-subcard-header">
+              <span style="font-weight:700;display:flex;align-items:center;gap:6px">
+                <span style="color:var(--emerald-600)">🌐</span> HTTP External State Observer
+              </span>
+              <span class="badge" style="font-family:var(--font-mono);font-size:10px">${escapeHtml(httpObs.target_id || 'target')}</span>
+            </div>
+            <pre style="margin:4px 0 0;background:var(--surface-card);border:1px solid var(--border-subtle);border-radius:4px;padding:8px;font-family:var(--font-mono);font-size:11px">${escapeHtml(JSON.stringify(httpObs, null, 2))}</pre>
+          </div>
+        `;
+      }
+
+      if (observationEvents.length > 0) {
+        obsHtml += `
+          <div class="observation-subcard">
+            <div class="observation-subcard-header">
+              <strong style="font-size:11px">Observer Execution Events (${observationEvents.length})</strong>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px">
+              ${observationEvents.map((ev) => `
+                <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;background:var(--surface-card);padding:4px 8px;border-radius:4px;border:1px solid var(--border-subtle)">
+                  <span style="font-family:var(--font-mono);font-size:10px">#${ev.sequence} <strong>${escapeHtml(ev.type)}</strong></span>
+                  <span style="font-size:10px;color:var(--ink-400)">${escapeHtml(formatTime(ev.created_at))}</span>
+                </div>
+              `).join("")}
+            </div>
+          </div>
+        `;
+      }
+
+      obsContainer.innerHTML = obsHtml;
     }
   }
 
@@ -1670,6 +1781,327 @@ function setupModals() {
   });
 }
 
+
+// =========================================================
+// TARGET APPLICATIONS MANAGEMENT (REAL SYSTEMS)
+// =========================================================
+async function refreshTargets() {
+  if (!api || !api.getTargets) return;
+  try {
+    const res = await api.getTargets();
+    state.targets = res.targets || [];
+    renderTargetsList(state.targets);
+    updateTargetSelectors(state.targets);
+  } catch (err) {
+    console.error("Failed to load targets:", err);
+  }
+}
+
+function updateTargetSelectors(targets) {
+  const badge = $("#target-count");
+  if (badge) badge.textContent = String(targets.length);
+
+  const summaryCount = $("#target-summary-count");
+  if (summaryCount) summaryCount.textContent = String(targets.length);
+
+  const headerSelect = $("#header-target-select");
+  if (headerSelect) {
+    const currentVal = state.selectedTargetId;
+    let opts = '<option value="checkout-demo">Checkout Demo (In-Memory :8766)</option>';
+    targets.forEach((t) => {
+      opts += `<option value="${escapeHtml(t.id)}">${escapeHtml(t.name)} (${escapeHtml(t.base_url || t.id)})</option>`;
+    });
+    headerSelect.innerHTML = opts;
+    if (targets.some((t) => t.id === currentVal) || currentVal === "checkout-demo") {
+      headerSelect.value = currentVal;
+    } else if (targets.length > 0) {
+      headerSelect.value = targets[0].id;
+      state.selectedTargetId = targets[0].id;
+    }
+  }
+
+  // Update sidebar card
+  const sidebarName = $("#sidebar-target-name");
+  const sidebarSub = $("#sidebar-target-sub");
+  const activeTarget = targets.find((t) => t.id === state.selectedTargetId);
+  if (activeTarget) {
+    if (sidebarName) sidebarName.textContent = activeTarget.name;
+    if (sidebarSub) sidebarSub.textContent = `${activeTarget.mode.toUpperCase()} · ${activeTarget.base_url || ''}`;
+  } else {
+    if (sidebarName) sidebarName.textContent = "Target: Local Environment";
+    if (sidebarSub) sidebarSub.textContent = "Loopback boundary active";
+  }
+}
+
+function renderTargetsList(targets) {
+  const grid = $("#targets-grid");
+  if (!grid) return;
+
+  if (!targets.length) {
+    grid.innerHTML = `
+      <div style="grid-column: 1 / -1; background:var(--surface-card); border:1px dashed var(--border-subtle); border-radius:var(--radius-md); padding:40px 20px; text-align:center">
+        <div style="font-size:32px;margin-bottom:8px">🎯</div>
+        <strong style="font-size:14px;display:block;margin-bottom:4px">No target applications registered yet</strong>
+        <p style="color:var(--ink-400);font-size:12px;max-width:440px;margin:0 auto 16px">
+          Register live or managed microservices to execute network socket cuts, forced connection drops, and independent SQLite database assertions.
+        </p>
+        <button class="button button-primary" id="empty-register-target-btn">
+          <span>+</span> Register First Target App
+        </button>
+      </div>
+    `;
+    $("#empty-register-target-btn")?.addEventListener("click", openRegisterTargetModal);
+    return;
+  }
+
+  grid.innerHTML = targets.map((t) => {
+    const isActive = t.id === state.selectedTargetId;
+    return `
+      <div class="target-app-card ${isActive ? 'active-target' : ''}" data-target-id="${escapeHtml(t.id)}">
+        <div class="target-card-header">
+          <div>
+            <h3 class="target-card-title">${escapeHtml(t.name)}</h3>
+            <span class="target-id-badge">ID: ${escapeHtml(t.id)}</span>
+          </div>
+          <span class="target-mode-pill ${escapeHtml(t.mode)}">${escapeHtml(t.mode)}</span>
+        </div>
+
+        <div class="target-meta-list">
+          <div class="target-meta-item">
+            <span class="target-meta-label">Base URL:</span>
+            <span class="target-meta-val">${escapeHtml(t.base_url || 'N/A')}</span>
+          </div>
+          <div class="target-meta-item">
+            <span class="target-meta-label">Health Check:</span>
+            <span class="target-meta-val">${escapeHtml(t.health_url || '/health')}</span>
+          </div>
+          ${t.sqlite_path ? `
+            <div class="target-meta-item">
+              <span class="target-meta-label">SQLite Database:</span>
+              <span class="target-meta-val">${escapeHtml(t.sqlite_path)}</span>
+            </div>
+          ` : ''}
+          ${t.proxy_port ? `
+            <div class="target-meta-item">
+              <span class="target-meta-label">Fault Proxy Port:</span>
+              <span class="target-meta-val">:${escapeHtml(String(t.proxy_port))}</span>
+            </div>
+          ` : ''}
+          ${t.process_pid ? `
+            <div class="target-meta-item">
+              <span class="target-meta-label">Process PID:</span>
+              <span class="target-meta-val">${escapeHtml(String(t.process_pid))} (Running)</span>
+            </div>
+          ` : ''}
+        </div>
+
+        <div class="target-card-actions">
+          <button class="button button-secondary target-health-btn" data-target-id="${escapeHtml(t.id)}" style="font-size:11px">
+            Test Health
+          </button>
+          ${t.mode === 'managed' ? `
+            ${t.process_pid ? `
+              <button class="button button-secondary target-stop-btn" data-target-id="${escapeHtml(t.id)}" style="font-size:11px;color:var(--crimson-700)">
+                Stop Process
+              </button>
+            ` : `
+              <button class="button button-secondary target-start-btn" data-target-id="${escapeHtml(t.id)}" style="font-size:11px;color:var(--emerald-700)">
+                Start Process
+              </button>
+            `}
+          ` : ''}
+          <button class="button button-secondary target-select-btn" data-target-id="${escapeHtml(t.id)}" style="font-size:11px;${isActive ? 'background:var(--amber-100);color:var(--amber-800);border-color:var(--amber-300)' : ''}">
+            ${isActive ? '✓ Active' : 'Set Active'}
+          </button>
+          <button class="icon-button target-delete-btn" data-target-id="${escapeHtml(t.id)}" title="Delete Target" style="margin-left:auto;color:var(--crimson-600)">
+            🗑
+          </button>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  // Event handlers for target cards
+  grid.querySelectorAll(".target-health-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const targetId = btn.dataset.targetId;
+      btn.disabled = true;
+      btn.textContent = "Checking...";
+      try {
+        const res = await api.checkTargetHealth(targetId);
+        if (res.status === "healthy") {
+          toast(`Target '${targetId}' is HEALTHY (${res.status_code || 200})`);
+          btn.style.color = "var(--emerald-600)";
+          btn.textContent = "✓ Healthy";
+        } else {
+          toast(`Target '${targetId}' UNREACHABLE: ${res.error || 'Connection failed'}`);
+          btn.style.color = "var(--crimson-600)";
+          btn.textContent = "✕ Offline";
+        }
+      } catch (err) {
+        toast(`Health check error: ${err.message}`);
+        btn.textContent = "Error";
+      } finally {
+        setTimeout(() => {
+          btn.disabled = false;
+          btn.textContent = "Test Health";
+        }, 3000);
+      }
+    });
+  });
+
+  grid.querySelectorAll(".target-select-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const targetId = btn.dataset.targetId;
+      state.selectedTargetId = targetId;
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem("faultline_target_id", targetId);
+      }
+      toast(`Active target switched to: ${targetId}`);
+      updateTargetSelectors(state.targets);
+      renderTargetsList(state.targets);
+    });
+  });
+
+  grid.querySelectorAll(".target-start-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const targetId = btn.dataset.targetId;
+      btn.disabled = true;
+      try {
+        await api.startTarget(targetId);
+        toast(`Target process '${targetId}' started.`);
+        await refreshTargets();
+      } catch (err) {
+        toast(`Failed to start target: ${err.message}`);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+
+  grid.querySelectorAll(".target-stop-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const targetId = btn.dataset.targetId;
+      btn.disabled = true;
+      try {
+        await api.stopTarget(targetId);
+        toast(`Target process '${targetId}' stopped.`);
+        await refreshTargets();
+      } catch (err) {
+        toast(`Failed to stop target: ${err.message}`);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+
+  grid.querySelectorAll(".target-delete-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const targetId = btn.dataset.targetId;
+      if (!confirm(`Are you sure you want to delete target '${targetId}'?`)) return;
+      try {
+        await api.deleteTarget(targetId);
+        toast(`Target '${targetId}' deleted.`);
+        if (state.selectedTargetId === targetId) {
+          state.selectedTargetId = "checkout-demo";
+          if (typeof localStorage !== "undefined") {
+            localStorage.setItem("faultline_target_id", "checkout-demo");
+          }
+        }
+        await refreshTargets();
+      } catch (err) {
+        toast(`Failed to delete target: ${err.message}`);
+      }
+    });
+  });
+}
+
+function openRegisterTargetModal() {
+  const modal = $("#target-modal");
+  if (modal) modal.hidden = false;
+}
+
+function closeRegisterTargetModal() {
+  const modal = $("#target-modal");
+  if (modal) modal.hidden = true;
+  $("#target-form")?.reset();
+}
+
+function setupTargetListeners() {
+  $("#open-register-target-btn")?.addEventListener("click", openRegisterTargetModal);
+  $("#close-target-btn")?.addEventListener("click", closeRegisterTargetModal);
+  $("#cancel-target-btn")?.addEventListener("click", closeRegisterTargetModal);
+
+  $("#sidebar-target-card")?.addEventListener("click", () => switchView("targets"));
+
+  $("#refresh-targets-btn")?.addEventListener("click", async () => {
+    toast("Checking target health...");
+    await refreshTargets();
+  });
+
+  $("#header-target-select")?.addEventListener("change", (e) => {
+    const val = e.target.value;
+    state.selectedTargetId = val;
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("faultline_target_id", val);
+    }
+    toast(`Active target: ${val}`);
+    updateTargetSelectors(state.targets);
+    renderTargetsList(state.targets);
+  });
+
+  // Toggle managed fields
+  const modeSelect = $("#target-mode-input");
+  const managedFields = $("#target-managed-fields");
+  modeSelect?.addEventListener("change", () => {
+    if (managedFields) {
+      managedFields.style.display = modeSelect.value === "managed" ? "flex" : "none";
+    }
+  });
+
+  // Submit target registration
+  $("#target-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const id = $("#target-id-input")?.value?.trim();
+    const name = $("#target-name-input")?.value?.trim();
+    const mode = $("#target-mode-input")?.value || "connect";
+    const baseUrl = $("#target-base-url-input")?.value?.trim();
+    const healthUrl = $("#target-health-url-input")?.value?.trim() || "/health";
+    const proxyPortRaw = $("#target-proxy-port-input")?.value?.trim();
+    const proxyPort = proxyPortRaw ? parseInt(proxyPortRaw, 10) : null;
+    const dbPath = $("#target-db-path-input")?.value?.trim() || null;
+
+    const payload = {
+      id,
+      name,
+      mode,
+      base_url: baseUrl,
+      health_url: healthUrl,
+      proxy_port: proxyPort,
+      sqlite_path: dbPath,
+    };
+
+    if (mode === "managed") {
+      payload.start_command = $("#target-start-cmd-input")?.value?.trim() || null;
+      payload.stop_command = $("#target-stop-cmd-input")?.value?.trim() || null;
+      payload.working_dir = $("#target-cwd-input")?.value?.trim() || null;
+    }
+
+    try {
+      await api.createTarget(payload);
+      toast(`Target '${name}' registered successfully!`);
+      closeRegisterTargetModal();
+      state.selectedTargetId = id;
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem("faultline_target_id", id);
+      }
+      await refreshTargets();
+    } catch (err) {
+      toast(`Registration error: ${err.message}`);
+    }
+  });
+}
+
 // =========================================================
 // INITIALIZATION
 // =========================================================
@@ -1686,6 +2118,7 @@ async function initialize() {
   setupOpenApiImporter();
   setupGenerateFromGaps();
   setupModals();
+  setupTargetListeners();
 
   // Button Listeners
   $$(".run-button").forEach((btn) => {
@@ -1830,6 +2263,7 @@ async function initialize() {
       refreshRuns(),
       refreshCoverage(),
       loadTemplates(),
+      refreshTargets(),
     ]);
 
     // Initial Studio state starts neutral / blank unless a scenario is chosen

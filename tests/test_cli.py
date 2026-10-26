@@ -460,5 +460,86 @@ class FaultlineCliTests(unittest.TestCase):
         self.assertIn("Baselines Kept:   1", stdout.getvalue())
 
 
+    def test_cli_doctor_command(self) -> None:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        args = ["faultline.cli", "doctor"]
+        with patch.object(sys, "argv", args), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 0)
+        out = stdout.getvalue()
+        self.assertIn("Faultline Doctor", out)
+        self.assertIn("Python Runtime:", out)
+        self.assertIn("SQLite Database Store:", out)
+        self.assertIn("Network Sockets:", out)
+
+    def test_cli_target_commands(self) -> None:
+        # 1. target list
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(sys, "argv", ["faultline.cli", "target", "list"]),                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 0)
+        self.assertIn("FAULTLINE REGISTERED TARGET APPLICATIONS", stdout.getvalue())
+
+        # 2. target add
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(sys, "argv", ["faultline.cli", "target", "add", "cli-test-target", "Test App", "--url", "http://127.0.0.1:9099"]),                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 0)
+        self.assertIn("registered successfully", stdout.getvalue())
+
+        # 3. target test
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(sys, "argv", ["faultline.cli", "target", "test", "cli-test-target"]), \
+                patch("faultline.targets.target_registry.check_health", return_value={"status": "healthy", "status_code": 200, "latency_ms": 2.1}), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 0)
+        self.assertIn("TARGET APPLICATION HEALTH CHECK", stdout.getvalue())
+        self.assertIn("[OK HEALTHY]", stdout.getvalue())
+
+        # 4. target delete
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(sys, "argv", ["faultline.cli", "target", "delete", "cli-test-target"]),                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 0)
+        self.assertIn("deleted", stdout.getvalue())
+
+    def test_cli_run_positional_and_table_format(self) -> None:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        args = ["faultline.cli", "run", "payment-response-lost", "--implementation", "fixed",
+                "--base-url", "http://faultline.test", "--table"]
+        run_data = {
+            "id": "run-table-1",
+            "scenario": {"name": "payment-response-lost"},
+            "implementation": "fixed",
+            "status": "completed",
+            "verdict": "passed",
+            "assertions": [
+                {"name": "no_duplicate_charge", "status": "passed", "expected": "1", "observed": "1"}
+            ],
+            "started_at": "2026-10-27T00:00:00Z",
+            "finished_at": "2026-10-27T00:00:01Z",
+        }
+        responses = [{"run_id": "run-table-1"}, {"run": run_data}]
+        with patch.object(sys, "argv", args), patch("faultline.cli.api_json", side_effect=responses),                 patch("faultline.cli.time.sleep"), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 0)
+        out = stdout.getvalue()
+        self.assertIn("FAULTLINE EXECUTION SUMMARY", out)
+        self.assertIn("no_duplicate_charge", out)
+        self.assertIn("PASSED", out)
+
+    def test_cli_run_recipe_file_local(self) -> None:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        args = ["faultline.cli", "run", "scenarios/recipes/reconciliation_split.json", "--implementation", "fixed", "--local", "--table"]
+        with patch.object(sys, "argv", args), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = cli.main()
+        self.assertEqual(code, 0)
+        out = stdout.getvalue()
+        self.assertIn("FAULTLINE EXECUTION SUMMARY", out)
+        self.assertIn("reconciliation-split", out)
+        self.assertIn("PASSED", out)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -209,6 +209,42 @@
         headers: { "Content-Type": "application/json" },
         body: typeof specText === "string" ? specText : JSON.stringify(specText),
       }),
+
+    // ==========================================
+    // TARGET APPLICATIONS (PHASE 01/02/03)
+    // ==========================================
+    getTargets: () => apiRequest("/api/targets"),
+    getTarget: (targetId) => {
+      if (!targetId) throw new Error("targetId is required for getTarget");
+      return apiRequest(`/api/targets/${encodeURIComponent(targetId)}`);
+    },
+    createTarget: (config) =>
+      apiRequest("/api/targets", {
+        method: "POST",
+        body: config,
+      }),
+    deleteTarget: (targetId) => {
+      if (!targetId) throw new Error("targetId is required for deleteTarget");
+      return apiRequest(`/api/targets/${encodeURIComponent(targetId)}`, {
+        method: "DELETE",
+      });
+    },
+    checkTargetHealth: (targetId) => {
+      if (!targetId) throw new Error("targetId is required for checkTargetHealth");
+      return apiRequest(`/api/targets/${encodeURIComponent(targetId)}/health`);
+    },
+    startTarget: (targetId) => {
+      if (!targetId) throw new Error("targetId is required for startTarget");
+      return apiRequest(`/api/targets/${encodeURIComponent(targetId)}/start`, {
+        method: "POST",
+      });
+    },
+    stopTarget: (targetId) => {
+      if (!targetId) throw new Error("targetId is required for stopTarget");
+      return apiRequest(`/api/targets/${encodeURIComponent(targetId)}/stop`, {
+        method: "POST",
+      });
+    },
   };
 
   if (typeof module !== "undefined" && module.exports) {

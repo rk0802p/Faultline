@@ -58,14 +58,19 @@
           <span class="nav-icon">▦</span>
           <span>Reliability Map</span>
         </a>
+        <a class="nav-item" href="#targets" data-view="targets">
+          <span class="nav-icon">🎯</span>
+          <span>Target Apps</span>
+          <span class="nav-badge" id="target-count">0</span>
+        </a>
       </nav>
 
       <div class="sidebar-bottom">
-        <div class="env-target-card">
+        <div class="env-target-card" id="sidebar-target-card" style="cursor:pointer" title="Manage Target Applications">
           <div class="pulse-dot pulse" id="env-pulse"></div>
           <div class="env-target-text">
-            <strong>Target: Local Environment</strong>
-            <small>Loopback boundary active</small>
+            <strong id="sidebar-target-name">Target: Local Environment</strong>
+            <small id="sidebar-target-sub">Loopback boundary active</small>
           </div>
         </div>
 
@@ -86,6 +91,13 @@
           <strong id="topbar-current-view">OVERVIEW</strong>
         </div>
         <div class="topbar-actions">
+          <div class="target-picker-wrap">
+            <span class="target-picker-label">TARGET:</span>
+            <select id="header-target-select" class="target-select-dropdown" title="Select Active Target Application">
+              <option value="checkout-demo">Checkout Demo (:8766)</option>
+            </select>
+            <span class="target-status-dot connected" id="header-target-dot" title="Target Active"></span>
+          </div>
           <span class="environment-pill" id="services-health-pill">
             <i></i> SERVICES HEALTHY
           </span>
@@ -524,6 +536,19 @@
               <div id="assertion-list" class="assertion-list"></div>
             </div>
 
+            <!-- Independent External Observation Card (Phase 02/03) -->
+            <div class="detail-card" id="observations-card">
+              <div class="detail-title">
+                <span class="detail-title-icon" style="background:var(--indigo-100);color:var(--indigo-600)">🗄️</span>
+                <div>
+                  <strong>Independent External Observation</strong>
+                  <small>Direct SQLite database verification &amp; network proxy state</small>
+                </div>
+                <span class="badge" id="observation-status-badge" style="margin-left:auto;font-size:10px;padding:3px 8px;background:var(--indigo-100);color:var(--indigo-700);border-radius:4px;font-family:var(--font-mono)">INDEPENDENT EVIDENCE</span>
+              </div>
+              <div id="observation-results-list" class="observation-results-container"></div>
+            </div>
+
             <!-- OpenTelemetry Waterfall Card -->
             <div class="detail-card" id="telemetry-card">
               <div class="detail-title">
@@ -690,6 +715,35 @@
           </div>
         </section>
 
+        <!-- =========================================================
+             SCREEN 06: TARGET APPLICATIONS (REAL SYSTEMS)
+             ========================================================= -->
+        <section class="page-view" id="view-targets">
+          <div class="view-header">
+            <div class="eyebrow">TARGET APPLICATIONS · REAL-WORLD INTEGRATION</div>
+            <h1>Target Applications</h1>
+            <p>Connect and manage real services, APIs, and databases under failure testing. Faultline injects network faults and verifies business state directly against your application's data stores.</p>
+          </div>
+
+          <div class="targets-toolbar" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;gap:12px;flex-wrap:wrap">
+            <div style="display:flex;gap:8px;align-items:center">
+              <button class="button button-primary" id="open-register-target-btn">
+                <span>+</span> Register Target App
+              </button>
+              <button class="button button-secondary" id="refresh-targets-btn">
+                <span>↻</span> Refresh Health
+              </button>
+            </div>
+            <div style="font-size:11px;color:var(--ink-400);font-family:var(--font-mono)">
+              <span id="target-summary-count">0</span> Registered Targets
+            </div>
+          </div>
+
+          <div class="targets-grid" id="targets-grid" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(320px, 1fr));gap:16px">
+            <!-- Dynamic target cards populated by JS -->
+          </div>
+        </section>
+
       </div>
     </main>
   </div>
@@ -760,6 +814,88 @@
         <button class="icon-button" id="close-audit-btn" style="margin-left:auto;width:24px;height:24px">✕</button>
       </div>
       <div id="audit-log-list" style="margin-top:14px;max-height:280px;overflow-y:auto"></div>
+    </div>
+  </div>
+
+
+  <!-- Target Application Registration Modal -->
+  <div class="modal-overlay" id="target-modal" hidden>
+    <div class="modal-dialog" style="max-width:540px">
+      <div class="detail-title">
+        <span class="detail-title-icon" style="background:var(--indigo-100);color:var(--indigo-600)">🎯</span>
+        <div>
+          <strong>Register Target Application</strong>
+          <small>Connect an external service or register a managed process for failure testing</small>
+        </div>
+        <button class="icon-button" id="close-target-btn" style="margin-left:auto;width:24px;height:24px">✕</button>
+      </div>
+
+      <form id="target-form" style="margin-top:16px;display:flex;flex-direction:column;gap:12px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div>
+            <label style="font-size:11px;font-weight:600;display:block;margin-bottom:4px">Target ID *</label>
+            <input type="text" id="target-id-input" placeholder="e.g. booking-service" required pattern="[a-zA-Z0-9_-]+" style="width:100%;padding:6px 8px;border:1px solid var(--border-subtle);border-radius:4px;font-family:var(--font-mono);font-size:11px">
+          </div>
+          <div>
+            <label style="font-size:11px;font-weight:600;display:block;margin-bottom:4px">Display Name *</label>
+            <input type="text" id="target-name-input" placeholder="e.g. Hotel Booking Service" required style="width:100%;padding:6px 8px;border:1px solid var(--border-subtle);border-radius:4px;font-size:11px">
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div>
+            <label style="font-size:11px;font-weight:600;display:block;margin-bottom:4px">Integration Mode</label>
+            <select id="target-mode-input" style="width:100%;padding:6px 8px;border:1px solid var(--border-subtle);border-radius:4px;font-size:11px;background:#fff">
+              <option value="connect">Connect (Pre-existing running service)</option>
+              <option value="managed">Managed (Spawned &amp; monitored by Faultline)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:11px;font-weight:600;display:block;margin-bottom:4px">Base URL *</label>
+            <input type="url" id="target-base-url-input" placeholder="http://127.0.0.1:9000" required style="width:100%;padding:6px 8px;border:1px solid var(--border-subtle);border-radius:4px;font-family:var(--font-mono);font-size:11px">
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div>
+            <label style="font-size:11px;font-weight:600;display:block;margin-bottom:4px">Health Endpoint</label>
+            <input type="text" id="target-health-url-input" placeholder="/health" value="/health" style="width:100%;padding:6px 8px;border:1px solid var(--border-subtle);border-radius:4px;font-family:var(--font-mono);font-size:11px">
+          </div>
+          <div>
+            <label style="font-size:11px;font-weight:600;display:block;margin-bottom:4px">Network Proxy Port (Optional)</label>
+            <input type="number" id="target-proxy-port-input" placeholder="e.g. 9001" style="width:100%;padding:6px 8px;border:1px solid var(--border-subtle);border-radius:4px;font-family:var(--font-mono);font-size:11px">
+          </div>
+        </div>
+
+        <div>
+          <label style="font-size:11px;font-weight:600;display:block;margin-bottom:4px">SQLite Database Path (Optional for Invariant Observation)</label>
+          <input type="text" id="target-db-path-input" placeholder="e.g. data/booking.db" style="width:100%;padding:6px 8px;border:1px solid var(--border-subtle);border-radius:4px;font-family:var(--font-mono);font-size:11px">
+        </div>
+
+        <!-- Managed mode fields -->
+        <div id="target-managed-fields" style="display:none;background:var(--surface-subtle);padding:10px;border-radius:6px;border:1px dashed var(--border-medium);flex-direction:column;gap:8px">
+          <label style="font-size:11px;font-weight:700;color:var(--ink-700)">Managed Process Configuration</label>
+          <div>
+            <label style="font-size:10px;font-weight:600;display:block;margin-bottom:2px">Start Command *</label>
+            <input type="text" id="target-start-cmd-input" placeholder="python -m examples.booking_service --port 9000" style="width:100%;padding:5px 8px;border:1px solid var(--border-subtle);border-radius:4px;font-family:var(--font-mono);font-size:11px">
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+            <div>
+              <label style="font-size:10px;font-weight:600;display:block;margin-bottom:2px">Stop Command (Optional)</label>
+              <input type="text" id="target-stop-cmd-input" placeholder="SIGTERM / command" style="width:100%;padding:5px 8px;border:1px solid var(--border-subtle);border-radius:4px;font-family:var(--font-mono);font-size:11px">
+            </div>
+            <div>
+              <label style="font-size:10px;font-weight:600;display:block;margin-bottom:2px">Working Directory (Optional)</label>
+              <input type="text" id="target-cwd-input" placeholder="." style="width:100%;padding:5px 8px;border:1px solid var(--border-subtle);border-radius:4px;font-family:var(--font-mono);font-size:11px">
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top:8px;display:flex;justify-content:flex-end;gap:10px">
+          <button type="button" class="button button-secondary" id="cancel-target-btn">Cancel</button>
+          <button type="submit" class="button button-primary">Register Target</button>
+        </div>
+      </form>
     </div>
   </div>
 

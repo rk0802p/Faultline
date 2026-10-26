@@ -1,0 +1,63 @@
+{
+  "scenario_version": 1,
+  "name": "idempotent-order-sever",
+  "description": "Simulates TCP connection sever / response drop after order commit to verify idempotent retry deduplication and zero duplicate database rows.",
+  "fault": "network_response_drop",
+  "assertion": "all_steps_succeeded_or_handled",
+  "target_id": "booking-service",
+  "target_step": "book_room",
+  "workflow": [
+    {
+      "id": "book_room",
+      "type": "http.request",
+      "config": {
+        "method": "POST",
+        "url": "http://127.0.0.1:9000/book",
+        "headers": {
+          "Content-Type": "application/json",
+          "X-Idempotency-Key": "rec-order-999"
+        },
+        "body": "{\"user_id\": \"usr_sever\", \"room_id\": \"penthouse\", \"amount_cents\": 12000, \"idempotency_key\": \"rec-order-999\"}"
+      }
+    },
+    {
+      "id": "retry_book_room",
+      "type": "http.request",
+      "config": {
+        "method": "POST",
+        "url": "http://127.0.0.1:9000/book",
+        "headers": {
+          "Content-Type": "application/json",
+          "X-Idempotency-Key": "rec-order-999"
+        },
+        "body": "{\"user_id\": \"usr_sever\", \"room_id\": \"penthouse\", \"amount_cents\": 12000, \"idempotency_key\": \"rec-order-999\"}"
+      }
+    }
+  ],
+  "assertions": [
+    "all_steps_succeeded_or_handled",
+    {
+      "name": "retry_succeeded",
+      "type": "http_status",
+      "step_id": "retry_book_room",
+      "expected": 200,
+      "operator": "=="
+    },
+    {
+      "name": "no_duplicate_booking",
+      "type": "database_sql",
+      "target_id": "booking-service",
+      "query": "SELECT COUNT(*) FROM bookings WHERE idempotency_key = 'rec-order-999'",
+      "expected": 1,
+      "operator": "=="
+    },
+    {
+      "name": "single_user_booking",
+      "type": "database_sql",
+      "target_id": "booking-service",
+      "query": "SELECT COUNT(*) FROM bookings WHERE user_id = 'usr_sever'",
+      "expected": 1,
+      "operator": "=="
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "scenario_version": 1,
+  "name": "retry-avalanche",
+  "description": "Simulates downstream dependency latency spike to evaluate request timeouts, retry budgets, and backoff handling.",
+  "fault": "network_latency",
+  "fault_config": {
+    "latency_ms": 150,
+    "client_timeout_seconds": 2.0
+  },
+  "assertion": "all_steps_succeeded_or_handled",
+  "target_id": "booking-service",
+  "target_step": "book_delayed",
+  "workflow": [
+    {
+      "id": "health_probe",
+      "type": "http.get",
+      "config": {
+        "url": "http://127.0.0.1:9000/health"
+      }
+    },
+    {
+      "id": "book_delayed",
+      "type": "http.post",
+      "config": {
+        "url": "http://127.0.0.1:9000/book",
+        "headers": {
+          "Content-Type": "application/json",
+          "X-Idempotency-Key": "rec-aval-001"
+        },
+        "body": "{\"user_id\": \"usr_aval\", \"room_id\": \"standard-404\", \"amount_cents\": 4500, \"idempotency_key\": \"rec-aval-001\"}"
+      }
+    }
+  ],
+  "assertions": [
+    "all_steps_succeeded_or_handled",
+    {
+      "name": "health_probe_status",
+      "type": "http_status",
+      "step_id": "health_probe",
+      "expected": 200,
+      "operator": "=="
+    },
+    {
+      "name": "booking_persisted",
+      "type": "database_sql",
+      "target_id": "booking-service",
+      "query": "SELECT COUNT(*) FROM bookings WHERE idempotency_key = 'rec-aval-001'",
+      "expected": 1,
+      "operator": "=="
+    }
+  ]
+}

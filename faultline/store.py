@@ -53,7 +53,7 @@ def database() -> Any:
 def initialize() -> None:
     pkg_scenarios = Path(__file__).resolve().parent / "scenarios"
     root_scenarios = ROOT / "scenarios"
-    scenario_files = sorted(pkg_scenarios.glob("*.json")) or sorted(root_scenarios.glob("*.json"))
+    scenario_files = (sorted(pkg_scenarios.glob("*.json")) + sorted((pkg_scenarios / "recipes").glob("*.json"))) or (sorted(root_scenarios.glob("*.json")) + sorted((root_scenarios / "recipes").glob("*.json")))
     with database() as db:
         db.executescript(
             """
@@ -485,39 +485,45 @@ def create_target(target_id: str, project_id: str, config: dict[str, Any]) -> No
 
 
 def get_target(target_id: str) -> dict[str, Any] | None:
-    with database() as db:
-        row = db.execute("SELECT * FROM target_applications WHERE id=?", (target_id,)).fetchone()
-        if not row:
-            return None
-        return {
-            "id": row["id"],
-            "project_id": row["project_id"],
-            "name": row["name"],
-            "description": row["description"],
-            "config": json.loads(row["config_json"]),
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-        }
+    try:
+        with database() as db:
+            row = db.execute("SELECT * FROM target_applications WHERE id=?", (target_id,)).fetchone()
+            if not row:
+                return None
+            return {
+                "id": row["id"],
+                "project_id": row["project_id"],
+                "name": row["name"],
+                "description": row["description"],
+                "config": json.loads(row["config_json"]),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+    except sqlite3.OperationalError:
+        return None
 
 
 def list_targets(project_id: str = "faultline-demo") -> list[dict[str, Any]]:
-    with database() as db:
-        rows = db.execute(
-            "SELECT * FROM target_applications WHERE project_id=? ORDER BY created_at ASC",
-            (project_id,),
-        ).fetchall()
-        return [
-            {
-                "id": r["id"],
-                "project_id": r["project_id"],
-                "name": r["name"],
-                "description": r["description"],
-                "config": json.loads(r["config_json"]),
-                "created_at": r["created_at"],
-                "updated_at": r["updated_at"],
-            }
-            for r in rows
-        ]
+    try:
+        with database() as db:
+            rows = db.execute(
+                "SELECT * FROM target_applications WHERE project_id=? ORDER BY created_at ASC",
+                (project_id,),
+            ).fetchall()
+            return [
+                {
+                    "id": r["id"],
+                    "project_id": r["project_id"],
+                    "name": r["name"],
+                    "description": r["description"],
+                    "config": json.loads(r["config_json"]),
+                    "created_at": r["created_at"],
+                    "updated_at": r["updated_at"],
+                }
+                for r in rows
+            ]
+    except sqlite3.OperationalError:
+        return []
 
 
 def update_target(target_id: str, config: dict[str, Any]) -> bool:

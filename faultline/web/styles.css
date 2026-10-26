@@ -1618,3 +1618,189 @@ body {
   .metrics-ribbon { grid-template-columns: 1fr; }
   .control-room-hero { flex-direction: column; align-items: flex-start; }
 }
+
+/* =========================================================
+   TARGET PICKER & TARGET APPLICATIONS (REAL SYSTEMS)
+   ========================================================= */
+.target-picker-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+}
+.target-picker-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--ink-400);
+}
+.target-select-dropdown {
+  border: none;
+  background: transparent;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-800);
+  outline: none;
+  cursor: pointer;
+  max-width: 220px;
+}
+.target-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ink-300);
+  flex-shrink: 0;
+}
+.target-status-dot.connected {
+  background: var(--emerald-500);
+  box-shadow: 0 0 0 2px var(--emerald-100);
+}
+.target-status-dot.managed {
+  background: var(--indigo-500);
+  box-shadow: 0 0 0 2px var(--indigo-100);
+}
+.target-status-dot.offline {
+  background: var(--crimson-500);
+  box-shadow: 0 0 0 2px var(--crimson-100);
+}
+
+.target-app-card {
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: var(--transition);
+  box-shadow: var(--shadow-xs);
+}
+.target-app-card:hover {
+  border-color: var(--border-medium);
+  box-shadow: var(--shadow-sm);
+}
+.target-app-card.active-target {
+  border-color: var(--amber-500);
+  background: linear-gradient(to bottom, #fffdfa, var(--surface-card));
+}
+.target-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+.target-card-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink-900);
+  margin: 0 0 2px 0;
+}
+.target-id-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-400);
+}
+.target-mode-pill {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+.target-mode-pill.connect {
+  background: var(--emerald-50);
+  color: var(--emerald-700);
+  border: 1px solid var(--emerald-100);
+}
+.target-mode-pill.managed {
+  background: var(--indigo-50);
+  color: var(--indigo-700);
+  border: 1px solid var(--indigo-100);
+}
+.target-meta-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+  background: var(--surface-subtle);
+  padding: 10px;
+  border-radius: var(--radius-sm);
+}
+.target-meta-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.target-meta-label {
+  color: var(--ink-400);
+  font-weight: 500;
+}
+.target-meta-val {
+  font-family: var(--font-mono);
+  color: var(--ink-800);
+  word-break: break-all;
+}
+.target-card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* =========================================================
+   INDEPENDENT OBSERVATION & DECLARATIVE ASSERTIONS
+   ========================================================= */
+.observation-results-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+}
+.observation-subcard {
+  background: var(--surface-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.observation-subcard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.sql-query-block {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--ink-900);
+  color: #38bdf8;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.assertion-diff-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  margin-top: 4px;
+}
+.operator-badge {
+  background: var(--ink-100);
+  color: var(--ink-700);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 700;
+}
+

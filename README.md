@@ -43,7 +43,8 @@
 
 ### Architecture & Infrastructure Note
 - **Core Engine:** Built purely with Python 3.10+ standard library and SQLite WAL mode. Background tasks execute asynchronously via in-process threads, requiring zero third-party dependencies.
-- **Sidecar Infrastructure (Docker Compose):** Redis and Shopify Toxiproxy containers are provided as optional demonstration infrastructure. The core engine executes runs asynchronously via in-process threads and deterministic application-level adapters to guarantee reproducible outcomes without requiring external daemons.
+- **Real Execution vs. Simulated Adapters:** Faultline executes real HTTP requests over live sockets with strict TLS verification, loopback protection, and response evidence capture for network operations (e.g. `http_timeout`, webhook deliveries, and HTTP checkout calls). For operations requiring internal state checkpoints (such as checkout persistence failures and generic database steps), deterministic application-level adapters simulate faults with explicit labeling (`DB_OPERATION_SIMULATED`).
+- **Sidecar Infrastructure (Docker Compose):** Redis and Shopify Toxiproxy containers are provided as optional demonstration infrastructure. The core engine executes runs asynchronously via in-process threads and deterministic adapters to guarantee reproducible outcomes without requiring external daemons.
 
 ---
 
@@ -238,6 +239,7 @@ A runnable reference demo is available at [`examples/checkout_demo.py`](examples
 | `GET` | `/api/projects/:projectId/tasks` | List defect action tasks |
 | **Scenarios & Templates** | | |
 | `GET` | `/api/scenarios` | List registered failure scenarios |
+| `GET` | `/api/scenarios/supported-faults` | List supported faults, schema metadata, and execution pipelines |
 | `POST` | `/api/scenarios` | Register a new scenario definition |
 | `POST` | `/api/scenarios/validate` | Validate scenario syntax and invariant rules |
 | `POST` | `/api/scenarios/import-incident` | Import production incident JSON into a reproducible scenario |
@@ -284,7 +286,7 @@ A runnable reference demo is available at [`examples/checkout_demo.py`](examples
 
 ## Automated Verification & CI Results
 
-The repository includes a comprehensive automated test suite with **68 automated tests passing** across unit, platform, CLI, and SDK test files:
+The repository includes a comprehensive automated test suite with **95 automated tests and 5 subtests passing** across unit, platform, CLI, and SDK test files:
 
 ```sh
 # Run full automated test suite
@@ -292,13 +294,13 @@ python -m unittest discover -s tests -v
 
 # Run syntax compilation and JavaScript validation checks
 python -m compileall -q faultline tests examples
-node --check faultline/web/app.js
+node --check faultline/web/app.js faultline/web/api.js
 ```
 
 ### GitHub Actions CI Workflow
 The CI pipeline (`.github/workflows/ci.yml`) runs on every push and pull request:
 1. Python bytecode compilation (`compileall`) and client JavaScript validation (`node --check`).
-2. Complete unit, platform, and SDK test suite execution (70+ passing tests).
+2. Complete unit, platform, and SDK test suite execution (95+ passing tests and subtests).
 3. Live platform daemon startup.
 4. Critical Integrations regression suite execution with JUnit XML report generation.
 5. Automated defect benchmark execution verifying 100% detection rate.

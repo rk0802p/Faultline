@@ -199,6 +199,15 @@ def initialize() -> None:
                 attributes_json TEXT NOT NULL DEFAULT '{}',
                 events_json TEXT NOT NULL DEFAULT '[]'
             );
+            CREATE TABLE IF NOT EXISTS target_applications (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id),
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                config_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         run_columns = {row["name"] for row in db.execute("PRAGMA table_info(runs)")}
@@ -219,6 +228,63 @@ def initialize() -> None:
         db.execute(
             "INSERT OR IGNORE INTO projects VALUES (?, ?, ?, ?)",
             ("faultline-demo", "Checkout reliability lab", "Local, isolated checkout integration environment.", now()),
+        )
+        from . import adapters
+        default_target_config = {
+            "id": "checkout-demo",
+            "name": "E-Commerce Checkout & Payment Demo",
+            "description": "Seeded demo application testing checkout resilience against payment dependency failures.",
+            "project_id": "faultline-demo",
+            "mode": "connect",
+            "base_url": f"http://127.0.0.1:{adapters.CHECKOUT_PORT}",
+            "health_endpoint": "/v1/health",
+            "health_timeout_seconds": 2.0,
+            "services": [
+                {
+                    "id": "checkout-service",
+                    "name": "Checkout Application Service",
+                    "base_url": f"http://127.0.0.1:{adapters.CHECKOUT_PORT}",
+                    "health_endpoint": "/v1/health",
+                    "role": "application_under_test",
+                    "dependencies": ["payment-provider"],
+                },
+                {
+                    "id": "payment-provider",
+                    "name": "Test Payment Provider & Fault Adapter",
+                    "base_url": f"http://127.0.0.1:{adapters.PAYMENT_PORT}",
+                    "health_endpoint": "/v1/health",
+                    "role": "simulated_dependency",
+                    "dependencies": [],
+                },
+            ],
+            "dependencies": [],
+            "permitted_faults": [
+                "http_timeout",
+                "payment_response_lost_after_commit",
+                "duplicate_payment_webhook",
+                "persistence_failure_after_payment",
+            ],
+            "metadata": {"seeded": True},
+        }
+        db.execute(
+            """
+            INSERT INTO target_applications (id, project_id, name, description, config_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                config_json = excluded.config_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                "checkout-demo",
+                "faultline-demo",
+                default_target_config["name"],
+                default_target_config["description"],
+                json.dumps(default_target_config),
+                now(),
+                now(),
+            ),
         )
         for scenario_file in scenario_files:
             definition = json.loads(scenario_file.read_text(encoding="utf-8"))
@@ -390,6 +456,95 @@ def default_project_id() -> str:
     with database() as db:
         row = db.execute("SELECT id FROM projects ORDER BY created_at LIMIT 1").fetchone()
         return row["id"] if row else "faultline-demo"
+
+
+def create_target(target_id: str, project_id: str, config: dict[str, Any]) -> None:
+    created = now()
+    with database() as db:
+        db.execute(
+            """
+            INSERT INTO target_applications (id, project_id, name, description, config_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                config_json = excluded.config_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                target_id,
+                project_id,
+                config.get("name", target_id),
+                config.get("description", ""),
+                json.dumps(config),
+                created,
+                created,
+            ),
+        )
+
+
+def get_target(target_id: str) -> dict[str, Any] | None:
+    with database() as db:
+        row = db.execute("SELECT * FROM target_applications WHERE id=?", (target_id,)).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "name": row["name"],
+            "description": row["description"],
+            "config": json.loads(row["config_json"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+
+def list_targets(project_id: str = "faultline-demo") -> list[dict[str, Any]]:
+    with database() as db:
+        rows = db.execute(
+            "SELECT * FROM target_applications WHERE project_id=? ORDER BY created_at ASC",
+            (project_id,),
+        ).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "project_id": r["project_id"],
+                "name": r["name"],
+                "description": r["description"],
+                "config": json.loads(r["config_json"]),
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        ]
+
+
+def update_target(target_id: str, config: dict[str, Any]) -> bool:
+    with database() as db:
+        row = db.execute("SELECT id FROM target_applications WHERE id=?", (target_id,)).fetchone()
+        if not row:
+            return False
+        db.execute(
+            """
+            UPDATE target_applications
+            SET name=?, description=?, config_json=?, updated_at=?
+            WHERE id=?
+            """,
+            (
+                config.get("name", target_id),
+                config.get("description", ""),
+                json.dumps(config),
+                now(),
+                target_id,
+            ),
+        )
+        return True
+
+
+def delete_target(target_id: str) -> bool:
+    with database() as db:
+        res = db.execute("DELETE FROM target_applications WHERE id=?", (target_id,))
+        return res.rowcount > 0
 
 
 def list_scenarios() -> list[dict[str, Any]]:

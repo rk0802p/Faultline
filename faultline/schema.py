@@ -5,7 +5,10 @@ extensible definition of supported faults, primary invariants, and parameter sch
 Supports both domain-agnostic generic workflows and pluggable integration packs.
 """
 
+import re
 from typing import Any, Callable
+
+TARGET_ID_REGEX = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
 
 from .security import validate_max_response_bytes
 
@@ -147,9 +150,23 @@ def validate_scenario(definition: dict[str, Any]) -> None:
     if type(definition.get("scenario_version")) is not int or definition["scenario_version"] != 1:
         raise ValueError("unsupported scenario_version: must be integer 1")
 
+
+
+
     fault = definition.get("fault")
     if not fault_schema_registry.is_registered(fault):
         raise ValueError(f"unsupported fault type: '{fault}'. Supported: {sorted(list(fault_schema_registry.all_faults().keys()))}")
+
+    target_id = definition.get("target_id")
+    if target_id is not None:
+        if not isinstance(target_id, str) or not TARGET_ID_REGEX.match(target_id):
+            raise ValueError(f"invalid target_id: '{target_id}'")
+        from .targets import target_registry
+        target = target_registry.get(target_id)
+        if target is not None and fault not in target.permitted_faults:
+            raise ValueError(
+                f"fault '{fault}' is not permitted by target application '{target_id}' (permitted: {sorted(target.permitted_faults)})"
+            )
 
     workflow = definition.get("workflow")
     target_step = definition.get("target_step")

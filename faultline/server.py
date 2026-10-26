@@ -128,6 +128,26 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             scenario_id = path.split("/")[3]
             versions = store.scenario_versions(scenario_id)
             self.respond(200, {"versions": versions}) if versions else self.respond(404, {"error": "scenario not found"})
+        elif path == "/api/targets":
+            from .targets import target_registry
+            self.respond(200, {"targets": [t.to_dict() for t in target_registry.list()]})
+        elif re.fullmatch(r"/api/targets/[^/]+/health", path):
+            from .targets import target_registry
+            target_id = path.split("/")[3]
+            try:
+                self.respond(200, target_registry.check_health(target_id))
+            except ValueError as exc:
+                self.respond(404, {"error": str(exc)})
+            except Exception as exc:
+                self.respond(500, {"error": str(exc)})
+        elif re.fullmatch(r"/api/targets/[^/]+", path):
+            from .targets import target_registry
+            target_id = path.split("/")[3]
+            target = target_registry.get(target_id)
+            if target:
+                self.respond(200, {"target": target.to_dict()})
+            else:
+                self.respond(404, {"error": "target not found"})
         elif path in {"/api/scenarios/supported-faults", "/api/schema/faults"}:
             self.respond(200, {"faults": SUPPORTED_FAULTS, "workflow_steps": sorted(list(VALID_WORKFLOW_STEPS))})
         elif re.fullmatch(r"/api/scenarios/[^/]+", path):
@@ -220,6 +240,9 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             and not re.fullmatch(r"/api/suites/[^/]+/scenarios", path)
             and not re.fullmatch(r"/api/projects/[^/]+/prune", path)
             and not re.fullmatch(r"/api/projects/[^/]+/suites", path)
+            and not re.fullmatch(r"/api/targets/[^/]+/start", path)
+            and not re.fullmatch(r"/api/targets/[^/]+/stop", path)
+            and path != "/api/targets"
         ):
             self.respond(404, {"error": "not found"})
             return
@@ -227,6 +250,33 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
         if payload is None:
             return
         try:
+            if path == "/api/targets":
+                from .targets import target_registry
+                target = target_registry.register(payload)
+                self.respond(201, {"target": target.to_dict()})
+                return
+            target_start_match = re.fullmatch(r"/api/targets/([^/]+)/start", path)
+            if target_start_match:
+                from .targets import target_registry
+                target_id = target_start_match.group(1)
+                timeout = float(payload.get("timeout", 10.0))
+                try:
+                    res = target_registry.start_managed(target_id, timeout=timeout)
+                    self.respond(200, res)
+                except ValueError as exc:
+                    self.respond(404, {"error": str(exc)})
+                except TimeoutError as exc:
+                    self.respond(504, {"error": str(exc)})
+                except Exception as exc:
+                    self.respond(500, {"error": str(exc)})
+                return
+            target_stop_match = re.fullmatch(r"/api/targets/([^/]+)/stop", path)
+            if target_stop_match:
+                from .targets import target_registry
+                target_id = target_stop_match.group(1)
+                stopped = target_registry.stop_managed(target_id)
+                self.respond(200, {"stopped": stopped})
+                return
             cancel_match = re.fullmatch(r"/api/runs/([^/]+)/cancel", path)
             if cancel_match:
                 run_id = cancel_match.group(1)
@@ -517,6 +567,42 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
         except (ValueError, TypeError) as exc:
             self.respond(400, {"error": str(exc)})
 
+    def do_PUT(self) -> None:
+        path = urlparse(self.path).path
+        target_match = re.fullmatch(r"/api/targets/([^/]+)", path)
+        if target_match:
+            from .targets import target_registry, validate_target_config
+            target_id = target_match.group(1)
+            payload = self.read_json_payload()
+            if payload is None:
+                return
+            try:
+                payload["id"] = target_id
+                validated = validate_target_config(payload)
+                success = store.update_target(target_id, validated.to_dict())
+                if success:
+                    self.respond(200, {"target": validated.to_dict()})
+                else:
+                    self.respond(404, {"error": "target not found"})
+            except ValueError as exc:
+                self.respond(400, {"error": str(exc)})
+            return
+        self.respond(404, {"error": "not found"})
+
+    def do_DELETE(self) -> None:
+        path = urlparse(self.path).path
+        target_match = re.fullmatch(r"/api/targets/([^/]+)", path)
+        if target_match:
+            from .targets import target_registry
+            target_id = target_match.group(1)
+            deleted = target_registry.delete(target_id)
+            if deleted:
+                self.respond(200, {"deleted": True, "target_id": target_id})
+            else:
+                self.respond(404, {"error": "target not found"})
+            return
+        self.respond(404, {"error": "not found"})
+
     def static_file(self, filename: str, content_type: str) -> None:
         try:
             raw = (WEB_ROOT / filename).read_bytes()
@@ -570,6 +656,8 @@ def main() -> int:
         for local_service in local_services:
             local_service.shutdown()
             local_service.server_close()
+        from .targets import target_registry
+        target_registry.stop_all_managed()
     return 0
 
 

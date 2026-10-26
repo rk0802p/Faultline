@@ -177,6 +177,22 @@ SAFE_RESPONSE_HEADERS = {"content-type", "content-length", "server", "location",
 
 def _resolve_http_endpoint(step: dict[str, Any]) -> tuple[str, str, int, str]:
     """Resolves scheme, host, port, path from step definition or defaults to local checkout service."""
+    target_base_url = step.get("target_base_url")
+    if target_base_url and not (step.get("url") or step.get("endpoint")):
+        parsed = urlparse(target_base_url)
+        scheme = (parsed.scheme or "http").lower()
+        if scheme not in {"http", "https"}:
+            raise ValueError(f"unsupported scheme '{scheme}', only http and https are allowed")
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or (443 if scheme == "https" else 80)
+        path = step.get("path") or "/health"
+        if not path.startswith("/"):
+            path = f"/{path}"
+        if parsed.query:
+            sep = "&" if "?" in path else "?"
+            path = f"{path}{sep}{parsed.query}"
+        return scheme, host, port, path
+
     url = step.get("url") or step.get("endpoint")
     if url:
         parsed = urlparse(url)
@@ -1067,6 +1083,18 @@ def _execute_generic_workflow(
     target_step = scenario.get("target_step")
     fault_config = scenario.get("fault_config") or {}
 
+    target_id = scenario.get("target_id")
+    target = None
+    if target_id:
+        from .targets import target_registry
+        target = target_registry.get(target_id)
+        if target is None:
+            raise ValueError(f"configured target application '{target_id}' not found")
+        if fault_type not in target.permitted_faults:
+            raise ValueError(
+                f"fault '{fault_type}' is not permitted by target application '{target_id}' (permitted: {target.permitted_faults})"
+            )
+
     executed_steps = []
     side_effects = []
     fault_injected = False
@@ -1100,6 +1128,8 @@ def _execute_generic_workflow(
         is_fault_target = (target_step == step_id) or (target_step is None and idx == 0)
 
         effective_step = dict(step)
+        if target:
+            effective_step.setdefault("target_base_url", target.base_url)
         if "max_response_bytes" not in effective_step and "max_response_bytes" in scenario:
             effective_step["max_response_bytes"] = scenario["max_response_bytes"]
 

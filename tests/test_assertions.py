@@ -22,7 +22,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from faultline import assertions, engine, schema, store
-from faultline.assertions import DeclarativeAssertionEngine, compare
+from faultline.assertions import DeclarativeAssertionEngine, compare, declarative_engine
 from faultline.targets import TargetConfig, target_registry
 
 
@@ -439,6 +439,146 @@ class DeclarativeAssertionTests(unittest.TestCase):
         self.assertEqual(assert_map.get("http_response_seat_is_5a"), "passed")
 
         target_registry.delete(target_id)
+
+    def test_declarative_assertion_target_db_resolution(self) -> None:
+        """Verify declarative assertions resolve target sqlite_path automatically without explicit db_path."""
+        target_id = f"target-autodb-{uuid4().hex[:6]}"
+        target_cfg = TargetConfig(
+            id=target_id,
+            name="Target with SQLite",
+            base_url="http://127.0.0.1:8999",
+            permitted_faults=["http_timeout"],
+            observation_config={"sqlite_path": str(self.db_path)},
+        )
+        target_registry.register(target_cfg)
+        self.assertEqual(target_cfg.sqlite_path, str(self.db_path))
+
+        conn = sqlite3.connect(str(self.db_path))
+        with conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS seat_reservations (seat TEXT PRIMARY KEY, status TEXT, attempts INTEGER, created_at TEXT)")
+            conn.execute("INSERT OR REPLACE INTO seat_reservations VALUES ('7B', 'CONFIRMED', 1, datetime('now'))")
+        conn.close()
+
+        spec = {
+            "name": "auto_resolved_db_seat",
+            "type": "database_sql",
+            "target_id": target_id,
+            "query": "SELECT count(*) FROM seat_reservations WHERE seat = '7B' AND status = 'CONFIRMED'",
+            "operator": "==",
+            "expected": "1",
+        }
+        res = declarative_engine.evaluate(spec, {"target_id": target_id})
+        self.assertEqual(res["status"], "passed", f"Assertion failed: {res}")
+        self.assertIn("db_assert:auto_resolved_db_seat", res["evidence"])
+
+        idem_spec = {
+            "name": "auto_resolved_idem",
+            "type": "idempotency",
+            "target_id": target_id,
+            "table": "seat_reservations",
+            "key_column": "seat",
+            "key_value": "7B",
+            "expected": 1,
+        }
+        idem_res = declarative_engine.evaluate(idem_spec, {"target_id": target_id})
+        self.assertEqual(idem_res["status"], "passed", f"Idempotency failed: {idem_res}")
+        target_registry.delete(target_id)
+
+    def test_declarative_operator_coercion_and_http_aliases(self) -> None:
+        """Verify loose comparison, aliases, and expected status without status_code key."""
+        passed, _, _ = compare("=", 10, "10")
+        self.assertTrue(passed)
+        passed, _, _ = compare("==", "20", 20)
+        self.assertTrue(passed)
+        passed, _, _ = compare("!=", 10, "10")
+        self.assertFalse(passed)
+
+        http_spec = {
+            "name": "status_check",
+            "type": "http_status",
+            "step_id": "step_1",
+            "expected": 200,
+        }
+        res = declarative_engine.evaluate(http_spec, {
+            "side_effects": [
+                {"step_id": "step_1", "status": 200, "elapsed_seconds": 0.05}
+            ]
+        })
+        self.assertEqual(res["status"], "passed")
+
+    def test_http_rest_verbs_execution_and_registration(self) -> None:
+        """Verify that engine supports http.put, http.delete, and http.patch verbs."""
+        received_methods = []
+
+        class RestEchoHandler(BaseHTTPRequestHandler):
+            def do_PUT(self):
+                received_methods.append("PUT")
+                self.send_response(200)
+                self.end_headers()
+            def do_DELETE(self):
+                received_methods.append("DELETE")
+                self.send_response(204)
+                self.end_headers()
+            def do_PATCH(self):
+                received_methods.append("PATCH")
+                self.send_response(200)
+                self.end_headers()
+            def log_message(self, *args):
+                pass
+
+        rest_server = ThreadingHTTPServer(("127.0.0.1", 0), RestEchoHandler)
+        port = rest_server.server_address[1]
+        t = threading.Thread(target=rest_server.serve_forever, daemon=True)
+        t.start()
+        self._servers_to_close.append(rest_server)
+
+        sc_def = {
+            "name": "test-verbs",
+            "scenario_version": 1,
+            "fault": "http_timeout",
+            "assertion": "all_steps_succeeded_or_handled",
+        }
+        store.create_scenario("test-verbs", "faultline-demo", sc_def)
+
+        run_id = str(uuid4())
+        store.create_run(run_id, "test-verbs", 1, "fixed")
+
+        ok, res = engine._execute_http_step(
+            run_id=run_id,
+            step={"id": "s_put", "type": "http.put", "url": f"http://127.0.0.1:{port}/resource"},
+            inject_fault=False,
+            fault_type="none",
+            implementation="fixed",
+            trace_id="trace123",
+            root_span_id="span123",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(res["status"], 200)
+
+        ok, res = engine._execute_http_step(
+            run_id=run_id,
+            step={"id": "s_del", "type": "http.delete", "url": f"http://127.0.0.1:{port}/resource"},
+            inject_fault=False,
+            fault_type="none",
+            implementation="fixed",
+            trace_id="trace123",
+            root_span_id="span123",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(res["status"], 204)
+
+        ok, res = engine._execute_http_step(
+            run_id=run_id,
+            step={"id": "s_patch", "type": "http.patch", "url": f"http://127.0.0.1:{port}/resource"},
+            inject_fault=False,
+            fault_type="none",
+            implementation="fixed",
+            trace_id="trace123",
+            root_span_id="span123",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(res["status"], 200)
+        self.assertEqual(received_methods, ["PUT", "DELETE", "PATCH"])
 
 
 if __name__ == "__main__":

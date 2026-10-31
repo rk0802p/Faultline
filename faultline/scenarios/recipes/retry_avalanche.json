@@ -15,14 +15,14 @@
       "id": "health_probe",
       "type": "http.get",
       "config": {
-        "url": "http://127.0.0.1:9000/health"
+        "path": "/health"
       }
     },
     {
       "id": "book_delayed",
       "type": "http.post",
       "config": {
-        "url": "http://127.0.0.1:9000/book",
+        "path": "/book",
         "headers": {
           "Content-Type": "application/json",
           "X-Idempotency-Key": "rec-aval-001"
